@@ -1,40 +1,44 @@
 ---
-title: Welcome to Starlight
-description: Get started building your docs site with Starlight.
-template: splash # Remove or comment out this line to display the site sidebar on this page.
+title: Danube Messaging
+description: A lightweight, cloud-native messaging platform built in Rust.
+template: splash
 hero:
-  tagline: Congrats on setting up a new Starlight project!
+  tagline: Reliable pub/sub and streaming without the operational overhead. Built in Rust.
   image:
-    file: ../../assets/houston.webp
+    file: ../../assets/Danube_Logo_with_name_small.png
   actions:
-    - text: Example Guide
+    - text: Get Started
       link: /guides/example/
       icon: right-arrow
-    - text: Read the Starlight docs
-      link: https://starlight.astro.build
+    - text: View on GitHub
+      link: https://github.com/danube-messaging/danube
       icon: external
       variant: minimal
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Next steps
+## Why Danube?
+
+Danube is an open-source messaging platform built for teams that need reliable pub/sub and streaming without the operational overhead. Built on Tokio and openraft, metadata is replicated through embedded Raft consensus, eliminating the need to deploy or manage ZooKeeper. 
 
 <CardGrid stagger>
-	<Card title="Update content" icon="pencil">
-		Edit `src/content/docs/index.mdx` to see this page change.
+	<Card title="Built in Rust" icon="rocket">
+		High performance, memory safety, and a lightweight footprint.
 	</Card>
-	<Card title="Change page layout" icon="document">
-		Delete `template: splash` in `src/content/docs/index.mdx` to display a
-		sidebar on this page.
+	<Card title="Zero Dependencies" icon="puzzle">
+		Embedded Raft consensus means no ZooKeeper or external metadata stores.
 	</Card>
-	<Card title="Add new content" icon="add-document">
-		Add Markdown or MDX files to `src/content/docs` to create new pages.
+	<Card title="Three Deployment Modes" icon="setting">
+		Run as a **Standalone** broker for dev, a **Cluster** for production, or at the **Edge** for IoT MQTT ingestion.
 	</Card>
-	<Card title="Configure your site" icon="setting">
-		Edit your `sidebar` and other config in `astro.config.mjs`.
+	<Card title="Multi-Language Clients" icon="laptop">
+		First-class support and libraries for **Rust, Go, Java, and Python**.
 	</Card>
-	<Card title="Read the docs" icon="open-book">
-		Learn more in [the Starlight Docs](https://starlight.astro.build/).
+	<Card title="Schema Registry" icon="document">
+		Built-in JSON Schema, Avro, and Protobuf validation and compatibility enforcement.
+	</Card>
+	<Card title="AI Admin" icon="magnifier">
+		Manage your cluster natively with natural language via MCP integration.
 	</Card>
 </CardGrid>
