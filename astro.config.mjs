@@ -6,31 +6,30 @@ import cloudflare from '@astrojs/cloudflare';
 
 // https://astro.build/config
 export default defineConfig({
-  integrations: [
-      starlight({
-          title: 'My Docs',
-          social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/withastro/starlight' }],
-          sidebar: [
-              {
-                  label: 'Guides',
-                  items: [
-                      // Each item here is one entry in the navigation menu.
-                      { label: 'Example Guide', slug: 'guides/example' },
-                  ],
-              },
-              {
-                  label: 'Reference',
-                  items: [{ autogenerate: { directory: 'reference' } }],
-              },
-          ],
-      }),
-	],
+    integrations: [
+        starlight({
+            title: 'Danube Messaging',
+            logo: {
+                src: './src/assets/Danube_Logo_no_color.png',
+            },
+            social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/danube-messaging/danube' }],
+            sidebar: [
+                {
+                    label: 'Guides',
+                    items: [
+                        // Each item here is one entry in the navigation menu.
+                        { label: 'Example Guide', slug: 'guides/example' },
+                    ],
+                },
+                {
+                    label: 'Reference',
+                    items: [{ autogenerate: { directory: 'reference' } }],
+                },
+            ],
+        }),
+    ],
 
-  adapter: cloudflare({
-      platformProxy: {
-          enabled: true
-      },
-
-      imageService: "cloudflare"
-  }),
+    adapter: cloudflare({
+        imageService: 'compile',
+    }),
 });
