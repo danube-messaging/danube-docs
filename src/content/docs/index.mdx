@@ -3,7 +3,7 @@ title: Danube Messaging
 description: A lightweight, cloud-native messaging platform built in Rust.
 template: splash
 hero:
-  tagline: Reliable pub/sub and streaming without the operational overhead. Built in Rust.
+  tagline: "Open-source, cloud-native messaging platform built in Rust. Built on Tokio and embedded Raft consensus, so there are no external dependencies to deploy. Run standalone for dev, scale to a cluster, or deploy at the edge for IoT."
   image:
     dark: ../../assets/Danube_black_square.png
     light: ../../assets/Danube_white_square.png
@@ -17,29 +17,146 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Try Danube
+
+Download the latest binary from the [releases page](https://github.com/danube-messaging/danube/releases) or pull the [container image](https://github.com/danube-messaging/danube/pkgs/container/danube-broker).
+
+<Tabs>
+	<TabItem label="Standalone">
+		Start a single broker with zero configuration:
+
+		```bash
+		danube-broker --mode standalone --data-dir ./danube-data
+		```
+
+		Broker ready on `127.0.0.1:6650`, admin on `127.0.0.1:50051`.
+
+		Test with the CLI:
+
+		```bash
+		# Terminal 1: produce
+		danube-cli produce -s http://127.0.0.1:6650 -t /default/demo -c 10 -m "Hello, Danube!"
+
+		# Terminal 2: consume
+		danube-cli consume -s http://127.0.0.1:6650 -t /default/demo -m my_sub
+		```
+	</TabItem>
+	<TabItem label="Docker">
+		Run a single broker in a container:
+
+		```bash
+		docker run -p 6650:6650 -p 50051:50051 \
+		  ghcr.io/danube-messaging/danube-broker:latest \
+		  --mode standalone --data-dir /data
+		```
+
+		Or start a 3-node cluster with Docker Compose:
+
+		```bash
+		git clone https://github.com/danube-messaging/danube.git
+		cd danube/docker/quickstart
+		docker-compose up -d
+		```
+
+		Test with the CLI container:
+
+		```bash
+		docker exec danube-cli danube-cli produce \
+		  --service-addr http://broker1:6650 \
+		  --topic "/default/test" --count 10 --message "Hello Danube!"
+		```
+	</TabItem>
+	<TabItem label="Cluster">
+		Deploy a multi-node cluster with Raft consensus:
+
+		```bash
+		danube-broker --config-file danube_broker.yml \
+		  --broker-addr 0.0.0.0:6650 --raft-addr 0.0.0.0:7650 \
+		  --data-dir ./data/raft \
+		  --seed-nodes "node1:7650,node2:7650,node3:7650"
+		```
+
+		Or use Docker Compose with monitoring:
+
+		```bash
+		cd danube/docker/quickstart
+		docker-compose up -d   # 3 brokers + Prometheus
+		```
+
+		Check cluster health:
+
+		```bash
+		danube-admin brokers list
+		danube-admin brokers balance
+		```
+	</TabItem>
+	<TabItem label="Edge (IoT)">
+		Deploy an MQTT gateway at the edge that replicates to your central cluster:
+
+		```bash
+		danube-broker --mode edge --data-dir ./edge-data --edge-config edge.yaml
+		```
+
+		IoT devices publish via standard MQTT (v3.1.1/v5.0). The edge broker validates payloads against schemas, buffers messages into a local WAL that survives network outages, and continuously replicates to your central cluster over gRPC.
+	</TabItem>
+</Tabs>
 
 ## Why Danube?
 
-Danube is an open-source messaging platform built for teams that need reliable pub/sub and streaming without the operational overhead. Built on Tokio and openraft, metadata is replicated through embedded Raft consensus, eliminating the need to deploy or manage ZooKeeper. 
-
 <CardGrid stagger>
-	<Card title="Built in Rust" icon="rocket">
-		High performance, memory safety, and a lightweight footprint.
+	<Card title="One Binary" icon="setting">
+		Run as **Standalone** for development, **Cluster** for production, or **Edge** for IoT ingestion, all from the same `danube-broker` binary with no external dependencies.
 	</Card>
-	<Card title="Zero Dependencies" icon="puzzle">
-		Embedded Raft consensus means no ZooKeeper or external metadata stores.
+	<Card title="Pub/Sub & Streaming" icon="rocket">
+		Publish to topics, consume via named subscriptions. Use best-effort dispatch for fire-and-forget real-time workloads, or persistent dispatch with WAL-backed at-least-once delivery, acknowledgments, and dead-letter queues.
 	</Card>
-	<Card title="Three Deployment Modes" icon="setting">
-		Run as a **Standalone** broker for dev, a **Cluster** for production, or at the **Edge** for IoT MQTT ingestion.
+	<Card title="Resilient Clusters" icon="approve-check">
+		Embedded Raft consensus with automatic leader election, failover, and topic reconciliation on restart. Intelligent load management monitors broker health and rebalances topics to prevent hotspots. Scale horizontally with zero downtime.
 	</Card>
-	<Card title="Multi-Language Clients" icon="laptop">
-		First-class support and libraries for **Rust, Go, Java, and Python**.
+	<Card title="Cloud-Native Storage" icon="open-book">
+		Local WAL for fast writes with background export to S3, GCS, or Azure Blob via OpenDAL. Tiered reads serve from cache when possible, falling back to durable segments. Topics move between brokers without data loss.
 	</Card>
 	<Card title="Schema Registry" icon="document">
-		Built-in JSON Schema, Avro, and Protobuf validation and compatibility enforcement.
+		Built-in schema management with JSON Schema, Avro, and Protobuf. Version control with backward, forward, and full compatibility enforcement, no separate registry service to deploy.
 	</Card>
-	<Card title="AI Admin" icon="magnifier">
-		Manage your cluster natively with natural language via MCP integration.
+	<Card title="AI-Native Admin" icon="star">
+		Manage your cluster with natural language via the Model Context Protocol. 40+ tools and guided workflows for health checks, schema evolution, and rebalancing through Claude, Cursor, or any MCP-compatible assistant.
 	</Card>
 </CardGrid>
+
+## Explore
+
+<CardGrid>
+	<LinkCard
+		title="Subscription Models"
+		description="Exclusive, Shared, Failover, and Key-Shared with per-key ordering via consistent hashing and glob filters."
+		href="https://github.com/danube-messaging/danube"
+	/>
+	<LinkCard
+		title="Edge & IoT"
+		description="MQTT v3.1.1/v5.0 gateway with schema validation at the edge, WAL-buffered replication to the central cluster."
+		href="https://github.com/danube-messaging/danube"
+	/>
+	<LinkCard
+		title="Security"
+		description="TLS/mTLS encryption, JWT authentication, and fine-grained RBAC with default-deny semantics."
+		href="https://github.com/danube-messaging/danube"
+	/>
+	<LinkCard
+		title="Danube Connect"
+		description="Plug-and-play connector ecosystem: MQTT, HTTP webhooks, Delta Lake, Qdrant, SurrealDB, and more."
+		href="https://github.com/danube-messaging/danube-connectors"
+	/>
+</CardGrid>
+
+## Client Libraries
+
+**Rust** · [crates.io](https://crates.io/crates/danube-client) · [examples](https://github.com/danube-messaging/danube/tree/main/danube-client/examples)
+&nbsp;&nbsp;|&nbsp;&nbsp;
+**Go** · [pkg.go.dev](https://pkg.go.dev/github.com/danube-messaging/danube-go) · [examples](https://github.com/danube-messaging/danube-go/tree/main/examples)
+&nbsp;&nbsp;|&nbsp;&nbsp;
+**Java** · [Maven Central](https://central.sonatype.com/namespace/com.danube-messaging) · [examples](https://github.com/danube-messaging/danube-java/tree/main/examples)
+&nbsp;&nbsp;|&nbsp;&nbsp;
+**Python** · [PyPI](https://pypi.org/project/danube-client/) · [examples](https://github.com/danube-messaging/danube-py/tree/main/examples)
