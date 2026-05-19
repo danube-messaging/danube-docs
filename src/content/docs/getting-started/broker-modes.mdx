@@ -1,0 +1,235 @@
+---
+title: Broker Modes
+description: How to run Danube as Standalone, Cluster, or Edge from a single binary.
+---
+
+import { Tabs, TabItem, Steps, Card, CardGrid } from '@astrojs/starlight/components';
+
+Danube runs as a single binary (`danube-broker`) in one of three modes. The mode determines how the broker manages metadata, handles client traffic, and coordinates with other brokers.
+
+## At a Glance
+
+<CardGrid>
+	<Card title="Standalone" icon="laptop">
+		Single broker, zero config. Ideal for development, CI, and single-server deployments.
+
+		- **Brokers**: 1
+		- **Config**: none (zero-config)
+		- **Raft**: single-node, auto-init
+		- **Clients**: Danube gRPC
+	</Card>
+	<Card title="Cluster" icon="setting">
+		Multi-broker with Raft consensus, leader election, and load-based rebalancing. Recommended for production.
+
+		- **Brokers**: 3+ (recommended)
+		- **Config**: `danube_broker.yml`
+		- **Raft**: multi-node, auto-discovery
+		- **Clients**: Danube gRPC
+	</Card>
+	<Card title="Edge" icon="open-book">
+		Lightweight MQTT gateway for IoT ingestion with local WAL buffering and cluster replication.
+
+		- **Brokers**: 1 per site
+		- **Config**: `edge.yaml`
+		- **MQTT**: v3.1.1 / v5.0
+		- **Clients**: MQTT devices + Danube gRPC
+	</Card>
+</CardGrid>
+
+---
+
+## Standalone Mode
+
+The fastest way to get started: a single broker with no config file and no external dependencies.
+
+```bash title="Start standalone broker"
+danube-broker --mode standalone --data-dir ./danube-data
+```
+
+This auto-generates sensible defaults:
+
+| Setting | Default |
+|---------|---------|
+| Broker address | `127.0.0.1:6650` |
+| Admin address | `127.0.0.1:50051` |
+| Raft address | `127.0.0.1:7650` |
+| Storage mode | Local WAL |
+| Authentication | None |
+
+Override any default with CLI flags:
+
+```bash title="Override defaults"
+danube-broker --mode standalone \
+  --data-dir ./danube-data \
+  --broker-addr 0.0.0.0:6650 \
+  --admin-addr 0.0.0.0:50051
+```
+
+:::note
+Standalone mode supports the same client APIs (producers, consumers, schemas) as cluster mode, just without multi-broker orchestration. Ideal for local development, CI pipelines, and single-server deployments.
+:::
+
+Data persists across restarts in the data directory. To start fresh, remove it and restart the broker.
+
+---
+
+## Cluster Mode
+
+The recommended mode for production. Multiple brokers form a Raft consensus group, share metadata, and distribute topics across the cluster.
+
+### Requirements
+
+- A config file (`danube_broker.yml`)
+- At least 3 brokers for Raft quorum (recommended)
+- Network connectivity between broker Raft ports
+
+### Starting a Cluster
+
+Each broker needs the config file and unique port assignments. The `--seed-nodes` flag tells brokers how to discover each other:
+
+```bash title="Broker 1"
+danube-broker --config-file danube_broker.yml \
+  --broker-addr 0.0.0.0:6650 --admin-addr 0.0.0.0:50051 \
+  --raft-addr 0.0.0.0:7650 --data-dir ./data1/raft \
+  --seed-nodes "0.0.0.0:7650,0.0.0.0:7651,0.0.0.0:7652"
+```
+
+```bash title="Broker 2"
+danube-broker --config-file danube_broker.yml \
+  --broker-addr 0.0.0.0:6651 --admin-addr 0.0.0.0:50052 \
+  --raft-addr 0.0.0.0:7651 --data-dir ./data2/raft \
+  --seed-nodes "0.0.0.0:7650,0.0.0.0:7651,0.0.0.0:7652"
+```
+
+```bash title="Broker 3"
+danube-broker --config-file danube_broker.yml \
+  --broker-addr 0.0.0.0:6652 --admin-addr 0.0.0.0:50053 \
+  --raft-addr 0.0.0.0:7652 --data-dir ./data3/raft \
+  --seed-nodes "0.0.0.0:7650,0.0.0.0:7651,0.0.0.0:7652"
+```
+
+The broker with the lowest Raft node ID initializes the cluster; the others join automatically. No manual cluster setup is needed.
+
+### Cluster Features
+
+- **Leader election**: one broker is the Raft leader, metadata writes go through it
+- **Load manager**: topics are assigned to brokers based on configurable strategies (`fair`, `balanced`, `weighted_load`)
+- **Automated rebalancing**: optional proactive topic redistribution to maintain cluster balance
+- **Broker scaling**: add brokers at runtime with `--join` or `danube-admin cluster add-node`
+
+:::tip
+For step-by-step cluster deployment, see [Docker Compose](/getting-started/docker-compose/) or [Kubernetes](/getting-started/kubernetes/).
+:::
+
+### Configuration Reference
+
+The cluster config file (`danube_broker.yml`) controls broker ports, storage backend, authentication, load management, and policies. See the [sample config](https://github.com/danube-messaging/danube/blob/main/config/danube_broker.yml) for all available options.
+
+---
+
+## Edge Mode
+
+Edge mode turns the broker into a lightweight MQTT gateway that ingests data from IoT devices and replicates it to a central Danube cluster. Designed for constrained environments (factory floors, remote sites) where devices speak MQTT and need a local buffer that survives network outages.
+
+### How It Works
+
+<Steps>
+1. Devices publish via standard MQTT (v3.1.1 / v5.0)
+
+2. The edge broker routes messages to Danube topics via wildcard pattern matching
+
+3. Messages are batched and written to a local WAL
+
+4. A background replicator tail-reads the WAL and sends batches to the cluster
+
+5. If the cluster is unreachable, messages accumulate safely in the local WAL
+</Steps>
+
+### Requirements
+
+- A running Danube cluster (standalone or multi-broker) to replicate into
+- An edge config file (`edge.yaml`)
+
+### Starting an Edge Broker
+
+```bash title="Start edge broker"
+danube-broker --mode edge \
+  --data-dir ./edge-data \
+  --edge-config edge.yaml \
+  --broker-addr 0.0.0.0:6653 \
+  --admin-addr 0.0.0.0:50054 \
+  --raft-addr 0.0.0.0:7653
+```
+
+### Edge Configuration
+
+```yaml title="edge.yaml"
+edge:
+  edge_name: "edge1"
+  cluster_url: "http://cluster-broker:6650"
+  token: ""                    # optional auth token
+  heartbeat_interval_ms: 30000
+
+replicator:
+  batch_size: 100
+  batch_timeout_ms: 1000
+
+mqtt:
+  listener: "0.0.0.0:1883"
+
+  topic_mappings:
+    - mqtt_pattern: "device/+/telemetry"
+      danube_topic: "/edge1/telemetry"
+      schema_subject: "telemetry-events"
+      extract_attributes:
+        device_id: "$1"
+
+    - mqtt_pattern: "#"
+      danube_topic: "/edge1/raw"
+
+  ingestion:
+    batch_size: 100
+    batch_timeout_ms: 500
+```
+
+### Key Concepts
+
+- **Namespace isolation**: all Danube topics must be under `/{edge_name}/` (e.g., `/edge1/telemetry`)
+- **Topic mappings**: MQTT wildcards (`+`, `#`) map incoming messages to Danube topics; `extract_attributes` captures path segments as message attributes
+- **Schema enforcement**: if `schema_subject` is set, the edge pulls the schema from the cluster registry and validates payloads locally. Invalid messages are acknowledged but silently dropped
+- **WAL buffering**: messages survive edge broker restarts and network partitions; replication resumes from the last checkpoint
+
+### Testing with an MQTT Client
+
+```bash title="Publish via MQTT"
+mosquitto_pub -h 127.0.0.1 -p 1883 \
+  -t "device/sensor-1/telemetry" \
+  -m '{"temperature": 25.5, "device_id": "sensor-1"}'
+```
+
+The message flows through the edge WAL to the cluster, where standard Danube consumers can read it from `/edge1/telemetry`.
+
+---
+
+## CLI Reference
+
+```text title="danube-broker options"
+danube-broker [OPTIONS]
+
+Common options:
+  --mode <mode>          cluster (default), standalone, or edge
+  --broker-addr <addr>   gRPC listen address
+  --admin-addr <addr>    Admin API listen address
+  --raft-addr <addr>     Raft transport address
+  --data-dir <path>      Base data directory
+  --prom-exporter <addr> Prometheus metrics endpoint
+
+Cluster only:
+  --config-file <path>   Path to danube_broker.yml (required)
+  --seed-nodes <addrs>   Comma-separated Raft peer addresses
+  --join                 Join an existing cluster
+
+Edge only:
+  --edge-config <path>   Path to edge.yaml (required)
+  --edge-token <token>   Auth token override (optional)
+```

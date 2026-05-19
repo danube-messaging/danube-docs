@@ -1,0 +1,85 @@
+---
+title: Key Concepts
+description: Core terminology and mental model for understanding Danube Messaging.
+---
+
+This page introduces the key concepts you need to understand Danube. Each term links to a detailed documentation page where available.
+
+## Topics
+
+A **topic** is a named channel for publishing and consuming messages. Producers write to topics, consumers read from them. Topics can be:
+
+- **Non-partitioned**: a single logical stream managed by one broker.
+- **Partitioned**: split into multiple partitions distributed across brokers for parallel throughput.
+
+Topic names follow a hierarchical format: `/{namespace}/{topic-name}` (e.g., `/default/user-events`).
+
+## Namespaces
+
+A **namespace** is a logical grouping of topics. Every topic belongs to a namespace. Namespaces provide isolation for policies like rate limiting, max producers/consumers, and message size limits. The `default` namespace is created automatically.
+
+## Producers
+
+A **producer** is a client that publishes messages to a topic. Producers connect to the broker, specify a topic, and send messages. Each producer can optionally attach a schema for payload validation.
+
+## Consumers
+
+A **consumer** is a client that receives messages from a topic through a subscription. Consumers acknowledge processed messages (in persistent dispatch mode) and can NACK messages to trigger redelivery.
+
+## Subscriptions
+
+A **subscription** is a named configuration rule that determines how messages are delivered to consumers. Danube supports four types:
+
+| Type | Behavior |
+|------|----------|
+| **Exclusive** | Single consumer, guaranteed ordering. |
+| **Shared** | Round-robin load balancing across multiple consumers. |
+| **Failover** | Active/standby with automatic failover on disconnect. |
+| **Key-Shared** | Per-key ordering via consistent hashing with optional glob filters. |
+
+Multiple subscriptions on the same topic receive independent copies of every message (fan-out). Consumers within the same subscription share the message stream according to the subscription type.
+
+## Dispatch Strategies
+
+The **dispatch strategy** controls how messages flow from producers to consumers. It is configured per topic:
+
+| Strategy | Description |
+|----------|-------------|
+| **Best-effort** | Direct producer-to-consumer delivery with zero storage overhead. Messages in flight may be lost if a consumer disconnects. Ideal for real-time metrics and telemetry. |
+| **Persistent** | WAL-backed at-least-once delivery. Messages are durably stored, acknowledged by consumers, and retried on failure. Supports NACK, backoff policies, and dead-letter queues. |
+
+Both strategies can run side by side in the same cluster on different topics.
+
+## Broker Modes
+
+Danube runs as a single binary (`danube-broker`) in one of three modes:
+
+| Mode | Description |
+|------|-------------|
+| **Standalone** | Zero-config single broker for development and CI. |
+| **Cluster** | Multi-broker with Raft consensus, leader election, and automated load balancing. Recommended for production. |
+| **Edge** | MQTT gateway for IoT devices with local WAL buffering and cluster replication. |
+
+## Schema Registry
+
+The **schema registry** is built into the broker (no separate service). It manages schemas for message validation and supports:
+
+- **Types**: JSON Schema, Avro, Protobuf, plus simple String/Number/Bytes
+- **Versioning**: each schema subject tracks versions with timestamps
+- **Compatibility**: enforce backward, forward, or full compatibility between versions
+
+## WAL (Write-Ahead Log)
+
+The **WAL** is the local on-disk log where persistent topic messages are written before being dispatched to consumers. It provides:
+
+- Durable writes that survive broker restarts
+- Fast sequential I/O for high throughput
+- A replication source for edge-to-cluster data flow
+- Background export to cloud object storage (S3, GCS, Azure Blob)
+
+## Next Steps
+
+Now that you understand the terminology:
+
+- **[Quickstart](/getting-started/quickstart/)**: Start a broker and send your first message.
+- **[Broker Modes](/getting-started/broker-modes/)**: Detailed guide for each deployment mode.

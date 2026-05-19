@@ -1,0 +1,55 @@
+---
+title: What is Danube?
+description: An overview of Danube Messaging, its design principles, and what makes it different.
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Danube is an open-source messaging platform built in Rust for teams that need reliable pub/sub and streaming without the operational overhead. Built on [Tokio](https://tokio.rs/) and [openraft](https://github.com/databendlabs/openraft), metadata is replicated through embedded Raft consensus, so there are no external dependencies to deploy or manage.
+
+Producers publish to **topics**, consumers receive messages via named **subscriptions**. Choose best-effort dispatch for fire-and-forget workloads or persistent dispatch with at-least-once delivery per topic.
+
+## Design Principles
+
+<CardGrid>
+	<Card title="Zero Dependencies" icon="puzzle">
+		All cluster metadata is stored in an embedded Raft consensus engine (openraft + redb), built directly into the broker. One self-contained binary is all you deploy.
+	</Card>
+	<Card title="One Binary, Three Modes" icon="setting">
+		Run as **Standalone** for dev, **Cluster** for production, or **Edge** for IoT ingestion, all from the same `danube-broker` binary.
+	</Card>
+	<Card title="Rust-Native" icon="rocket">
+		Built on Tokio for async I/O. No JVM, no GC pauses, no warm-up time. Predictable latency with a memory footprint measured in megabytes.
+	</Card>
+	<Card title="Cloud-Native Storage" icon="open-book">
+		Local WAL for fast writes with background export to S3, GCS, or Azure Blob via OpenDAL. Topics move between brokers without data loss.
+	</Card>
+</CardGrid>
+
+## Core Capabilities
+
+- **Message Delivery**: Topics (partitioned and non-partitioned), best-effort and persistent dispatch with NACK, retry backoff, and dead-letter queues.
+- **Subscriptions**: Exclusive, Shared, Failover, and Key-Shared with per-key ordering via consistent hashing and glob-pattern key filtering.
+- **Persistence**: Local WAL for fast writes, durable segments on shared filesystems or object stores (S3, GCS, Azure). Tiered replay across restarts and broker transfers.
+- **Schema Registry**: Built-in schema management with JSON Schema, Avro, and Protobuf. Version control with backward, forward, and full compatibility enforcement.
+- **Security**: TLS/mTLS encryption, JWT and API-key authentication, fine-grained RBAC with default-deny semantics.
+- **AI Administration**: MCP integration for natural language cluster management via Claude, Cursor, and Windsurf. 40+ tools covering topics, schemas, brokers, diagnostics, and metrics.
+- **Danube Connect**: Plug-and-play connector ecosystem with source connectors (MQTT, HTTP webhooks, databases) and sink connectors (Delta Lake, Qdrant, SurrealDB).
+
+## Client Libraries
+
+Danube provides first-class client libraries for four languages:
+
+| Language | Package | Repository |
+|----------|---------|------------|
+| **Rust** | [danube-client](https://crates.io/crates/danube-client) | [GitHub](https://github.com/danube-messaging/danube/tree/main/danube-client) |
+| **Go** | [danube-go](https://pkg.go.dev/github.com/danube-messaging/danube-go) | [GitHub](https://github.com/danube-messaging/danube-go) |
+| **Java** | [danube-java](https://central.sonatype.com/namespace/com.danube-messaging) | [GitHub](https://github.com/danube-messaging/danube-java) |
+| **Python** | [danube-client](https://pypi.org/project/danube-client/) | [GitHub](https://github.com/danube-messaging/danube-py) |
+
+## Next Steps
+
+<CardGrid>
+	<LinkCard title="Key Concepts" description="Topics, subscriptions, dispatch strategies, and namespaces." href="/introduction/key-concepts/" />
+	<LinkCard title="Quickstart" description="Start a broker and send your first message in under a minute." href="/getting-started/quickstart/" />
+</CardGrid>

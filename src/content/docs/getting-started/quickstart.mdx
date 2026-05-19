@@ -1,0 +1,218 @@
+---
+title: Quickstart
+description: Start a Danube broker and send your first message in under a minute.
+---
+
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide gets you from zero to producing and consuming messages in under a minute.
+
+## Prerequisites
+
+Download the latest `danube-broker` and `danube-cli` binaries from the [releases page](https://github.com/danube-messaging/danube/releases), or pull the [container image](https://github.com/danube-messaging/danube/pkgs/container/danube-broker).
+
+<Tabs>
+<TabItem label="Binary">
+
+<Steps>
+1. **Start the broker**
+
+   ```bash title="Terminal 1"
+   danube-broker --mode standalone --data-dir ./danube-data
+   ```
+
+   Broker ready on `127.0.0.1:6650`, admin on `127.0.0.1:50051`. No config file needed.
+
+2. **Produce messages**
+
+   ```bash title="Terminal 2"
+   danube-cli produce \
+     -s http://127.0.0.1:6650 \
+     -t /default/quickstart \
+     -c 10 \
+     -m "Hello, Danube!"
+   ```
+
+3. **Consume messages**
+
+   ```bash title="Terminal 3"
+   danube-cli consume \
+     -s http://127.0.0.1:6650 \
+     -t /default/quickstart \
+     -m my-subscription
+   ```
+
+   You should see the 10 messages arrive at the consumer.
+</Steps>
+
+</TabItem>
+<TabItem label="Docker">
+
+<Steps>
+1. **Start the broker**
+
+   ```bash title="Terminal 1"
+   docker run -p 6650:6650 -p 50051:50051 \
+     ghcr.io/danube-messaging/danube-broker:latest \
+     --mode standalone --data-dir /data
+   ```
+
+2. **Produce messages**
+
+   ```bash title="Terminal 2"
+   danube-cli produce \
+     -s http://127.0.0.1:6650 \
+     -t /default/quickstart \
+     -c 10 \
+     -m "Hello, Danube!"
+   ```
+
+3. **Consume messages**
+
+   ```bash title="Terminal 3"
+   danube-cli consume \
+     -s http://127.0.0.1:6650 \
+     -t /default/quickstart \
+     -m my-subscription
+   ```
+</Steps>
+
+</TabItem>
+</Tabs>
+
+:::tip
+Data persists across restarts in the `./danube-data` directory. To start fresh, remove it and restart the broker.
+:::
+
+## What Just Happened?
+
+1. The broker started in **standalone mode**, a single-node setup with zero configuration.
+2. `danube-cli produce` created a topic `/default/quickstart` and published 10 messages.
+3. `danube-cli consume` created a subscription `my-subscription` and received the messages via best-effort dispatch.
+
+## Try With a Client Library
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="examples/quickstart.rs"
+use danube_client::{DanubeClient, SubType};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = DanubeClient::builder()
+        .service_url("http://127.0.0.1:6650")
+        .build()?;
+
+    // Producer
+    let mut producer = client
+        .new_producer()
+        .with_topic("/default/quickstart")
+        .with_name("my-producer")
+        .build();
+    producer.create().await?;
+    producer.send("Hello from Rust!".into(), None).await?;
+
+    // Consumer
+    let mut consumer = client
+        .new_consumer()
+        .with_topic("/default/quickstart")
+        .with_consumer_name("my-consumer")
+        .with_subscription("my-sub")
+        .with_subscription_type(SubType::Exclusive)
+        .build();
+    consumer.subscribe().await?;
+
+    if let Some(message) = consumer.receive().await? {
+        println!("Received: {:?}", String::from_utf8(message.payload)?);
+        consumer.ack(&message).await?;
+    }
+
+    Ok(())
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="examples/quickstart.go"
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    danube "github.com/danube-messaging/danube-go"
+)
+
+func main() {
+    client, _ := danube.NewClient().
+        ServiceURL("http://127.0.0.1:6650").
+        Build()
+
+    ctx := context.Background()
+
+    // Producer
+    producer, _ := client.NewProducer(ctx).
+        WithTopic("/default/quickstart").
+        WithName("my-producer").
+        Build()
+    producer.Send(ctx, []byte("Hello from Go!"), nil)
+
+    // Consumer
+    consumer, _ := client.NewConsumer(ctx).
+        WithTopic("/default/quickstart").
+        WithConsumerName("my-consumer").
+        WithSubscription("my-sub").
+        WithSubscriptionType(danube.Exclusive).
+        Build()
+    consumer.Subscribe(ctx)
+
+    msg, _ := consumer.Receive(ctx)
+    fmt.Println("Received:", string(msg.Payload))
+    consumer.Ack(ctx, msg)
+}
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="examples/quickstart.py"
+import asyncio
+from danube import DanubeClient, SubType
+
+async def main():
+    client = DanubeClient(service_url="http://127.0.0.1:6650")
+
+    # Producer
+    producer = client.new_producer(
+        topic="/default/quickstart",
+        producer_name="my-producer",
+    )
+    await producer.create()
+    await producer.send(b"Hello from Python!")
+
+    # Consumer
+    consumer = client.new_consumer(
+        topic="/default/quickstart",
+        consumer_name="my-consumer",
+        subscription="my-sub",
+        sub_type=SubType.Exclusive,
+    )
+    await consumer.subscribe()
+
+    message = await consumer.receive()
+    print(f"Received: {message.payload.decode()}")
+    await consumer.ack(message)
+
+asyncio.run(main())
+```
+
+</TabItem>
+</Tabs>
+
+## Next Steps
+
+- **[Broker Modes](/getting-started/broker-modes/)**: Learn about Standalone, Cluster, and Edge modes.
+- **[Topics & Partitions](/concepts/topics/)**: Understand how messages are organized.
+- **[Subscriptions](/concepts/subscriptions/)**: Explore Exclusive, Shared, Failover, and Key-Shared patterns.

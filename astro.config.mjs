@@ -15,15 +15,21 @@ export default defineConfig({
             social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/danube-messaging/danube' }],
             sidebar: [
                 {
-                    label: 'Guides',
+                    label: 'Introduction',
                     items: [
-                        // Each item here is one entry in the navigation menu.
-                        { label: 'Example Guide', slug: 'guides/example' },
+                        { label: 'What is Danube?', slug: 'introduction/what-is-danube' },
+                        { label: 'Key Concepts', slug: 'introduction/key-concepts' },
                     ],
                 },
                 {
-                    label: 'Reference',
-                    items: [{ autogenerate: { directory: 'reference' } }],
+                    label: 'Getting Started',
+                    items: [
+                        { label: 'Quickstart', slug: 'getting-started/quickstart' },
+                        { label: 'Broker Modes', slug: 'getting-started/broker-modes' },
+                        { label: 'Run Locally', slug: 'getting-started/local' },
+                        { label: 'Docker Compose', slug: 'getting-started/docker-compose' },
+                        { label: 'Kubernetes', slug: 'getting-started/kubernetes' },
+                    ],
                 },
             ],
         }),
