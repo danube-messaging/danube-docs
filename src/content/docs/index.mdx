@@ -25,51 +25,29 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 
 <Tabs>
 	<TabItem label="Standalone">
-		Start a single broker with zero configuration:
+		Start a broker and test with the CLI:
 
 		```bash
+		# Start the broker
 		danube-broker --mode standalone --data-dir ./danube-data
-		```
 
-		Broker ready on `127.0.0.1:6650`, admin on `127.0.0.1:50051`.
-
-		Test with the CLI:
-
-		```bash
-		# Terminal 1: produce
+		# Produce messages
 		danube-cli produce -s http://127.0.0.1:6650 -t /default/demo -c 10 -m "Hello, Danube!"
 
-		# Terminal 2: consume
+		# Consume messages
 		danube-cli consume -s http://127.0.0.1:6650 -t /default/demo -m my_sub
 		```
-	</TabItem>
-	<TabItem label="Docker">
-		Run a single broker in a container:
+
+		Or run a single broker in a container:
 
 		```bash
 		docker run -p 6650:6650 -p 50051:50051 \
 		  ghcr.io/danube-messaging/danube-broker:latest \
 		  --mode standalone --data-dir /data
 		```
-
-		Or start a 3-node cluster with Docker Compose:
-
-		```bash
-		git clone https://github.com/danube-messaging/danube.git
-		cd danube/docker/quickstart
-		docker-compose up -d
-		```
-
-		Test with the CLI container:
-
-		```bash
-		docker exec danube-cli danube-cli produce \
-		  --service-addr http://broker1:6650 \
-		  --topic "/default/test" --count 10 --message "Hello Danube!"
-		```
 	</TabItem>
 	<TabItem label="Cluster">
-		Deploy a multi-node cluster with Raft consensus:
+		Run the following command on each of your 3 nodes to form a Raft consensus cluster:
 
 		```bash
 		danube-broker --config-file danube_broker.yml \
@@ -78,11 +56,12 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 		  --seed-nodes "node1:7650,node2:7650,node3:7650"
 		```
 
-		Or use Docker Compose with monitoring:
+		Or use Docker Compose to start a 3-node cluster with Prometheus monitoring:
 
 		```bash
+		git clone https://github.com/danube-messaging/danube.git
 		cd danube/docker/quickstart
-		docker-compose up -d   # 3 brokers + Prometheus
+		docker-compose up -d
 		```
 
 		Check cluster health:
@@ -93,15 +72,15 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 		```
 	</TabItem>
 	<TabItem label="Edge (IoT)">
-		Deploy an MQTT gateway at the edge that replicates to your central cluster:
+		MQTT gateway for IoT devices at the edge. Validates payloads against schemas, buffers into a local WAL that survives outages, and replicates to your central cluster over gRPC.
 
 		```bash
 		danube-broker --mode edge --data-dir ./edge-data --edge-config edge.yaml
 		```
-
-		IoT devices publish via standard MQTT (v3.1.1/v5.0). The edge broker validates payloads against schemas, buffers messages into a local WAL that survives network outages, and continuously replicates to your central cluster over gRPC.
 	</TabItem>
 </Tabs>
+
+---
 
 ## Why Danube?
 
@@ -113,7 +92,7 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 		Publish to topics, consume via named subscriptions. Use best-effort dispatch for fire-and-forget real-time workloads, or persistent dispatch with WAL-backed at-least-once delivery, acknowledgments, and dead-letter queues.
 	</Card>
 	<Card title="Resilient Clusters" icon="approve-check">
-		Embedded Raft consensus with automatic leader election, failover, and topic reconciliation on restart. Intelligent load management monitors broker health and rebalances topics to prevent hotspots. Scale horizontally with zero downtime.
+		Embedded Raft consensus with automatic leader election, failover and topic reconciliation on restart. Intelligent load manager monitors broker health and rebalances topics to prevent hotspots. Scale horizontally with zero downtime.
 	</Card>
 	<Card title="Cloud-Native Storage" icon="open-book">
 		Local WAL for fast writes with background export to S3, GCS, or Azure Blob via OpenDAL. Tiered reads serve from cache when possible, falling back to durable segments. Topics move between brokers without data loss.
@@ -125,6 +104,8 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 		Manage your cluster with natural language via the Model Context Protocol. 40+ tools and guided workflows for health checks, schema evolution, and rebalancing through Claude, Cursor, or any MCP-compatible assistant.
 	</Card>
 </CardGrid>
+
+---
 
 ## Explore
 
@@ -150,6 +131,8 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 		href="https://github.com/danube-messaging/danube-connectors"
 	/>
 </CardGrid>
+
+---
 
 ## Client Libraries
 
