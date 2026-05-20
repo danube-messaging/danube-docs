@@ -3,7 +3,7 @@ title: Danube Messaging
 description: A lightweight, cloud-native messaging platform built in Rust.
 template: splash
 hero:
-  tagline: "Open-source, cloud-native messaging platform built in Rust. Built on Tokio and embedded Raft consensus, so there are no external dependencies to deploy. Run standalone for dev, scale to a cluster, or deploy at the edge for IoT."
+  tagline: "Open-source pub/sub and streaming platform built in Rust for reliable messaging without the operational overhead. One self-contained binary with embedded consensus, runs standalone for dev, scale to a cluster, or deploy at the edge."
   image:
     dark: ../../assets/Danube_black_square.png
     light: ../../assets/Danube_white_square.png
@@ -43,7 +43,8 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 		```bash
 		docker run -p 6650:6650 -p 50051:50051 \
 		  ghcr.io/danube-messaging/danube-broker:latest \
-		  --mode standalone --data-dir /data
+		  --mode standalone --data-dir /data \
+		  --broker-addr 0.0.0.0:6650 --admin-addr 0.0.0.0:50051
 		```
 	</TabItem>
 	<TabItem label="Cluster">

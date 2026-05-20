@@ -54,7 +54,8 @@ Download the latest `danube-broker` and `danube-cli` binaries from the [releases
    ```bash title="Terminal 1"
    docker run -p 6650:6650 -p 50051:50051 \
      ghcr.io/danube-messaging/danube-broker:latest \
-     --mode standalone --data-dir /data
+     --mode standalone --data-dir /data \
+     --broker-addr 0.0.0.0:6650 --admin-addr 0.0.0.0:50051
    ```
 
 2. **Produce messages**
@@ -99,19 +100,21 @@ Data persists across restarts in the `./danube-data` directory. To start fresh, 
 use danube_client::{DanubeClient, SubType};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = DanubeClient::builder()
         .service_url("http://127.0.0.1:6650")
-        .build()?;
+        .build()
+        .await?;
 
     // Producer
     let mut producer = client
         .new_producer()
         .with_topic("/default/quickstart")
         .with_name("my-producer")
-        .build();
+        .build()?;
+
     producer.create().await?;
-    producer.send("Hello from Rust!".into(), None).await?;
+    producer.send("Hello from Rust!".as_bytes().to_vec(), None).await?;
 
     // Consumer
     let mut consumer = client
@@ -120,11 +123,13 @@ async fn main() -> anyhow::Result<()> {
         .with_consumer_name("my-consumer")
         .with_subscription("my-sub")
         .with_subscription_type(SubType::Exclusive)
-        .build();
+        .build()?;
+
     consumer.subscribe().await?;
 
-    if let Some(message) = consumer.receive().await? {
-        println!("Received: {:?}", String::from_utf8(message.payload)?);
+    let mut stream = consumer.receive().await?;
+    while let Some(message) = stream.recv().await {
+        println!("Received: {}", String::from_utf8_lossy(&message.payload));
         consumer.ack(&message).await?;
     }
 
@@ -142,35 +147,113 @@ import (
     "context"
     "fmt"
     "log"
-    danube "github.com/danube-messaging/danube-go"
+
+    "github.com/danube-messaging/danube-go"
 )
 
 func main() {
-    client, _ := danube.NewClient().
-        ServiceURL("http://127.0.0.1:6650").
-        Build()
+    client, err := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
 
     ctx := context.Background()
 
     // Producer
-    producer, _ := client.NewProducer(ctx).
-        WithTopic("/default/quickstart").
+    producer, err := client.NewProducer().
         WithName("my-producer").
+        WithTopic("/default/quickstart").
         Build()
+    if err != nil {
+        log.Fatalf("Failed to build producer: %v", err)
+    }
+
+    if err := producer.Create(ctx); err != nil {
+        log.Fatalf("Failed to create producer: %v", err)
+    }
+
     producer.Send(ctx, []byte("Hello from Go!"), nil)
 
     // Consumer
-    consumer, _ := client.NewConsumer(ctx).
-        WithTopic("/default/quickstart").
+    consumer, err := client.NewConsumer().
         WithConsumerName("my-consumer").
+        WithTopic("/default/quickstart").
         WithSubscription("my-sub").
         WithSubscriptionType(danube.Exclusive).
         Build()
-    consumer.Subscribe(ctx)
+    if err != nil {
+        log.Fatalf("Failed to build consumer: %v", err)
+    }
 
-    msg, _ := consumer.Receive(ctx)
-    fmt.Println("Received:", string(msg.Payload))
-    consumer.Ack(ctx, msg)
+    if err := consumer.Subscribe(ctx); err != nil {
+        log.Fatalf("Failed to subscribe: %v", err)
+    }
+
+    stream, err := consumer.Receive(ctx)
+    if err != nil {
+        log.Fatalf("Failed to receive: %v", err)
+    }
+
+    for msg := range stream {
+        fmt.Printf("Received: %s\n", string(msg.GetPayload()))
+        consumer.Ack(ctx, msg)
+    }
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="examples/Quickstart.java"
+import com.danubemessaging.client.DanubeClient;
+import com.danubemessaging.client.Producer;
+import com.danubemessaging.client.Consumer;
+import com.danubemessaging.client.SubType;
+import com.danubemessaging.client.model.StreamMessage;
+import java.util.Map;
+import java.util.concurrent.Flow;
+
+public class Quickstart {
+    public static void main(String[] args) throws Exception {
+        DanubeClient client = DanubeClient.builder()
+                .serviceUrl("http://127.0.0.1:6650")
+                .build();
+
+        // Producer
+        Producer producer = client.newProducer()
+                .withTopic("/default/quickstart")
+                .withName("my-producer")
+                .build();
+
+        producer.create();
+        producer.send("Hello from Java!".getBytes(), Map.of());
+
+        // Consumer
+        Consumer consumer = client.newConsumer()
+                .withTopic("/default/quickstart")
+                .withConsumerName("my-consumer")
+                .withSubscription("my-sub")
+                .withSubscriptionType(SubType.EXCLUSIVE)
+                .build();
+
+        consumer.subscribe();
+
+        consumer.receive().subscribe(new Flow.Subscriber<>() {
+            @Override public void onSubscribe(Flow.Subscription s) { s.request(Long.MAX_VALUE); }
+
+            @Override
+            public void onNext(StreamMessage msg) {
+                System.out.println("Received: " + new String(msg.payload()));
+                consumer.ack(msg);
+            }
+
+            @Override public void onError(Throwable t) { t.printStackTrace(); }
+            @Override public void onComplete() {}
+        });
+
+        Thread.sleep(5000); // Wait for messages
+        client.close();
+    }
 }
 ```
 
@@ -179,31 +262,43 @@ func main() {
 
 ```python title="examples/quickstart.py"
 import asyncio
-from danube import DanubeClient, SubType
+from danube import DanubeClientBuilder, SubType
 
 async def main():
-    client = DanubeClient(service_url="http://127.0.0.1:6650")
+    client = await (
+        DanubeClientBuilder()
+        .service_url("http://127.0.0.1:6650")
+        .build()
+    )
 
     # Producer
-    producer = client.new_producer(
-        topic="/default/quickstart",
-        producer_name="my-producer",
+    producer = (
+        client.new_producer()
+        .with_topic("/default/quickstart")
+        .with_name("my-producer")
+        .build()
     )
+
     await producer.create()
-    await producer.send(b"Hello from Python!")
+    await producer.send("Hello from Python!".encode())
 
     # Consumer
-    consumer = client.new_consumer(
-        topic="/default/quickstart",
-        consumer_name="my-consumer",
-        subscription="my-sub",
-        sub_type=SubType.Exclusive,
+    consumer = (
+        client.new_consumer()
+        .with_topic("/default/quickstart")
+        .with_consumer_name("my-consumer")
+        .with_subscription("my-sub")
+        .with_subscription_type(SubType.EXCLUSIVE)
+        .build()
     )
+
     await consumer.subscribe()
 
-    message = await consumer.receive()
-    print(f"Received: {message.payload.decode()}")
-    await consumer.ack(message)
+    queue = await consumer.receive()
+    while True:
+        message = await queue.get()
+        print(f"Received: {message.payload.decode()}")
+        await consumer.ack(message)
 
 asyncio.run(main())
 ```
