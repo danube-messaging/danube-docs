@@ -1,0 +1,195 @@
+---
+title: Client Libraries
+description: Official Danube client libraries for Rust, Go, Java, and Python.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Danube provides official client libraries for four languages. All clients follow the same builder pattern and support the full feature set.
+
+## Supported Languages
+
+<Tabs>
+<TabItem label="Rust">
+
+Async client built on Tokio.
+
+```bash title="Install"
+cargo add danube-client
+```
+
+[Crate](https://crates.io/crates/danube-client) · [Examples](https://github.com/danube-messaging/danube/tree/main/danube-client/examples)
+
+</TabItem>
+<TabItem label="Go">
+
+Context-based client with gRPC transport.
+
+```bash title="Install"
+go get github.com/danube-messaging/danube-go
+```
+
+[pkg.go.dev](https://pkg.go.dev/github.com/danube-messaging/danube-go) · [Examples](https://github.com/danube-messaging/danube-go/tree/main/examples)
+
+</TabItem>
+<TabItem label="Java">
+
+Java 21+ with virtual threads and reactive `Flow.Publisher` API.
+
+```groovy title="Gradle"
+implementation 'com.danube-messaging:danube-client:0.4.0'
+```
+
+```xml title="Maven"
+<dependency>
+    <groupId>com.danube-messaging</groupId>
+    <artifactId>danube-client</artifactId>
+    <version>0.4.0</version>
+</dependency>
+```
+
+[Examples](https://github.com/danube-messaging/danube-java/tree/main/examples)
+
+</TabItem>
+<TabItem label="Python">
+
+Async client built on `asyncio` and `grpc.aio`.
+
+```bash title="Install"
+pip install danube-client
+```
+
+[Examples](https://github.com/danube-messaging/danube-py/tree/main/examples)
+
+</TabItem>
+</Tabs>
+
+---
+
+## Feature Matrix
+
+| Feature | Rust | Go | Java | Python |
+|---------|:----:|:--:|:----:|:------:|
+| Producers & Consumers | ✅ | ✅ | ✅ | ✅ |
+| Partitioned Topics | ✅ | ✅ | ✅ | ✅ |
+| Reliable Dispatch | ✅ | ✅ | ✅ | ✅ |
+| Exclusive Subscription | ✅ | ✅ | ✅ | ✅ |
+| Shared Subscription | ✅ | ✅ | ✅ | ✅ |
+| Failover Subscription | ✅ | ✅ | ✅ | ✅ |
+| Key-Shared Subscription | ✅ | ✅ | ✅ | ✅ |
+| JSON Schema | ✅ | ✅ | ✅ | ✅ |
+| Avro | ✅ | ✅ | ✅ | ✅ |
+| Protobuf | ✅ | ✅ | ✅ | ✅ |
+| TLS / mTLS | ✅ | ✅ | ✅ | ✅ |
+| JWT Authentication | ✅ | ✅ | ✅ | ✅ |
+
+---
+
+## API Pattern
+
+All four clients use the same builder pattern. The API surface is intentionally consistent across languages:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Pattern overview"
+// Client
+let client = DanubeClient::builder()
+    .service_url("http://127.0.0.1:6650")
+    .build()
+    .await?;
+
+// Producer
+let mut producer = client.new_producer()
+    .with_topic("/default/my-topic")
+    .with_name("my-producer")
+    .build()?;
+
+// Consumer
+let mut consumer = client.new_consumer()
+    .with_topic("/default/my-topic")
+    .with_consumer_name("my-consumer")
+    .with_subscription("my-sub")
+    .with_subscription_type(SubType::Exclusive)
+    .build()?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Pattern overview"
+// Client
+client, _ := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
+
+// Producer
+producer, _ := client.NewProducer().
+    WithTopic("/default/my-topic").
+    WithName("my-producer").
+    Build()
+
+// Consumer
+consumer, _ := client.NewConsumer().
+    WithTopic("/default/my-topic").
+    WithConsumerName("my-consumer").
+    WithSubscription("my-sub").
+    WithSubscriptionType(danube.Exclusive).
+    Build()
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Pattern overview"
+// Client
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("http://127.0.0.1:6650")
+        .build();
+
+// Producer
+Producer producer = client.newProducer()
+        .withTopic("/default/my-topic")
+        .withName("my-producer")
+        .build();
+
+// Consumer
+Consumer consumer = client.newConsumer()
+        .withTopic("/default/my-topic")
+        .withConsumerName("my-consumer")
+        .withSubscription("my-sub")
+        .withSubscriptionType(SubType.EXCLUSIVE)
+        .build();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Pattern overview"
+# Client
+client = await DanubeClientBuilder().service_url("http://127.0.0.1:6650").build()
+
+# Producer
+producer = client.new_producer() \
+    .with_topic("/default/my-topic") \
+    .with_name("my-producer") \
+    .build()
+
+# Consumer
+consumer = client.new_consumer() \
+    .with_topic("/default/my-topic") \
+    .with_consumer_name("my-consumer") \
+    .with_subscription("my-sub") \
+    .with_subscription_type(SubType.EXCLUSIVE) \
+    .build()
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+## Next Steps
+
+- **[Setup & Connection](/client-libraries/setup/)**: TLS, JWT authentication, token rotation
+- **[Producer Guide](/client-libraries/producer/)**: Sending messages, partitions, reliable dispatch
+- **[Consumer Guide](/client-libraries/consumer/)**: Receiving messages, ack/nack, subscription types
+- **[Schema Registry](/client-libraries/schema-registry/)**: Type-safe messaging with validation

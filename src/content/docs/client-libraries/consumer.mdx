@@ -1,0 +1,436 @@
+---
+title: Consumer Guide
+description: Receive messages, acknowledge processing, handle failures, and work with partitioned topics.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Consumers receive messages from Danube topics via subscriptions. This guide covers creating consumers, the message loop, acknowledgment, and negative acknowledgment.
+
+## Creating a Consumer
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Create a consumer"
+use danube_client::{DanubeClient, SubType};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = DanubeClient::builder()
+        .service_url("http://127.0.0.1:6650")
+        .build()
+        .await?;
+
+    let mut consumer = client
+        .new_consumer()
+        .with_topic("/default/my-topic")
+        .with_consumer_name("my-consumer")
+        .with_subscription("my-subscription")
+        .with_subscription_type(SubType::Exclusive)
+        .build()?;
+
+    consumer.subscribe().await?;
+
+    Ok(())
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Create a consumer"
+client, err := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
+if err != nil {
+    log.Fatalf("Failed to create client: %v", err)
+}
+
+ctx := context.Background()
+
+consumer, err := client.NewConsumer().
+    WithConsumerName("my-consumer").
+    WithTopic("/default/my-topic").
+    WithSubscription("my-subscription").
+    WithSubscriptionType(danube.Exclusive).
+    Build()
+if err != nil {
+    log.Fatalf("Failed to build consumer: %v", err)
+}
+
+if err := consumer.Subscribe(ctx); err != nil {
+    log.Fatalf("Failed to subscribe: %v", err)
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Create a consumer"
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("http://127.0.0.1:6650")
+        .build();
+
+Consumer consumer = client.newConsumer()
+        .withTopic("/default/my-topic")
+        .withConsumerName("my-consumer")
+        .withSubscription("my-subscription")
+        .withSubscriptionType(SubType.EXCLUSIVE)
+        .build();
+
+consumer.subscribe();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Create a consumer"
+client = await (
+    DanubeClientBuilder()
+    .service_url("http://127.0.0.1:6650")
+    .build()
+)
+
+consumer = (
+    client.new_consumer()
+    .with_topic("/default/my-topic")
+    .with_consumer_name("my-consumer")
+    .with_subscription("my-subscription")
+    .with_subscription_type(SubType.EXCLUSIVE)
+    .build()
+)
+
+await consumer.subscribe()
+```
+
+</TabItem>
+</Tabs>
+
+- **Consumer Name**: unique identifier for this consumer instance
+- **Subscription**: logical grouping of consumers (multiple consumers can share a subscription)
+- **Subscription Type**: controls message distribution. See [Subscriptions](/concepts/subscriptions/)
+
+---
+
+## Receiving Messages
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Message loop"
+consumer.subscribe().await?;
+
+let mut stream = consumer.receive().await?;
+
+while let Some(message) = stream.recv().await {
+    let payload = String::from_utf8_lossy(&message.payload);
+    println!("Received: {}", payload);
+
+    consumer.ack(&message).await?;
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Message loop"
+consumer.Subscribe(ctx)
+
+stream, err := consumer.Receive(ctx)
+if err != nil {
+    log.Fatalf("Failed to receive: %v", err)
+}
+
+for msg := range stream {
+    payload := string(msg.GetPayload())
+    fmt.Printf("Received: %s\n", payload)
+
+    consumer.Ack(ctx, msg)
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Message loop"
+consumer.subscribe();
+
+consumer.receive().subscribe(new Flow.Subscriber<>() {
+    @Override
+    public void onSubscribe(Flow.Subscription s) {
+        s.request(Long.MAX_VALUE);
+    }
+
+    @Override
+    public void onNext(StreamMessage msg) {
+        String payload = new String(msg.payload());
+        System.out.println("Received: " + payload);
+
+        consumer.ack(msg);
+    }
+
+    @Override public void onError(Throwable t) { t.printStackTrace(); }
+    @Override public void onComplete() {}
+});
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Message loop"
+await consumer.subscribe()
+
+queue = await consumer.receive()
+
+while True:
+    message = await queue.get()
+    payload = message.payload.decode()
+    print(f"Received: {payload}")
+
+    await consumer.ack(message)
+```
+
+</TabItem>
+</Tabs>
+
+:::tip
+Only acknowledge after successful processing. Unacknowledged messages are redelivered when using reliable dispatch.
+:::
+
+---
+
+## Accessing Message Fields
+
+Each message exposes payload, attributes, and metadata:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Message fields"
+while let Some(message) = stream.recv().await {
+    let payload = String::from_utf8_lossy(&message.payload);
+    println!("Payload: {}", payload);
+
+    if let Some(attributes) = &message.attributes {
+        for (key, value) in attributes {
+            println!("  {}: {}", key, value);
+        }
+    }
+
+    consumer.ack(&message).await?;
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Message fields"
+for msg := range stream {
+    fmt.Printf("Payload: %s\n", string(msg.GetPayload()))
+
+    for key, value := range msg.GetAttributes() {
+        fmt.Printf("  %s: %s\n", key, value)
+    }
+
+    consumer.Ack(ctx, msg)
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Message fields"
+// Inside onNext(StreamMessage msg):
+String payload = new String(msg.payload());
+System.out.println("Payload: " + payload);
+
+Map<String, String> attributes = msg.attributes();
+attributes.forEach((k, v) -> System.out.printf("  %s: %s%n", k, v));
+
+consumer.ack(msg);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Message fields"
+while True:
+    message = await queue.get()
+    print(f"Payload: {message.payload.decode()}")
+
+    await consumer.ack(message)
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+## Negative Acknowledgment (NACK)
+
+When a consumer cannot process a message, it can reject it with `nack()`. The broker schedules redelivery based on the subscription's failure policy.
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="NACK with retry"
+while let Some(message) = stream.recv().await {
+    match process(&message) {
+        Ok(_) => consumer.ack(&message).await?,
+        Err(e) => {
+            consumer.nack(
+                &message,
+                Some(1000),                           // retry after 1s minimum
+                Some(format!("processing failed: {}", e)),
+            ).await?;
+        }
+    }
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="NACK with retry"
+for msg := range stream {
+    if err := process(msg); err != nil {
+        consumer.Nack(ctx, msg, 1000, fmt.Sprintf("processing failed: %v", err))
+    } else {
+        consumer.Ack(ctx, msg)
+    }
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="NACK with retry"
+// Inside onNext(StreamMessage msg):
+try {
+    process(msg);
+    consumer.ack(msg);
+} catch (Exception e) {
+    consumer.nack(msg, 1000, "processing failed: " + e.getMessage());
+}
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="NACK with retry"
+while True:
+    message = await queue.get()
+    try:
+        process(message)
+        await consumer.ack(message)
+    except Exception as e:
+        await consumer.nack(message, delay_ms=1000, reason=f"failed: {e}")
+```
+
+</TabItem>
+</Tabs>
+
+**Parameters:**
+
+- **`delay_ms`** (optional): minimum delay before redelivery. The broker uses the larger of this value and the subscription's configured backoff delay
+- **`reason`** (optional): human-readable failure reason, attached to metrics and dead-letter metadata
+
+**What happens after NACK:** the broker applies the subscription's failure policy. If delivery attempts remain, the message is redelivered after the backoff delay. If `max_redelivery_count` is exceeded, the poison policy (`dead_letter`, `drop`, or `block`) takes effect. See [Dispatch Strategies](/concepts/dispatch-strategies/).
+
+---
+
+## Partitioned Topics
+
+When a topic has partitions, consumers automatically receive from all partitions. Use the parent topic name:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Partitioned consumer"
+// Topic has 3 partitions: my-topic-part-0, my-topic-part-1, my-topic-part-2
+let mut consumer = client
+    .new_consumer()
+    .with_topic("/default/my-topic")  // Parent topic name
+    .with_consumer_name("partition-consumer")
+    .with_subscription("partition-sub")
+    .with_subscription_type(SubType::Exclusive)
+    .build()?;
+
+consumer.subscribe().await?;
+
+// Automatically receives from all 3 partitions
+let mut stream = consumer.receive().await?;
+while let Some(message) = stream.recv().await {
+    consumer.ack(&message).await?;
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Partitioned consumer"
+consumer, _ := client.NewConsumer().
+    WithConsumerName("partition-consumer").
+    WithTopic("/default/my-topic").
+    WithSubscription("partition-sub").
+    WithSubscriptionType(danube.Exclusive).
+    Build()
+
+consumer.Subscribe(ctx)
+stream, _ := consumer.Receive(ctx)
+
+for msg := range stream {
+    consumer.Ack(ctx, msg)
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Partitioned consumer"
+Consumer consumer = client.newConsumer()
+        .withTopic("/default/my-topic")  // Parent topic name
+        .withConsumerName("partition-consumer")
+        .withSubscription("partition-sub")
+        .withSubscriptionType(SubType.EXCLUSIVE)
+        .build();
+
+consumer.subscribe();
+// Automatically receives from all partitions via Flow.Publisher
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Partitioned consumer"
+consumer = (
+    client.new_consumer()
+    .with_topic("/default/my-topic")  # Parent topic name
+    .with_consumer_name("partition-consumer")
+    .with_subscription("partition-sub")
+    .with_subscription_type(SubType.EXCLUSIVE)
+    .build()
+)
+
+await consumer.subscribe()
+queue = await consumer.receive()
+```
+
+</TabItem>
+</Tabs>
+
+- Client discovers all partitions automatically
+- Messages from all partitions are merged into a single stream
+- Ordering is preserved per-partition, not cross-partition
+
+---
+
+## Subscription Types Quick Reference
+
+| Type | Consumers | Ordering | Use Case |
+|------|-----------|----------|----------|
+| **Exclusive** | 1 | Guaranteed | Sequential workflows |
+| **Shared** | N (round-robin) | None | Parallel processing |
+| **Failover** | 1 active + standby | Guaranteed | HA with ordering |
+| **Key-Shared** | N (by routing key) | Per-key | Per-entity processing |
+
+For Key-Shared details (routing keys, key filtering, glob patterns), see [Subscriptions](/concepts/subscriptions/#key-shared).

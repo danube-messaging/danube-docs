@@ -1,0 +1,401 @@
+---
+title: Setup & Connection
+description: Connect, configure TLS, JWT authentication, and token rotation for Danube clients.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Basic Connection
+
+Connect to a Danube broker with a gRPC endpoint:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Basic connection"
+use danube_client::DanubeClient;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = DanubeClient::builder()
+        .service_url("http://127.0.0.1:6650")
+        .build()
+        .await?;
+
+    Ok(())
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Basic connection"
+import (
+    "log"
+
+    "github.com/danube-messaging/danube-go"
+)
+
+func main() {
+    client, err := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
+    if err != nil {
+        log.Fatalf("failed to create client: %v", err)
+    }
+    _ = client
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Basic connection"
+import com.danubemessaging.client.DanubeClient;
+
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("http://127.0.0.1:6650")
+        .build();
+
+// use client ...
+
+client.close();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Basic connection"
+import asyncio
+from danube import DanubeClientBuilder
+
+async def main():
+    client = await (
+        DanubeClientBuilder()
+        .service_url("http://127.0.0.1:6650")
+        .build()
+    )
+
+asyncio.run(main())
+```
+
+</TabItem>
+</Tabs>
+
+Endpoint format: `http://host:port` or `https://host:port` for TLS.
+
+---
+
+## TLS Configuration
+
+For secure production environments, enable TLS encryption:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="TLS with custom CA"
+use danube_client::DanubeClient;
+use rustls::crypto;
+use tokio::sync::OnceCell;
+
+static CRYPTO_PROVIDER: OnceCell<()> = OnceCell::const_new();
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    CRYPTO_PROVIDER.get_or_init(|| async {
+        let crypto_provider = crypto::ring::default_provider();
+        crypto_provider
+            .install_default()
+            .expect("Failed to install default CryptoProvider");
+    })
+    .await;
+
+    let client = DanubeClient::builder()
+        .service_url("https://127.0.0.1:6650")
+        .with_tls("./certs/ca-cert.pem")?
+        .build()
+        .await?;
+
+    Ok(())
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="TLS with custom CA"
+builder, err := danube.NewClient().
+    ServiceURL("127.0.0.1:6650").
+    WithTLS("./certs/ca-cert.pem")
+if err != nil {
+    log.Fatalf("failed to configure TLS: %v", err)
+}
+
+client, err := builder.Build()
+if err != nil {
+    log.Fatalf("failed to create client: %v", err)
+}
+```
+
+For mutual TLS (mTLS) with client certificates:
+
+```go title="mTLS"
+builder, err := danube.NewClient().
+    ServiceURL("127.0.0.1:6650").
+    WithMTLS("./certs/ca-cert.pem", "./certs/client-cert.pem", "./certs/client-key.pem")
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="TLS with custom CA"
+import java.nio.file.Path;
+
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("https://127.0.0.1:6650")
+        .withTls(Path.of("./certs/ca-cert.pem"))
+        .build();
+```
+
+For mutual TLS (mTLS):
+
+```java title="mTLS"
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("https://127.0.0.1:6650")
+        .withMutualTls(
+                Path.of("./certs/ca-cert.pem"),
+                Path.of("./certs/client-cert.pem"),
+                Path.of("./certs/client-key.pem"))
+        .build();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="TLS with custom CA"
+client = await (
+    DanubeClientBuilder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./certs/ca-cert.pem")
+    .build()
+)
+```
+
+For mutual TLS (mTLS):
+
+```python title="mTLS"
+client = await (
+    DanubeClientBuilder()
+    .service_url("https://127.0.0.1:6650")
+    .with_mtls(
+        "./certs/ca-cert.pem",
+        "./certs/client-cert.pem",
+        "./certs/client-key.pem",
+    )
+    .build()
+)
+```
+
+</TabItem>
+</Tabs>
+
+**Requirements:**
+
+- CA certificate file (PEM format)
+- HTTPS URL (`https://` instead of `http://`)
+- Broker must be configured with TLS enabled
+
+---
+
+## JWT Authentication
+
+When the broker runs with authentication enabled, all client requests must carry a valid JWT token. Tokens are created offline using `danube-admin`.
+
+### Creating a Token
+
+```bash title="Generate JWT tokens"
+# Create a service account token (default: 1-year TTL)
+danube-admin security tokens create \
+  --subject my-app \
+  --secret-key your-secret-key
+
+# Create a token with custom TTL and issuer
+danube-admin security tokens create \
+  --subject my-app \
+  --ttl 24h \
+  --issuer danube-auth \
+  --secret-key your-secret-key
+```
+
+The `secret_key` must match the broker's `jwt.secret_key` configuration.
+
+### Connecting with a Token
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="JWT authentication"
+let token = std::env::var("DANUBE_TOKEN")
+    .expect("DANUBE_TOKEN environment variable not set");
+
+let client = DanubeClient::builder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./certs/ca-cert.pem")?
+    .with_token(&token)
+    .build()
+    .await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="JWT authentication"
+token := os.Getenv("DANUBE_TOKEN")
+
+// WithToken automatically enables TLS with system CA roots
+client, err := danube.NewClient().
+    ServiceURL("127.0.0.1:6650").
+    WithToken(token).
+    Build()
+```
+
+To combine with a custom CA certificate:
+
+```go title="JWT + custom CA"
+builder, _ := danube.NewClient().
+    ServiceURL("127.0.0.1:6650").
+    WithTLS("./certs/ca-cert.pem")
+
+client, _ := builder.WithToken(token).Build()
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="JWT authentication"
+String token = System.getenv("DANUBE_TOKEN");
+
+// withToken automatically enables TLS
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("https://127.0.0.1:6650")
+        .withToken(token)
+        .build();
+```
+
+To combine with a custom CA certificate:
+
+```java title="JWT + custom CA"
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("https://127.0.0.1:6650")
+        .withTls(Path.of("./certs/ca-cert.pem"))
+        .withToken(token)
+        .build();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="JWT authentication"
+import os
+
+token = os.environ["DANUBE_TOKEN"]
+
+# with_token automatically enables TLS with system CA roots
+client = await (
+    DanubeClientBuilder()
+    .service_url("https://127.0.0.1:6650")
+    .with_token(token)
+    .build()
+)
+```
+
+To combine with a custom CA certificate:
+
+```python title="JWT + custom CA"
+client = await (
+    DanubeClientBuilder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./certs/ca-cert.pem")
+    .with_token(token)
+    .build()
+)
+```
+
+</TabItem>
+</Tabs>
+
+**How it works:**
+
+1. Token is created offline using `danube-admin security tokens create`
+2. Client sends the token as `Authorization: Bearer <token>` on every gRPC request
+3. Broker validates the token signature and expiration, then checks RBAC policies
+
+:::tip
+Store tokens in environment variables or secret managers. Never hardcode tokens in source code.
+:::
+
+---
+
+## Token Rotation
+
+For environments where tokens refresh at runtime (Kubernetes projected volumes, vault-injected secrets), use `with_token_supplier`. The supplier function is called on every gRPC request:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Token rotation"
+let client = DanubeClient::builder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./certs/ca-cert.pem")?
+    .with_token_supplier(|| {
+        std::fs::read_to_string("/var/run/secrets/danube/token")
+            .unwrap_or_default()
+    })
+    .build()
+    .await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Token rotation"
+client, _ := danube.NewClient().
+    ServiceURL("127.0.0.1:6650").
+    WithTLS("./certs/ca-cert.pem").
+    WithTokenSupplier(func() string {
+        data, _ := os.ReadFile("/var/run/secrets/danube/token")
+        return string(data)
+    }).
+    Build()
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Token rotation"
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("https://127.0.0.1:6650")
+        .withTls(Path.of("./certs/ca-cert.pem"))
+        .withTokenSupplier(() ->
+            Files.readString(Path.of("/var/run/secrets/danube/token")).strip()
+        )
+        .build();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Token rotation"
+def read_token():
+    with open("/var/run/secrets/danube/token") as f:
+        return f.read().strip()
+
+client = await (
+    DanubeClientBuilder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./certs/ca-cert.pem")
+    .with_token_supplier(read_token)
+    .build()
+)
+```
+
+</TabItem>
+</Tabs>

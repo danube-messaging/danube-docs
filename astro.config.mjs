@@ -10,7 +10,7 @@ export default defineConfig({
         starlight({
             title: 'Danube Messaging',
             logo: {
-                src: './src/assets/Danube_Logo_no_color.png',
+                src: './src/assets/Danube_black_square.png',
             },
             social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/danube-messaging/danube' }],
             sidebar: [
@@ -40,6 +40,17 @@ export default defineConfig({
                         { label: 'Messages & Schemas', slug: 'concepts/messages' },
                         { label: 'Persistence & Storage', slug: 'concepts/persistence' },
                         { label: 'Scaling the Cluster', slug: 'concepts/scaling' },
+                    ],
+                },
+                {
+                    label: 'Client Libraries',
+                    items: [
+                        { label: 'Overview', slug: 'client-libraries/overview' },
+                        { label: 'Setup & Connection', slug: 'client-libraries/setup' },
+                        { label: 'Producer Guide', slug: 'client-libraries/producer' },
+                        { label: 'Consumer Guide', slug: 'client-libraries/consumer' },
+                        { label: 'Key-Shared Subscriptions', slug: 'client-libraries/key-shared' },
+                        { label: 'Schema Registry', slug: 'client-libraries/schema-registry' },
                     ],
                 },
             ],

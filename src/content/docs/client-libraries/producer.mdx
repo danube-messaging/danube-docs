@@ -1,0 +1,428 @@
+---
+title: Producer Guide
+description: Send messages to Danube topics, with partitions, reliable dispatch, and schema integration.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Producers send messages to Danube topics. This guide covers creating producers, sending messages, partitions, and reliable dispatch.
+
+## Creating a Producer
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Create a producer"
+use danube_client::DanubeClient;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = DanubeClient::builder()
+        .service_url("http://127.0.0.1:6650")
+        .build()
+        .await?;
+
+    let mut producer = client
+        .new_producer()
+        .with_topic("/default/my-topic")
+        .with_name("my-producer")
+        .build()?;
+
+    producer.create().await?;
+
+    Ok(())
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Create a producer"
+client, err := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
+if err != nil {
+    log.Fatalf("Failed to create client: %v", err)
+}
+
+ctx := context.Background()
+
+producer, err := client.NewProducer().
+    WithName("my-producer").
+    WithTopic("/default/my-topic").
+    Build()
+if err != nil {
+    log.Fatalf("Failed to build producer: %v", err)
+}
+
+if err := producer.Create(ctx); err != nil {
+    log.Fatalf("Failed to create producer: %v", err)
+}
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Create a producer"
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("http://127.0.0.1:6650")
+        .build();
+
+Producer producer = client.newProducer()
+        .withTopic("/default/my-topic")
+        .withName("my-producer")
+        .build();
+
+producer.create();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Create a producer"
+client = await (
+    DanubeClientBuilder()
+    .service_url("http://127.0.0.1:6650")
+    .build()
+)
+
+producer = (
+    client.new_producer()
+    .with_topic("/default/my-topic")
+    .with_name("my-producer")
+    .build()
+)
+
+await producer.create()
+```
+
+</TabItem>
+</Tabs>
+
+- **Topic**: destination for messages (e.g., `/default/my-topic`)
+- **Name**: unique producer identifier within the topic
+- **Create**: registers the producer with the broker before sending
+
+---
+
+## Sending Messages
+
+### Byte Messages
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Send a message"
+let message_id = producer
+    .send("Hello Danube!".as_bytes().to_vec(), None)
+    .await?;
+
+println!("Sent message ID: {}", message_id);
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Send a message"
+messageID, err := producer.Send(ctx, []byte("Hello Danube!"), nil)
+if err != nil {
+    log.Fatalf("Failed to send: %v", err)
+}
+
+fmt.Printf("Sent message ID: %v\n", messageID)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Send a message"
+long messageId = producer.send("Hello Danube!".getBytes(), Map.of());
+
+System.out.printf("Sent message ID: %d%n", messageId);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Send a message"
+message_id = await producer.send("Hello Danube!".encode())
+
+print(f"Sent message ID: {message_id}")
+```
+
+</TabItem>
+</Tabs>
+
+### Messages with Attributes
+
+Attach key-value metadata to messages for routing hints, custom headers, or tracing context:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Send with attributes"
+use std::collections::HashMap;
+
+let mut attributes = HashMap::new();
+attributes.insert("source".to_string(), "app-1".to_string());
+attributes.insert("priority".to_string(), "high".to_string());
+
+let message_id = producer
+    .send(b"Important message".to_vec(), Some(attributes))
+    .await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Send with attributes"
+attributes := map[string]string{
+    "source":   "app-1",
+    "priority": "high",
+}
+
+messageID, err := producer.Send(ctx, []byte("Important message"), attributes)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Send with attributes"
+Map<String, String> attributes = Map.of(
+        "source",   "app-1",
+        "priority", "high"
+);
+
+long messageId = producer.send("Important message".getBytes(), attributes);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Send with attributes"
+attributes = {
+    "source": "app-1",
+    "priority": "high",
+}
+
+message_id = await producer.send(b"Important message", attributes)
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+## Partitioned Topics
+
+Partitions enable horizontal scaling by distributing messages across multiple brokers. Add `.with_partitions(N)` to the producer builder:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Partitioned producer"
+let mut producer = client
+    .new_producer()
+    .with_topic("/default/high-throughput")
+    .with_name("partitioned-producer")
+    .with_partitions(3)
+    .build()?;
+
+producer.create().await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Partitioned producer"
+producer, err := client.NewProducer().
+    WithName("partitioned-producer").
+    WithTopic("/default/high-throughput").
+    WithPartitions(3).
+    Build()
+
+producer.Create(ctx)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Partitioned producer"
+Producer producer = client.newProducer()
+        .withTopic("/default/high-throughput")
+        .withName("partitioned-producer")
+        .withPartitions(3)
+        .build();
+
+producer.create();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Partitioned producer"
+producer = (
+    client.new_producer()
+    .with_topic("/default/high-throughput")
+    .with_name("partitioned-producer")
+    .with_partitions(3)
+    .build()
+)
+
+await producer.create()
+```
+
+</TabItem>
+</Tabs>
+
+The topic splits into N internal partitions (e.g., `-part-0`, `-part-1`, `-part-2`). Messages are routed round-robin across partitions by default.
+
+---
+
+## Reliable Dispatch
+
+Reliable dispatch persists messages before acknowledging sends. Use it for critical events that must not be lost.
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Reliable producer"
+let mut producer = client
+    .new_producer()
+    .with_topic("/default/critical-events")
+    .with_name("reliable-producer")
+    .with_reliable_dispatch()
+    .build()?;
+
+producer.create().await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Reliable producer"
+reliableStrategy := danube.NewReliableDispatchStrategy()
+
+producer, err := client.NewProducer().
+    WithName("reliable-producer").
+    WithTopic("/default/critical-events").
+    WithDispatchStrategy(reliableStrategy).
+    Build()
+
+producer.Create(ctx)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Reliable producer"
+Producer producer = client.newProducer()
+        .withTopic("/default/critical-events")
+        .withName("reliable-producer")
+        .withDispatchStrategy(DispatchStrategy.RELIABLE)
+        .build();
+
+producer.create();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Reliable producer"
+from danube import DispatchStrategy
+
+producer = (
+    client.new_producer()
+    .with_topic("/default/critical-events")
+    .with_name("reliable-producer")
+    .with_dispatch_strategy(DispatchStrategy.RELIABLE)
+    .build()
+)
+
+await producer.create()
+```
+
+</TabItem>
+</Tabs>
+
+See [Dispatch Strategies](/concepts/dispatch-strategies/) for details on reliable vs. non-reliable delivery.
+
+---
+
+## Schema Integration
+
+Link producers to a schema subject for type-safe messaging:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Schema-linked producer"
+let mut producer = client
+    .new_producer()
+    .with_topic("/default/events")
+    .with_name("schema-producer")
+    .with_schema_subject("event-schema")
+    .build()?;
+
+producer.create().await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Schema-linked producer"
+producer, err := client.NewProducer().
+    WithTopic("/default/events").
+    WithName("schema-producer").
+    WithSchemaSubject("event-schema").
+    Build()
+
+producer.Create(ctx)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Schema-linked producer"
+Producer producer = client.newProducer()
+        .withTopic("/default/events")
+        .withName("schema-producer")
+        .withSchemaLatest("event-schema")
+        .build();
+
+producer.create();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Schema-linked producer"
+producer = (
+    client.new_producer()
+    .with_topic("/default/events")
+    .with_name("schema-producer")
+    .with_schema_subject("event-schema")
+    .build()
+)
+
+await producer.create()
+```
+
+</TabItem>
+</Tabs>
+
+For schema registration and versioning, see the [Schema Registry guide](/client-libraries/schema-registry/).
+
+---
+
+## Topic Naming
+
+Topics follow a namespace structure:
+
+```text
+/namespace/topic-name
+```
+
+Examples:
+
+- `/default/orders`: orders in the default namespace
+- `/production/user-events`: user events in a production namespace
+- `/staging/logs`: logs in a staging namespace
