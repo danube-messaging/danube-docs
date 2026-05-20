@@ -1,0 +1,88 @@
+---
+title: Dispatch Strategies
+description: Non-Reliable (fire-and-forget) vs. Reliable (at-least-once) message delivery.
+---
+
+Danube offers two dispatch strategies that control how messages flow from producers to consumers. You can run both strategies side by side in the same cluster, each topic chooses its own.
+
+---
+
+## Non-Reliable Dispatch
+
+Prioritizes speed and minimal resource usage. Messages flow from producers to consumers without persistence, a "fire and forget" delivery model.
+
+### Writer path (producer)
+
+1. The producer sends a message to the broker
+2. The broker validates and routes the message to the topic's dispatcher
+3. The dispatcher selects target consumer(s) based on the subscription type (Exclusive / Shared / Failover / Key-Shared)
+4. The message is immediately forwarded to consumer channels
+
+:::note
+There is no on-disk persistence and no acknowledgment gating. If a consumer disconnects, messages in flight may be lost.
+:::
+
+### Reader path (consumer)
+
+1. A consumer subscribes to a topic under an existing subscription
+2. The broker registers the consumer and attaches a live message stream
+3. The dispatcher pushes incoming messages directly to the consumer stream
+4. Acknowledgments are optional and do not affect delivery
+
+**Best for**: real-time metrics, live telemetry, log streaming, or any workload where occasional message loss is acceptable in exchange for lowest possible latency.
+
+---
+
+## Reliable Dispatch
+
+Ensures **at-least-once delivery** using a WAL + cloud store-and-forward design. Messages are persisted before delivery and tracked per subscription.
+
+### Writer path (producer)
+
+1. The producer sends a message to the broker for a reliable topic
+2. The message is appended to the local WAL (durable on disk) and becomes eligible for dispatch
+3. The dispatcher prepares the message for the subscription type while the subscription engine records it as pending
+4. A background uploader asynchronously persists WAL frames to cloud storage, this does not block producers
+
+### Reader path (consumer)
+
+1. A consumer subscribes to a reliable topic; the broker attaches a stream and initializes subscription progress
+2. The dispatcher delivers messages according to the subscription type and ordering guarantees
+3. The consumer acknowledges processed messages; the subscription engine advances progress and triggers redelivery if needed
+4. If the consumer reconnects after a gap, historical data is replayed from the WAL or cloud storage, then seamlessly handed off to the live WAL tail
+
+**Best for**: order processing, financial transactions, event sourcing, or any workload where every message must be delivered at least once.
+
+:::tip
+You can run non-reliable and reliable topics side by side in the same cluster. Choose the strategy per topic based on your reliability requirements.
+:::
+
+---
+
+## Failure Handling (Reliable Dispatch)
+
+When a consumer cannot process a message, two paths trigger redelivery:
+
+- **Explicit NACK**: the consumer calls `nack(message, delay_ms, reason)` to reject the message. The broker schedules redelivery after applying the subscription's backoff policy
+- **Ack timeout**: if the consumer does not respond within `ack_timeout_ms`, the broker treats it as a failure and schedules redelivery automatically
+
+### Failure Policy Configuration
+
+Each subscription has a configurable failure policy (set via `danube-admin topics set-failure-policy`):
+
+| Parameter | Description |
+|-----------|-------------|
+| `max_redelivery_count` | Maximum delivery attempts before the message is considered poisoned |
+| `ack_timeout_ms` | Time the broker waits for an ack before treating the message as failed |
+| `base_redelivery_delay_ms` | Base delay between retries |
+| `max_redelivery_delay_ms` | Maximum delay cap |
+| `backoff_strategy` | `fixed` (constant delay) or `exponential` (doubling delay) |
+| `poison_policy` | What happens when retries are exhausted |
+
+### Poison Policies
+
+When a message exceeds `max_redelivery_count`:
+
+- **`dead_letter`**: the message is routed to a configurable dead-letter topic with origin metadata (`x-original-topic`, `x-original-subscription`, `x-failure-reason`, etc.). The subscription resumes with the next message
+- **`drop`**: the message is skipped by this subscription and the subscription advances past it. The message still remains in the topic for other subscriptions
+- **`block`**: the subscription halts until an operator intervenes (e.g., adjusts the policy or resets the subscription)

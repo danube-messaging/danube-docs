@@ -31,6 +31,17 @@ export default defineConfig({
                         { label: 'Kubernetes', slug: 'getting-started/kubernetes' },
                     ],
                 },
+                {
+                    label: 'Concepts',
+                    items: [
+                        { label: 'Topics & Partitions', slug: 'concepts/topics' },
+                        { label: 'Subscriptions', slug: 'concepts/subscriptions' },
+                        { label: 'Dispatch Strategies', slug: 'concepts/dispatch-strategies' },
+                        { label: 'Messages & Schemas', slug: 'concepts/messages' },
+                        { label: 'Persistence & Storage', slug: 'concepts/persistence' },
+                        { label: 'Scaling the Cluster', slug: 'concepts/scaling' },
+                    ],
+                },
             ],
         }),
     ],

@@ -1,0 +1,110 @@
+---
+title: Messages & Schemas
+description: Message structure, fields, and schema integration for type-safe messaging.
+---
+
+Messages are the fundamental unit of data in Danube. Each message contains a binary payload plus metadata for routing, tracking, acknowledgment, and schema validation.
+
+---
+
+## Message Structure
+
+Every message delivered to a consumer is a `StreamMessage` with the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `request_id` | `u64` | Unique identifier for tracking the message request across the system |
+| `msg_id` | `MessageID` | Composite identifier containing routing and location information |
+| `payload` | `Vec<u8>` | The actual message content in binary format |
+| `publish_time` | `u64` | Unix timestamp (milliseconds) when the message was published |
+| `producer_name` | `String` | Name of the producer that sent this message |
+| `subscription_name` | `Option<String>` | Name of the subscription (set by broker for consumer delivery) |
+| `attributes` | `HashMap<String, String>` | User-defined key-value pairs for custom metadata |
+| `schema_id` | `Option<u64>` | Schema Registry ID for message validation |
+| `schema_version` | `Option<u32>` | Version of the schema used to serialize this message |
+| `routing_key` | `Option<String>` | Routing key for [Key-Shared](/concepts/subscriptions/#key-shared) dispatch |
+
+---
+
+## Message ID
+
+The `MessageID` is a composite identifier that enables efficient routing and acknowledgment:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `producer_id` | `u64` | Unique identifier for the producer within this topic |
+| `topic_name` | `String` | Full topic name (e.g., `/default/events`) |
+| `broker_addr` | `String` | Address of the broker that delivered this message |
+| `topic_offset` | `u64` | Monotonic position of the message within the topic |
+
+The message ID serves multiple purposes:
+
+- **Routing**: broker address enables consumers to send acknowledgments to the correct broker
+- **Ordering**: topic offset provides strict ordering guarantees within a topic
+- **Deduplication**: combination of `producer_id` + `topic_offset` creates a unique message identifier
+- **Tracking**: request ID links messages across distributed tracing systems
+
+---
+
+## Attributes
+
+Messages can carry user-defined key-value attributes for routing hints, custom headers, or tracing context:
+
+```rust title="Sending a message with attributes"
+use std::collections::HashMap;
+
+let mut attributes = HashMap::new();
+attributes.insert("source".to_string(), "app-1".to_string());
+attributes.insert("priority".to_string(), "high".to_string());
+
+let message_id = producer
+    .send(b"Important message".to_vec(), Some(attributes))
+    .await?;
+```
+
+---
+
+## Schema Integration
+
+Danube integrates with the Schema Registry to provide type-safe messaging with validation.
+
+### How It Works
+
+Two fields in every message enable schema validation without sending the full schema definition on each message:
+
+- **`schema_id`**: globally unique ID assigned by the Schema Registry when a schema is registered. Consumers use this to fetch the schema definition (8-byte overhead vs. sending the full schema per message)
+- **`schema_version`**: version number within the schema subject. Starts at 1 and auto-increments with each schema update
+
+### Validation Flow
+
+**Producer side:**
+
+1. Register or look up a schema subject with the Schema Registry
+2. Receive `schema_id` and `schema_version`
+3. Serialize the message payload according to the schema
+4. Set `schema_id` and `schema_version` on the message
+5. Send to the broker
+
+**Broker validation:**
+
+The broker validates schema fields based on the topic's validation policy:
+
+| Policy | Behavior |
+|--------|----------|
+| **None** | No validation; schema fields optional |
+| **Warn** | Logs warning if `schema_id` missing or invalid; allows message |
+| **Enforce** | Rejects message if `schema_id` missing, invalid, or doesn't match topic requirements |
+
+**Consumer side:**
+
+1. Receive the message with `schema_id` and `schema_version`
+2. Fetch the schema definition from the Schema Registry (cached locally)
+3. Deserialize and validate the payload against the schema
+
+### Benefits
+
+- **Type safety**: messages are validated against a contract, preventing data corruption
+- **Bandwidth efficiency**: only 8-12 bytes overhead per message instead of the full schema definition
+- **Schema evolution**: consumers handle multiple schema versions using the `schema_version` field
+- **Debugging**: knowing which schema version produced a message simplifies troubleshooting
+- **Governance**: centralized schema management with compatibility checking and audit trails

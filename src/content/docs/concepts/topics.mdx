@@ -1,0 +1,76 @@
+---
+title: Topics & Partitions
+description: How topics organize messages and how partitions enable horizontal scaling.
+---
+
+A topic is a named channel that organizes messages into a stream. Producers write to topics, consumers read from them.
+
+## Topic Naming
+
+Topics follow a namespace structure:
+
+```text
+/{namespace}/{topic_name}
+```
+
+For example, `/default/markets` uses the `default` namespace and the topic name `markets`.
+
+## Non-Partitioned Topics
+
+A non-partitioned topic is served by a single broker. All messages for the topic flow through that broker, which handles producer writes and consumer delivery.
+
+Best for: low-to-moderate throughput topics where simplicity is more important than parallelism.
+
+## Partitioned Topics
+
+A partitioned topic splits into N internal topics (e.g., `my-topic-part-0`, `my-topic-part-1`, `my-topic-part-2`), each served by a different broker in the cluster. This distributes load and enables horizontal scaling.
+
+{/* TODO: Add partitioned topics diagram */}
+
+Messages for the topic are routed to partitions by the producer's routing mode, and delivered to consumers based on the subscription type.
+
+### Benefits
+
+- **Scalability**: distribute load across multiple brokers for high-throughput workloads
+- **Parallel processing**: multiple consumers process different partitions concurrently
+- **Data locality**: combined with [Key-Shared subscriptions](/concepts/subscriptions/#key-shared), messages can be routed by key to specific consumers for per-key ordering
+
+### Creating Partitioned Topics
+
+Partitioned topics are created with a predefined number of partitions. This number remains fixed for the lifetime of the topic.
+
+```rust
+let mut producer = client
+    .new_producer()
+    .with_topic("/default/high-throughput")
+    .with_name("partitioned-producer")
+    .with_partitions(3)
+    .build()?;
+
+producer.create().await?;
+```
+
+---
+
+## Routing Modes
+
+When publishing to partitioned topics, the routing mode determines which partition receives each message.
+
+### RoundRobinPartition
+
+Messages are distributed across all partitions in round-robin order for maximum throughput. If a routing key is set on the message, the producer hashes the key and assigns the message to a specific partition.
+
+### SinglePartition
+
+All messages go to a single randomly-selected partition. If a routing key is set, the producer hashes the key and assigns the message to the corresponding partition.
+
+| Mode | No key | With key |
+|------|--------|----------|
+| **RoundRobinPartition** | Round-robin across all partitions | Hash-based partition assignment |
+| **SinglePartition** | Random single partition | Hash-based partition assignment |
+
+---
+
+## Consumers
+
+The **subscription type** determines how messages are distributed to consumers within a subscription. See the [Subscriptions](/concepts/subscriptions/) page for details on Exclusive, Shared, Failover, and Key-Shared patterns.
