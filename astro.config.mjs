@@ -53,6 +53,16 @@ export default defineConfig({
                         { label: 'Schema Registry', slug: 'client-libraries/schema-registry' },
                     ],
                 },
+                {
+                    label: 'Security',
+                    items: [
+                        { label: 'Overview', slug: 'security/overview' },
+                        { label: 'TLS & Certificates', slug: 'security/tls' },
+                        { label: 'Authentication (JWT)', slug: 'security/authentication' },
+                        { label: 'Authorization (RBAC)', slug: 'security/authorization' },
+                        { label: 'Securing a Cluster', slug: 'security/securing-a-cluster' },
+                    ],
+                },
             ],
         }),
     ],

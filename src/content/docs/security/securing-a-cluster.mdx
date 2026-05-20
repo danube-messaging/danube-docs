@@ -1,0 +1,352 @@
+---
+title: Securing a Cluster
+description: End-to-end walkthrough from certificate generation and broker configuration to RBAC setup and client connection.
+---
+
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide walks through the complete security setup, from generating certificates to connecting authenticated clients.
+
+## Prerequisites
+
+- Danube broker binary (`danube-broker`)
+- Admin CLI (`danube-admin`)
+- A Danube client library ([Rust](/client-libraries/overview/), [Go](/client-libraries/overview/), [Java](/client-libraries/overview/), or [Python](/client-libraries/overview/))
+
+---
+
+## Step-by-Step Setup
+
+<Steps>
+1. **Generate TLS certificates**
+
+   Use the convenience script included in the Danube repository, or provide your own certificates from your organization's PKI.
+
+   ```bash
+   cd cert/
+   bash gen_certs.sh
+   ```
+
+   This produces:
+
+   ```text
+   cert/
+     ca-cert.pem        # Certificate Authority
+     ca-key.pem
+     server-cert.pem    # Broker identity
+     server-key.pem
+     client-cert.pem    # Client mTLS identity (optional)
+     client-key.pem
+   ```
+
+   For multi-node clusters, all brokers must share the same CA certificate. Each broker can use its own server certificate as long as it is signed by the shared CA.
+
+2. **Configure the broker**
+
+   ```yaml title="danube_broker_secure.yml"
+   auth:
+     mode: tls
+     tls:
+       cert_file: "./cert/server-cert.pem"
+       key_file: "./cert/server-key.pem"
+       ca_file: "./cert/ca-cert.pem"
+     jwt:
+       secret_key: "your-secret-key"
+       issuer: "danube-auth"
+       expiration_time: 3600
+     super_admins:
+       - "admin"
+   ```
+
+   :::tip
+   For production, use a strong, randomly generated `secret_key` and store it securely (e.g., Kubernetes Secret, HashiCorp Vault).
+   :::
+
+3. **Create a bootstrap admin token**
+
+   The super-admin token is needed to set up roles and bindings. Token creation is an offline operation, no broker connection required.
+
+   ```bash
+   export ADMIN_TOKEN=$(danube-admin security tokens create \
+     --subject admin \
+     --secret-key your-secret-key)
+   ```
+
+4. **Start the broker**
+
+   ```bash
+   danube-broker --config-file danube_broker_secure.yml
+   ```
+
+5. **Create roles**
+
+   Define roles that match your access patterns:
+
+   ```bash
+   # Producer role: discover topics and publish messages
+   danube-admin security roles create producer \
+     --permissions Produce,Lookup
+
+   # Consumer role: discover topics and receive messages
+   danube-admin security roles create consumer \
+     --permissions Consume,Lookup
+
+   # Operator role: manage namespaces, topics, and schemas
+   danube-admin security roles create operator \
+     --permissions ManageNamespace,ManageTopic,ManageSchema,Lookup
+   ```
+
+6. **Create service account tokens**
+
+   Create a JWT token for each application or service:
+
+   ```bash
+   export PAYMENTS_TOKEN=$(danube-admin security tokens create \
+     --subject payments-service \
+     --secret-key your-secret-key)
+
+   export ANALYTICS_TOKEN=$(danube-admin security tokens create \
+     --subject analytics-service \
+     --secret-key your-secret-key)
+   ```
+
+7. **Create bindings**
+
+   Grant roles to service accounts at the appropriate scope:
+
+   ```bash
+   # payments-service can produce to the /payments namespace
+   danube-admin security bindings create bind-payments-producer \
+     --principal-type service_account \
+     --principal-name payments-service \
+     --roles producer \
+     --scope namespace \
+     --resource /payments
+
+   # analytics-service can consume from the /analytics namespace
+   danube-admin security bindings create bind-analytics-consumer \
+     --principal-type service_account \
+     --principal-name analytics-service \
+     --roles consumer \
+     --scope namespace \
+     --resource /analytics
+   ```
+
+8. **Connect clients with tokens**
+
+   Application clients authenticate by passing their JWT token when building the client. See examples below.
+
+9. **Verify access**
+
+   Test that service accounts can only access what they are authorized for. Unauthorized operations should fail with `PermissionDenied`.
+
+10. **Remove super-admin (optional)**
+
+    Once RBAC policies are in place, remove the `super_admins` entry from the broker configuration for tighter security. Keep the admin token available for emergency access.
+</Steps>
+
+---
+
+## Connecting Clients with Tokens
+
+Once the broker is secured, every client must present a valid JWT token. The token is sent automatically as `Authorization: Bearer <token>` on every gRPC request.
+
+### Static Token
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Connect with JWT"
+use danube_client::DanubeClient;
+
+let token = std::env::var("PAYMENTS_TOKEN")
+    .expect("PAYMENTS_TOKEN not set");
+
+let client = DanubeClient::builder()
+    .service_url("https://broker.example.com:6650")
+    .with_tls("./cert/ca-cert.pem")?
+    .with_token(&token)
+    .build()
+    .await?;
+
+// Create a producer — only works if the token's principal
+// has the Produce permission on the target topic
+let mut producer = client
+    .new_producer()
+    .with_topic("/payments/orders")
+    .with_name("orders-producer")
+    .build()?;
+
+producer.create().await?;
+producer.send(b"order-created".to_vec(), None).await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Connect with JWT"
+token := os.Getenv("PAYMENTS_TOKEN")
+
+client, err := danube.NewClient().
+    ServiceURL("broker.example.com:6650").
+    WithTLS("./cert/ca-cert.pem").
+    WithToken(token).
+    Build()
+
+ctx := context.Background()
+
+producer, _ := client.NewProducer().
+    WithTopic("/payments/orders").
+    WithName("orders-producer").
+    Build()
+
+producer.Create(ctx)
+producer.Send(ctx, []byte("order-created"), nil)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Connect with JWT"
+String token = System.getenv("PAYMENTS_TOKEN");
+
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("https://broker.example.com:6650")
+        .withTls(Path.of("./cert/ca-cert.pem"))
+        .withToken(token)
+        .build();
+
+Producer producer = client.newProducer()
+        .withTopic("/payments/orders")
+        .withName("orders-producer")
+        .build();
+
+producer.create();
+producer.send("order-created".getBytes(), Map.of());
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Connect with JWT"
+import os
+
+token = os.environ["PAYMENTS_TOKEN"]
+
+client = await (
+    DanubeClientBuilder()
+    .service_url("https://broker.example.com:6650")
+    .with_tls("./cert/ca-cert.pem")
+    .with_token(token)
+    .build()
+)
+
+producer = (
+    client.new_producer()
+    .with_topic("/payments/orders")
+    .with_name("orders-producer")
+    .build()
+)
+
+await producer.create()
+await producer.send(b"order-created")
+```
+
+</TabItem>
+</Tabs>
+
+### Token Rotation
+
+For environments where tokens refresh at runtime (Kubernetes projected volumes, vault-injected secrets), use a token supplier instead of a static token. The supplier function is called on every gRPC request:
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust title="Token rotation"
+.with_token_supplier(|| {
+    std::fs::read_to_string("/var/run/secrets/danube/token")
+        .unwrap_or_default()
+})
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Token rotation"
+.WithTokenSupplier(func() string {
+    data, _ := os.ReadFile("/var/run/secrets/danube/token")
+    return string(data)
+})
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Token rotation"
+.withTokenSupplier(() ->
+    Files.readString(Path.of("/var/run/secrets/danube/token")).strip()
+)
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Token rotation"
+def read_token():
+    with open("/var/run/secrets/danube/token") as f:
+        return f.read().strip()
+
+# Pass to the client builder
+.with_token_supplier(read_token)
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+## What Happens on Unauthorized Access
+
+When a client attempts an operation it is not authorized for, the broker returns a `PermissionDenied` gRPC error. The client library surfaces this as a language-specific exception or error:
+
+| Language | Error Type |
+|----------|-----------|
+| Rust | `DanubeError::PermissionDenied` |
+| Go | `status.Error(codes.PermissionDenied, ...)` |
+| Java | `StatusRuntimeException` with `PERMISSION_DENIED` |
+| Python | `grpc.aio.AioRpcError` with `PERMISSION_DENIED` |
+
+:::note
+The broker logs denied requests with the principal name, requested permission, and target resource. Use these logs to diagnose access issues before adjusting roles or bindings.
+:::
+
+---
+
+## CLI Quick Reference
+
+```bash title="Token commands (offline)"
+danube-admin security tokens create --subject <name> --secret-key <key> [--type user|service_account] [--ttl 8760h]
+danube-admin security tokens validate --token <jwt> --secret-key <key>
+```
+
+```bash title="Role commands"
+danube-admin security roles create <name> --permissions <P1,P2,...>
+danube-admin security roles get <name> [--output json]
+danube-admin security roles list [--output json]
+danube-admin security roles delete <name>
+```
+
+```bash title="Binding commands"
+danube-admin security bindings create <id> --principal-type <type> --principal-name <name> --roles <R1,R2,...> --scope <cluster|namespace|topic> [--resource <path>]
+danube-admin security bindings get <id> --scope <scope> [--resource <path>] [--output json]
+danube-admin security bindings list --scope <scope> [--resource <path>] [--output json]
+danube-admin security bindings delete <id> --scope <scope> [--resource <path>]
+```
+
+### Valid Values
+
+| Parameter | Values |
+|-----------|--------|
+| Permissions | `Lookup`, `Produce`, `Consume`, `Replicate`, `ManageNamespace`, `ManageTopic`, `ManageSchema`, `ManageBroker`, `ManageCluster` |
+| Principal Types | `service_account`, `user` |
+| Scopes | `cluster`, `namespace`, `topic` |

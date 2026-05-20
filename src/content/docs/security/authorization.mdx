@@ -1,0 +1,171 @@
+---
+title: Authorization (RBAC)
+description: Role-Based Access Control — permissions, roles, bindings, scoped access, and step-by-step cluster security setup.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+Authorization determines *what* an authenticated principal can do. Danube uses Role-Based Access Control (RBAC) with scoped bindings and **default-deny** semantics. If no policy explicitly grants access, the request is denied.
+
+## Model
+
+The authorization model has three building blocks:
+
+A **Binding** connects a **Principal** to a **Role** at a specific **Scope**. The Role bundles one or more **Permissions**, and the Scope determines where those permissions apply: across the entire cluster, within a single namespace, or on a specific topic.
+
+- **Permissions**: individual actions like `Produce`, `Consume`, or `ManageTopic`
+- **Roles**: named bundles of permissions (e.g., a `producer` role grants `Lookup` + `Produce`)
+- **Bindings**: attach a role to a principal at a specific scope
+
+---
+
+## Permissions
+
+Danube defines 9 permissions:
+
+| Permission | Description | Typical Use |
+|-----------|-------------|-------------|
+| `Lookup` | Discover topic metadata and partitions | Required for producers and consumers |
+| `Produce` | Publish messages to a topic | Producers |
+| `Consume` | Subscribe and receive messages | Consumers |
+| `Replicate` | Replicate data between brokers | Reserved for future cross-cluster replication |
+| `ManageNamespace` | Create, delete, and configure namespaces | Namespace administrators |
+| `ManageTopic` | Create, delete, and configure topics | Topic administrators |
+| `ManageSchema` | Register and manage schemas | Schema administrators |
+| `ManageBroker` | Broker operations (unload topics, etc.) | Cluster operators |
+| `ManageCluster` | Cluster-wide operations (Raft, security policies) | Super administrators |
+
+---
+
+## Scoped Bindings
+
+Bindings can be attached at three scope levels:
+
+| Scope | Applies to | Example |
+|-------|-----------|---------|
+| **Cluster** | All resources in the cluster | Global admin access |
+| **Namespace** | All topics within a namespace | `/payments/*` |
+| **Topic** | A specific topic only | `/payments/orders` |
+
+When evaluating a request, the authorizer checks bindings from the **most specific scope to the broadest**:
+
+1. Topic-level bindings (if the resource is a topic)
+2. Namespace-level bindings (for the topic's namespace)
+3. Cluster-level bindings
+
+If any matching binding grants the required permission, the request is **allowed**. If no binding matches, the request is **denied**.
+
+---
+
+## Managing Roles
+
+Roles are named collections of permissions.
+
+```bash title="Create roles"
+# Producer role: can look up and publish to topics
+danube-admin security roles create producer-role \
+  --permissions Produce,Lookup
+
+# Consumer role: can look up, subscribe, and receive messages
+danube-admin security roles create consumer-role \
+  --permissions Consume,Lookup
+
+# Namespace admin role
+danube-admin security roles create ns-admin-role \
+  --permissions ManageNamespace,ManageTopic,ManageSchema,Lookup
+
+# Full cluster admin role
+danube-admin security roles create cluster-admin-role \
+  --permissions ManageCluster,ManageBroker,ManageNamespace,ManageTopic,ManageSchema,Lookup,Produce,Consume
+```
+
+```bash title="Inspect and delete roles"
+# List all roles
+danube-admin security roles list
+
+# Get details of a specific role
+danube-admin security roles get producer-role
+
+# JSON output (for scripting)
+danube-admin security roles list --output json
+
+# Delete a role
+danube-admin security roles delete producer-role
+```
+
+---
+
+## Managing Bindings
+
+Bindings connect principals to roles at a specific scope. Each binding has a unique ID.
+
+```bash title="Create bindings"
+# Cluster-scoped: grant producer-role to a service account
+danube-admin security bindings create b-payments-writer \
+  --principal-type service_account \
+  --principal-name payments-writer \
+  --roles producer-role \
+  --scope cluster
+
+# Namespace-scoped: grant consumer-role on /analytics
+danube-admin security bindings create b-analytics-reader \
+  --principal-type service_account \
+  --principal-name analytics-reader \
+  --roles consumer-role \
+  --scope namespace \
+  --resource /analytics
+
+# Topic-scoped: grant producer-role on a specific topic
+danube-admin security bindings create b-orders-writer \
+  --principal-type service_account \
+  --principal-name orders-service \
+  --roles producer-role \
+  --scope topic \
+  --resource /payments/orders
+
+# Multiple roles in one binding
+danube-admin security bindings create b-platform-admin \
+  --principal-type user \
+  --principal-name admin-user \
+  --roles cluster-admin-role,ns-admin-role \
+  --scope cluster
+```
+
+```bash title="Inspect and delete bindings"
+# List by scope
+danube-admin security bindings list --scope cluster
+danube-admin security bindings list --scope namespace --resource /payments
+danube-admin security bindings list --scope topic --resource /payments/orders
+
+# Get a specific binding
+danube-admin security bindings get b-payments-writer --scope cluster
+
+# Delete
+danube-admin security bindings delete b-payments-writer --scope cluster
+danube-admin security bindings delete b-analytics-reader --scope namespace --resource /analytics
+```
+
+---
+
+## Super-Admins
+
+For initial cluster bootstrap and emergency access, Danube supports **super-admins**, which are JWT subjects that bypass RBAC entirely. Super-admins are declared in the broker configuration, not through the RBAC system.
+
+```yaml title="danube_broker.yml"
+auth:
+  super_admins:
+    - "admin"
+```
+
+A super-admin can perform any operation on any resource without needing roles or bindings.
+
+:::caution
+Super-admin access bypasses all authorization checks. Use it only for initial bootstrap and emergency scenarios. Once RBAC policies are configured, consider removing entries from `super_admins`.
+:::
+
+---
+
+## Next Steps
+
+For a complete walkthrough from certificate generation to client connection, see the [Securing a Cluster](/security/securing-a-cluster/) guide.
+

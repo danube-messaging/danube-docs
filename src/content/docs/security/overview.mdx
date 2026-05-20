@@ -1,0 +1,104 @@
+---
+title: Security Overview
+description: Danube's layered security model — encryption, authentication, and authorization.
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+Danube provides a layered security model that protects data in transit and controls access to cluster resources. Each layer can be enabled independently, but for production all three should be active.
+
+## Security Modes
+
+The `auth.mode` setting in the broker configuration controls the overall security posture:
+
+| Mode | Encryption | Authentication | Authorization | Use Case |
+|------|-----------|---------------|---------------|----------|
+| `none` | Off | Off | Off | Local development and testing |
+| `tls` | TLS everywhere | JWT tokens | RBAC (default-deny) | Production deployments |
+
+When `mode: none`, all connections are unencrypted with no authentication. Any client can produce, consume, and manage the cluster without credentials.
+
+:::caution
+Never use `mode: none` in production. All data flows in plaintext and any client has full access.
+:::
+
+When `mode: tls`, the broker enables the full security stack:
+
+- All client and inter-broker connections are encrypted with TLS
+- Clients must present a valid JWT token to authenticate
+- Every operation is checked against RBAC policies — if no policy grants access, the request is denied
+
+---
+
+## Security Layers
+
+<CardGrid>
+	<Card title="TLS & Certificates" icon="seti:lock">
+		Encrypt all network traffic. Server TLS for clients, mutual TLS for inter-broker communication.
+
+		[Configure TLS →](/security/tls/)
+	</Card>
+	<Card title="Authentication (JWT)" icon="seti:key">
+		Verify caller identity with signed JWT tokens. Offline token creation, no runtime key exchange.
+
+		[Set up JWT →](/security/authentication/)
+	</Card>
+	<Card title="Authorization (RBAC)" icon="approve-check">
+		Control what each identity can do. Roles, bindings, scoped permissions with default-deny.
+
+		[Configure RBAC →](/security/authorization/)
+	</Card>
+</CardGrid>
+
+---
+
+## Quick Configuration
+
+```yaml title="danube_broker.yml"
+auth:
+  mode: tls
+
+  tls:
+    cert_file: "./cert/server-cert.pem"
+    key_file: "./cert/server-key.pem"
+    ca_file: "./cert/ca-cert.pem"
+
+  jwt:
+    secret_key: "your-secret-key"
+    issuer: "danube-auth"
+    expiration_time: 3600
+
+  super_admins:
+    - "admin"
+
+admin_tls: false    # Enable TLS on admin API (recommended for remote access)
+```
+
+---
+
+## Enforcement Summary
+
+Authorization is enforced on every gRPC call across all broker services.
+
+### Data Plane
+
+| Operation | Required Permission | Resource |
+|----------|-------------------|----------|
+| Topic lookup | `Lookup` | Topic |
+| Topic partitions | `Lookup` | Topic |
+| Create producer | `Produce` | Topic |
+| Send message | `Produce` | Topic |
+| Subscribe | `Consume` | Topic |
+| Receive messages | `Consume` | Cluster |
+| Acknowledge | `Consume` | Cluster |
+
+### Admin Plane
+
+| Operation | Required Permission | Resource |
+|----------|-------------------|----------|
+| Create/delete namespace | `ManageNamespace` | Namespace or Cluster |
+| Create/delete topic | `ManageTopic` | Topic or Namespace |
+| List/inspect brokers | `ManageBroker` | Cluster |
+| Raft membership changes | `ManageCluster` | Cluster |
+| Schema operations | `ManageSchema` | Schema Subject or Topic |
+| Role/binding management | `ManageCluster` | Cluster |

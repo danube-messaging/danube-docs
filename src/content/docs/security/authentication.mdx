@@ -1,0 +1,107 @@
+---
+title: Authentication (JWT)
+description: Verify caller identity with signed JWT tokens — creation, validation, principals, and inter-broker auth.
+---
+
+Authentication verifies *who* is making a request. When security is enabled (`mode: tls`), every gRPC call must carry valid credentials.
+
+## JWT Tokens
+
+JSON Web Tokens are the primary authentication mechanism for clients and administrators. Tokens are signed with a shared secret and carry the caller's identity.
+
+### Broker Configuration
+
+```yaml title="danube_broker.yml"
+auth:
+  jwt:
+    secret_key: "your-secret-key"    # HMAC-SHA256 signing key
+    issuer: "danube-auth"            # Expected token issuer
+    expiration_time: 3600            # Default TTL in seconds
+```
+
+### Token Claims
+
+Every Danube JWT contains:
+
+| Claim | Description |
+|-------|------------|
+| `sub` | Subject : the principal name (e.g., `my-app`, `admin`) |
+| `iss` | Issuer : must match the broker's `jwt.issuer` |
+| `exp` | Expiration timestamp (Unix epoch) |
+| `principal_type` | Either `service_account` or `user` |
+| `principal_name` | Principal name (usually same as `sub`) |
+
+---
+
+## Creating Tokens
+
+Tokens are created offline using `danube-admin`, no broker connection is needed. The `secret_key` must match the broker's configured `jwt.secret_key`.
+
+```bash title="Create tokens"
+# Service account token (default type, 1-year TTL)
+danube-admin security tokens create \
+  --subject my-app \
+  --secret-key your-secret-key
+
+# User token with custom TTL
+danube-admin security tokens create \
+  --subject admin-user \
+  --type user \
+  --ttl 24h \
+  --secret-key your-secret-key
+
+# Token with specific issuer
+danube-admin security tokens create \
+  --subject my-app \
+  --ttl 365d \
+  --issuer danube-auth \
+  --secret-key your-secret-key
+```
+
+The command prints only the raw token to stdout, making it easy to pipe into scripts or environment variables.
+
+### Validating a Token
+
+```bash title="Validate a token"
+danube-admin security tokens validate \
+  --token eyJhbGciOiJIUzI1NiIs... \
+  --secret-key your-secret-key
+```
+
+Output includes the subject, principal type, issuer, expiration, and remaining TTL.
+
+---
+
+## Principals
+
+A **principal** represents an authenticated identity in the system. Every authenticated request is associated with exactly one principal.
+
+| Principal Type | Description | How Created |
+|---------------|-------------|------------|
+| `service_account` | Application or service identity | JWT token with `principal_type: service_account` |
+| `user` | Human operator or administrator | JWT token with `principal_type: user` |
+| `broker_internal` | Inter-broker communication | Automatic via mTLS between brokers |
+| `anonymous` | Unauthenticated caller | Only when `auth.mode: none` |
+
+In production (`mode: tls`):
+
+- **Service accounts** are the default for application clients (producers and consumers)
+- **Users** are typically human administrators using `danube-admin`
+- **BrokerInternal** is assigned automatically to inter-broker connections — you don't create these manually
+- **Anonymous** is never used (requests without credentials are rejected)
+
+---
+
+## Inter-Broker Authentication (mTLS)
+
+Broker-to-broker communication (replication, Raft) authenticates automatically using mutual TLS. When a broker connects to another broker, the TLS handshake verifies both certificates against the shared CA.
+
+Internal broker traffic is mapped to a `BrokerInternal` principal, which has super-admin privileges — it can perform any operation. This ensures that replication and consensus continue to work seamlessly when security is enabled.
+
+---
+
+## Client Configuration
+
+For how to connect clients with JWT tokens and token rotation, see the [Client Setup & Connection](/client-libraries/setup/) guide.
+
+For how to control what authenticated principals can do, see the [Authorization (RBAC)](/security/authorization/) guide.

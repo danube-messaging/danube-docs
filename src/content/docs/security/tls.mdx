@@ -1,0 +1,88 @@
+---
+title: TLS & Certificates
+description: Encrypt all Danube traffic with TLS — server TLS for clients, mutual TLS for inter-broker communication.
+---
+
+TLS encrypts all network traffic to prevent eavesdropping and tampering. A single set of certificate files is used across all broker services.
+
+## What Gets Encrypted
+
+| Connection | TLS Mode | Default Port |
+|-----------|----------|-------------|
+| Client gRPC (producers/consumers) | Server TLS | 6650 |
+| Admin gRPC | Server TLS (opt-in) | 50051 |
+| Inter-broker replication | Mutual TLS (mTLS) | 6650 |
+| Raft consensus | Mutual TLS (mTLS) | 7650 |
+
+- **Server TLS** (client-facing): the broker presents its certificate to clients. Clients verify it against the CA
+- **Mutual TLS** (inter-broker): both sides present certificates and verify each other. This is how brokers authenticate to each other for replication and Raft consensus
+
+---
+
+## Broker Configuration
+
+```yaml title="danube_broker.yml"
+auth:
+  mode: tls
+  tls:
+    cert_file: "./cert/server-cert.pem"   # Server certificate
+    key_file: "./cert/server-key.pem"     # Server private key
+    ca_file: "./cert/ca-cert.pem"         # CA certificate (for verifying peers)
+```
+
+All three files are required when `mode: tls` is set.
+
+---
+
+## Generating Certificates
+
+Danube ships with a convenience script that generates a CA, server certificate, and client certificate:
+
+```bash title="Generate certificates"
+cd cert/
+bash gen_certs.sh
+```
+
+This produces:
+
+| File | Purpose |
+|------|---------|
+| `ca-cert.pem` / `ca-key.pem` | Certificate Authority (signs both server and client certs) |
+| `server-cert.pem` / `server-key.pem` | Broker TLS identity — used in `auth.tls` config |
+| `client-cert.pem` / `client-key.pem` | Client mTLS identity — used by inter-broker and mTLS clients |
+
+The generated server certificate includes Subject Alternative Names for `localhost`, `127.0.0.1`, and `0.0.0.0`, making it ready for local development.
+
+:::tip
+For production, use certificates from your organization's PKI or a certificate manager like cert-manager (Kubernetes). The convenience script is for development only.
+:::
+
+---
+
+## Multi-Node Clusters
+
+For multi-broker deployments:
+
+- All brokers must share the **same CA certificate** (`ca-cert.pem`)
+- Each broker can use the same or different server certificates, as long as they are signed by the shared CA
+- Server certificates should include SANs matching the broker's hostname or IP address
+
+---
+
+## Admin API TLS
+
+By default, the admin API (port 50051) runs without TLS even when `auth.mode: tls` is set. This is convenient for local management but insecure for remote access.
+
+To enable TLS on the admin API:
+
+```yaml title="danube_broker.yml"
+admin_tls: true
+```
+
+When enabled, the admin API uses the same certificate from `auth.tls`. This is recommended for any deployment where the admin API is accessed over untrusted networks.
+
+---
+
+## Client Configuration
+
+For how to connect clients with TLS and mTLS, see the [Client Setup & Connection](/client-libraries/setup/) guide.
