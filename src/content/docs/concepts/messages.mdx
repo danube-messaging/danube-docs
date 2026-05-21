@@ -108,3 +108,33 @@ The broker validates schema fields based on the topic's validation policy:
 - **Schema evolution**: consumers handle multiple schema versions using the `schema_version` field
 - **Debugging**: knowing which schema version produced a message simplifies troubleshooting
 - **Governance**: centralized schema management with compatibility checking and audit trails
+
+---
+
+## Subject vs. Topic Policies
+
+Schema governance in Danube operates at two independent levels. Understanding the distinction is essential for configuring validation correctly.
+
+**Subject level** controls how schemas can *evolve*. Compatibility mode is set per subject by an administrator and applies to all topics that share that subject. When a new schema version is registered, the registry checks it against the existing versions using the subject's compatibility mode (`backward`, `forward`, `full`, or `none`).
+
+**Topic level** controls how strictly the broker *enforces* validation on incoming messages. Each topic has its own validation policy (`none`, `warn`, or `enforce`) and can enable or disable payload validation independently. This means two topics can reference the same schema subject but apply different levels of strictness.
+
+| Setting | Level | Set By | Shared Across Topics? |
+|---------|-------|--------|-----------------------|
+| Compatibility mode | Subject | Administrator | Yes (inherited by all topics using the subject) |
+| Validation policy | Topic | Administrator | No (independent per topic) |
+| Payload validation | Topic | Administrator | No (independent per topic) |
+| Schema subject | Topic | First producer or administrator | No (one per topic) |
+| Schema version | Producer | Developer | No (each producer chooses) |
+
+A typical multi-environment setup uses the same subject with different topic-level policies:
+
+```text title="Same subject, different strictness"
+Subject: "order-events" (compatibility: backward)
+  ├── /dev/order-events       → validation: none
+  ├── /staging/order-events   → validation: warn, payload validation on
+  └── /production/order-events → validation: enforce, payload validation on
+```
+
+For configuring these settings, see the [Admin CLI: Resources](/admin/cli-resources/#schema-configuration-admin-only) reference. For the internal storage model, see [Schema Registry Architecture](/architecture/schema-registry/).
+

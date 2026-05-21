@@ -78,6 +78,13 @@ export default defineConfig({
                         { label: 'CLI: Resources', slug: 'admin/cli-resources' },
                     ],
                 },
+                {
+                    label: 'Architecture',
+                    items: [
+                        { label: 'Overview', slug: 'architecture/overview' },
+                        { label: 'Schema Registry', slug: 'architecture/schema-registry' },
+                    ],
+                },
             ],
         }),
     ],
