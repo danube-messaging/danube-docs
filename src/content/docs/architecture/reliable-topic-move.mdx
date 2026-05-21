@@ -1,0 +1,199 @@
+---
+title: Reliable Topic Move
+description: How Danube preserves offset continuity when a reliable topic moves between brokers, covering sealing, durable export, recovery, and reader handoff.
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+When a reliable topic moves from one broker to another (due to rebalancing, maintenance, or failover), the offset space must remain continuous. Producers must continue writing at the next correct offset, consumers must keep reading from the same global history, and subscription cursors must remain valid. This page describes how Danube achieves that. For operational commands, see [CLI: Cluster & Brokers](/admin/cli-cluster/).
+
+---
+
+## State Involved in a Move
+
+A reliable topic move touches four kinds of state:
+
+**Local WAL state.** Each broker keeps a per-topic Write-Ahead Log with an in-memory cache, local WAL files, and a checkpoint describing WAL topology. This state is fast but tied to the broker currently owning the topic.
+
+**Durable segment history.** Historical data is stored as immutable exported segments, written to the local filesystem (`local` mode), a shared filesystem (`shared_fs` mode), or an object store (`object_store` mode). Each segment is described in the metadata store by a `SegmentDescriptor`.
+
+**Metadata state.** The Raft metadata store holds persistence metadata that survives broker moves:
+
+<FileTree>
+- /storage/topics/default/my-topic/
+  - segments/
+    - 00000000000000000000 (SegmentDescriptor for offsets 0-511)
+    - 00000000000000000512 (SegmentDescriptor for offsets 512-1023)
+    - cur (padded start offset of latest durable segment)
+  - state (StorageStateSealed marker)
+</FileTree>
+
+**Subscription cursors.** Consumer progress is stored independently from broker-local WAL state. This is what allows a consumer to reconnect after a move and continue from the same logical offset.
+
+---
+
+## Why Moves Work
+
+Danube does not try to transfer an in-memory topic object between brokers. Instead, it reconstructs the topic on the new broker from durable metadata and recovery rules.
+
+The move works because Danube preserves two boundaries:
+
+- The **last committed offset** on the old owner
+- The **durable history frontier** available to readers
+
+Everything else (in-memory cache, local WAL files, producer connections) is transient and rebuilt after the handoff.
+
+---
+
+## Sealing: What the Old Broker Does
+
+When the topic is unloaded from the source broker, the broker seals the topic:
+
+1. Stop accepting new writes to the topic storage instance
+2. Capture the topic's `last_committed_offset`
+3. Shut down the WAL cleanly
+4. Stop background segment exporter and deleter tasks
+5. Export any remaining local WAL history that still needs to become durable
+6. Clear the broker-local WAL directory
+7. Write a sealed mobility marker into metadata
+
+The output of this phase is a `StorageStateSealed` entry in the metadata store:
+
+```text title="Sealed mobility marker"
+StorageStateSealed {
+  sealed: true,
+  last_committed_offset: N,
+  broker_id: <old broker>,
+  timestamp: <seal time>
+}
+```
+
+This says: the old owner accepted offsets through `N`. The next owner must resume at `N + 1`.
+
+### Durable Export During Sealing
+
+The old owner exports safe, immutable WAL history before completing the handoff:
+
+1. Read the current WAL checkpoint
+2. Select eligible WAL files
+3. Trim each file to the last safe frame boundary
+4. Extract the segment offset range
+5. Upload the safe prefix as a durable segment
+6. Write a `SegmentDescriptor` to metadata
+7. Update the `segments/cur` pointer
+
+This is the durable history that the new owner and late-joining readers rely on.
+
+---
+
+## Recovery: What the New Broker Does
+
+When the new broker becomes the topic owner, `StorageFactory::for_topic()` creates a new per-topic storage instance. The critical step is determining the initial WAL offset.
+
+`StorageFactory::resolve_recovery_start()` uses this precedence:
+
+| Priority | Source | Action |
+|----------|--------|--------|
+| 1 | Sealed mobility state | Resume from `last_committed_offset + 1` |
+| 2 | Durable segment catalog | Resume from latest segment's `end_offset + 1` |
+| 3 | Local WAL continuity | Continue from valid local WAL checkpoint |
+| 4 | None (empty topic) | Start from offset `0` |
+
+In a broker-to-broker move, the first case is the one that matters. The sealed state guarantees that the new owner starts at exactly the right offset.
+
+### Hot Cutover Mode
+
+When a topic is resumed from a sealed state, the storage factory enables hot cutover mode on `WalStorage`. This changes one read decision:
+
+- Durable history is authoritative for the historical prefix that existed before takeover
+- The new owner's hot WAL is authoritative only for the newly rebuilt local tail
+
+This prevents the new owner from claiming complete local historical coverage when it only has newly created state.
+
+---
+
+## Producer Behavior After the Move
+
+After ownership changes, producers reconnect to the new broker and continue writing. If the old broker sealed at offset 21, the new broker recovers with `next_offset = 22`. Subsequent messages receive offsets 22, 23, 24, and so on. From the producer's perspective, nothing special happened beyond reconnecting.
+
+## Consumer Behavior After the Move
+
+Consumers resume from their subscription cursor, not from broker-local state. If a consumer previously acknowledged through offset 13, it requests offset 14 after reconnecting.
+
+`WalStorage::create_reader()` decides how to serve the request:
+
+**Case 1: offset is within the hot WAL window.** The reader is created directly from the new broker's WAL.
+
+**Case 2: offset predates the hot WAL window.** A hybrid reader is created:
+
+1. `DurableHistoryReader` streams the historical prefix from durable segments
+2. The stream is chained to the hot WAL at `hot_start_offset`
+
+The consumer sees one logical stream:
+
+```text title="Seamless reader handoff"
+Offsets 14..21   → from durable history
+Offsets 22..N    → from the new broker's hot WAL
+```
+
+No broker-specific cursor translation is needed because the offset space remained continuous.
+
+---
+
+## Mode-Specific Behavior
+
+The move protocol is identical across all storage modes. The difference is when and where durable history is created.
+
+### Local Mode
+
+There is no continuous background export loop. Durable segments are exported as part of the sealing step. This mode depends most heavily on the seal phase for correctness during moves.
+
+### Shared Filesystem Mode
+
+The broker stages active WAL locally. A background export loop continuously publishes sealed segments to the shared filesystem. By the time a move happens, most of the topic history is already present in the shared store. The seal step exports only the final tail and clears local staging.
+
+### Object Store Mode
+
+Same as shared filesystem, but segments are uploaded to remote object storage (S3, GCS, Azure Blob via OpenDAL). This is the most cloud-native move path because durable history is already broker-independent before the move begins.
+
+---
+
+## Timeline Example
+
+Starting state: Broker A has accepted offsets `0..21`, a consumer cursor is at `13`, durable history covers `0..21`.
+
+1. **Broker A seals the topic**
+   - Records `last_committed_offset = 21`
+   - Exports remaining local history if needed
+   - Clears local WAL files
+   - Writes `StorageStateSealed` to metadata
+
+2. **Broker B loads the topic**
+   - Reads sealed mobility state
+   - Creates WAL with `initial_offset = 22`
+
+3. **Producers reconnect**
+   - New messages become offsets `22, 23, 24, ...`
+
+4. **Consumers reconnect**
+   - Resume from cursor at offset `14`
+   - Read `14..21` from durable history
+   - Read `22..` from the new broker's hot WAL
+
+The continuity guarantee is preserved at both boundaries:
+
+- **Producer write boundary**: `21 → 22` (sealed state ensures no gap or overlap)
+- **Consumer read boundary**: durable history → hot WAL (hybrid reader chains seamlessly)
+
+---
+
+## Implementation Components
+
+The reliable topic move protocol relies on these components in `danube-persistent-storage`:
+
+| Component | Role |
+|-----------|------|
+| `StorageStateSealed` | Takeover marker recording last committed offset |
+| `SegmentDescriptor` + `segments/cur` | Durable history catalog |
+| `StorageFactory::resolve_recovery_start()` | Determines the next correct WAL offset |
+| `WalStorage` hot-cutover logic | Keeps historical and hot reads aligned after takeover |

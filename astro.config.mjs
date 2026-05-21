@@ -83,6 +83,9 @@ export default defineConfig({
                     items: [
                         { label: 'Overview', slug: 'architecture/overview' },
                         { label: 'Schema Registry', slug: 'architecture/schema-registry' },
+                        { label: 'Load Manager', slug: 'architecture/load-manager' },
+                        { label: 'Key-Shared Dispatch', slug: 'architecture/key-shared' },
+                        { label: 'Reliable Topic Move', slug: 'architecture/reliable-topic-move' },
                     ],
                 },
             ],

@@ -1,0 +1,181 @@
+---
+title: Key-Shared Dispatch Architecture
+description: Internal architecture of Key-Shared subscriptions, covering consistent hashing, in-flight tracking, cursor safety, and poison message handling.
+---
+
+Key-Shared is a subscription model that combines per-key ordering with multi-consumer parallelism. All messages sharing the same routing key are delivered to exactly one consumer, in order, while different keys are dispatched to different consumers concurrently. This page describes the internal architecture. For the client API, see [Key-Shared Subscriptions](/client-libraries/key-shared/).
+
+---
+
+## Design Goals
+
+The Key-Shared dispatcher is built around five invariants:
+
+- **Per-key ordering**: messages with the same routing key are always delivered to the same consumer, in order. No two messages for the same key may be in-flight simultaneously.
+- **Multi-key parallelism**: different routing keys can be in-flight on different consumers concurrently, providing throughput proportional to the number of distinct keys.
+- **Key-affinity stability**: adding or removing a consumer remaps approximately 1/N of existing key assignments, not all of them.
+- **Cursor safety**: the persisted subscription cursor never advances past unacknowledged messages. A broker restart replays from the correct position.
+- **Key-level fault isolation**: a poison message (retry-exhausted) on one key does not block other keys from making progress.
+
+---
+
+## Core Components
+
+Each reliable Key-Shared subscription is backed by these components:
+
+| Component | Responsibility |
+|-----------|---------------|
+| `KeySharedConsumerState` | Maps routing keys to consumers via consistent hash ring with optional key filtering |
+| `InFlightWindow` | Tracks all in-flight and blocked messages, enforces single-message-per-key and contiguous cursor advancement |
+| Dispatch loop | `tokio::select!` loop driven by a command channel (acks, nacks, consumer changes) and a periodic heartbeat timer |
+| Heartbeat watchdog | Runs every 500ms for timeout detection, retry, eviction, and WAL polling |
+| `SubscriptionEngine` | Owns the WAL stream cursor, failure policy, and debounced cursor persistence |
+| Poison handler | Applies the configured policy (Drop, DeadLetter, Block) to retry-exhausted messages |
+
+The non-reliable variant uses only `KeySharedConsumerState` for routing. It skips the in-flight window, ack tracking, retry logic, and cursor persistence entirely. Messages are dispatched inline and dropped if the target consumer's channel is full.
+
+---
+
+## Consistent Hashing
+
+`KeySharedConsumerState` uses a virtual-node consistent hash ring for key-to-consumer assignment.
+
+Each consumer is allocated 100 virtual nodes on a 32-bit hash ring. Virtual node hashes are derived from `FNV-1a("{consumer_id}-{vnode_idx}")` with murmur3 finalization for good bit distribution. When a message arrives, the routing key is hashed to a 32-bit value and a binary search finds the first virtual node >= that hash (clockwise walk, wrapping at the end).
+
+**Properties:**
+
+- **Stability**: adding or removing one consumer remaps approximately 1/N of keys. Tested over 1,000 keys, remapping stays within 15-55% when going from 2 to 3 consumers.
+- **Determinism**: the same routing key always selects the same consumer for a given consumer set.
+- **Filter interaction**: when some consumers declare key filters, the ring is projected onto only eligible consumers. The common path (no filters) uses the full ring with zero allocation.
+
+### Key Filtering
+
+Consumers may declare glob patterns at subscription time to restrict which keys they receive:
+
+| Pattern | Matches |
+|---------|---------|
+| `"payment"` | Exact match only |
+| `"ship*"` | `"shipping"`, `"shipment"`, etc. |
+| `"eu-west-?"` | `"eu-west-1"`, `"eu-west-2"`, etc. |
+| `"*"` | Everything (same as no filter) |
+
+Glob matching uses an iterative backtracking algorithm without regex overhead. If a message's routing key matches no consumer's filters, the message is skipped and the offset is treated as implicitly acked so the cursor can advance past it.
+
+---
+
+## In-Flight Window
+
+The `InFlightWindow` replaces the single-slot pending delivery used by Exclusive and Shared dispatchers with a multi-message concurrent tracking window.
+
+### Key Invariant
+
+At most one message per routing key is in-flight at any time. Additional messages for the same key are held in a blocked queue until the in-flight one is resolved (acked, nacked, or timed out).
+
+The window maintains several coordinated structures:
+
+| Structure | Purpose |
+|-----------|---------|
+| Dispatched entries (indexed by WAL offset) | In-flight messages awaiting ack |
+| Active key set | Enforces single-message-per-key invariant |
+| Blocked queue | Messages waiting for their key to become free |
+| Acked offsets set | Out-of-order acks for contiguous cursor computation |
+| Per-consumer counters | In-flight count per consumer for backpressure |
+
+### Contiguous Cursor Advancement
+
+The subscription cursor (`safe_cursor`) advances only when acked offsets form a contiguous chain from the current position. This is critical because the `SubscriptionEngine` persists this cursor and uses it as the replay start point after restart.
+
+```text title="Example: out-of-order acks"
+Dispatched: offsets 10, 11, 12, 13
+Acked:      offsets 10, 12, 13  (11 still in-flight)
+
+safe_cursor = 10  (cannot advance past 11)
+
+When offset 11 is acked:
+safe_cursor = 13  (10, 11, 12, 13 all contiguous)
+```
+
+Out-of-order acks are common in Key-Shared dispatch because different keys are processed independently. The acked offsets set accumulates future acks, and `advance_safe_cursor()` walks forward from the current position, draining contiguous entries.
+
+### Backpressure
+
+**Per-consumer limit**: each consumer has a maximum in-flight capacity (default: 1,000 messages). When reached, new messages for that consumer are pushed to the blocked queue instead. This prevents a single slow consumer from occupying the entire window.
+
+**Global window limit**: the total in-flight + blocked messages are capped at `max_window_size` (default: 10,000). When full, the heartbeat stops polling new messages from the WAL, creating natural backpressure into the storage layer.
+
+---
+
+## Dispatch Loop
+
+The main loop is a `tokio::select!` between two sources:
+
+```text title="Loop structure"
+loop {
+    select! {
+        cmd = control_rx.recv() => handle_command(cmd)
+        _   = heartbeat.tick()  => handle_heartbeat()
+    }
+}
+```
+
+**Commands** are sent by the broker's consumer handler and subscription engine: consumer add/remove, message ack/nack, poll-and-dispatch triggers, and flush requests.
+
+**Heartbeat** fires every 500ms and performs five phases of maintenance.
+
+---
+
+## Heartbeat Watchdog
+
+The heartbeat runs every 500ms and performs five phases:
+
+### Phase 1: Ack Timeouts
+
+Scans all in-flight entries for messages past their `ack_timeout`. Timed-out messages are marked for retry and become eligible for re-dispatch.
+
+### Phase 2: Poison Handling
+
+Scans for entries that have exhausted their retry budget and delegates to the poison handler:
+
+| Policy | Behavior |
+|--------|----------|
+| **Drop** | Message is skipped for this subscription. The offset is marked as acked so the cursor can advance. Blocked messages for the same key are drained. The message remains in the WAL for other subscriptions. |
+| **DeadLetter** | Message is published to the configured DLQ topic, then treated like Drop. |
+| **Block** | Message stays in place. The key remains active, preventing new messages for that key. Other keys continue normally. |
+
+:::note
+The Key-Shared dispatcher manages its own cursor advancement rather than delegating to the engine, because contiguous tracking across multiple in-flight messages requires coordination with the `InFlightWindow`.
+:::
+
+### Phase 3: Retry Re-dispatch
+
+Messages that have completed their backoff delay are re-dispatched. Consumer selection uses the same hash ring, so a retried message may land on a different consumer if the ring has changed (for example, due to eviction).
+
+### Phase 4: Inactive Consumer Eviction
+
+Each consumer has an `Arc<AtomicBool>` status flag set by the gRPC handler when the client disconnects. The heartbeat tracks consecutive "inactive ticks" per consumer. After 6 ticks (3 seconds), the consumer is evicted:
+
+1. All its in-flight entries are removed and their offsets marked as acked
+2. The consumer is removed from the hash ring (triggers ring rebuild)
+3. Freed keys are dispatched to remaining consumers via `dispatch_unblocked`
+4. The cursor is persisted if it advanced
+
+**Design trade-off**: treating evicted offsets as implicitly acked means those specific messages may be lost (at-most-once for messages assigned to the evicted consumer). The alternative, keeping them pending forever, would create permanent gaps in the contiguous cursor, stalling the subscription. The chosen approach prioritizes subscription liveness over per-message guarantees during consumer failure.
+
+### Phase 5: Lag-Driven Polling
+
+If the window has capacity and the WAL has unread messages, the heartbeat polls new entries. This ensures continuous throughput when the WAL is being written to faster than consumers can ack.
+
+---
+
+## Comparison with Other Subscription Models
+
+| Aspect | Exclusive | Shared | Key-Shared |
+|--------|-----------|--------|------------|
+| Consumers | 1 | N | N |
+| Ordering | Total | None | Per-key |
+| In-flight tracking | Single slot | Single slot | Multi-message window |
+| Cursor advancement | Sequential | Sequential | Contiguous-ack |
+| Key affinity | N/A | N/A | Consistent hash ring |
+| Key filtering | N/A | N/A | Glob patterns |
+| Backpressure | Per-subscription | Per-subscription | Per-consumer + global |
+| Consumer rebalancing | Failover | Round-robin | Hash ring rebuild (~1/N remapped) |

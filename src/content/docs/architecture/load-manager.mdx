@@ -1,0 +1,268 @@
+---
+title: Load Manager Architecture
+description: Internal architecture of Danube's load manager, covering topic assignment, broker rankings, automated rebalancing, and safety mechanisms.
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+The Load Manager is a leader-only subsystem that controls topic placement across brokers. It assigns new topics to the least-loaded broker, monitors cluster balance, and can automatically move topics to restore equilibrium. This page describes the internal architecture and design decisions. For operational commands, see [CLI: Cluster & Brokers](/admin/cli-cluster/).
+
+---
+
+## Responsibilities
+
+The Load Manager handles four concerns:
+
+- **Topic assignment**: when a topic is created, decide which broker owns it
+- **Load monitoring**: collect resource utilization from every broker
+- **Automated rebalancing**: detect imbalance and move topics between brokers
+- **Failover**: reassign topics from a crashed broker to healthy ones
+
+Only the Raft leader runs the Load Manager logic. Followers publish load reports and execute unload commands, but do not make placement decisions.
+
+---
+
+## Load Reports
+
+Every broker publishes a load report to the Raft metadata store at a configurable interval (default: 30 seconds). Each report contains:
+
+**System metrics:**
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| CPU usage | 0-100% | Current processor utilization |
+| Memory usage | 0-100% | Current memory utilization |
+| Disk I/O | bytes/s | Disk throughput |
+| Network I/O | bytes/s | Network throughput |
+
+**Per-topic metrics:**
+
+| Metric | Description |
+|--------|-------------|
+| Message rate | Messages per second |
+| Byte rate | Throughput in Mbps |
+| Producer count | Connected producers |
+| Consumer count | Connected consumers |
+| Subscription count | Active subscriptions |
+| Backlog | Unconsumed messages |
+
+The leader consumes these reports to compute broker rankings and detect imbalance.
+
+---
+
+## Broker Rankings
+
+Rankings are a sorted list of `(broker_id, load_score)` pairs ordered by load ascending (least loaded first). The ranking algorithm is configurable via three strategies:
+
+### Fair
+
+Counts topics only. The broker with the fewest topics is ranked first.
+
+```text title="Scoring formula"
+score = topic_count
+```
+
+Lowest overhead. Suitable for development or clusters with uniform topic sizes.
+
+### Balanced (recommended)
+
+Multi-factor scoring that combines topic load metrics with system resource usage:
+
+```text title="Scoring formula"
+weighted_topic_load = (count × 0.2) + (throughput × 0.3) +
+                      (connections × 0.3) + (backlog × 0.2)
+
+score = (weighted_topic_load × 0.3) + (CPU × 0.35) + (Memory × 0.35)
+```
+
+Provides the best trade-off between accuracy and overhead for production clusters.
+
+### WeightedLoad
+
+Adaptive algorithm that detects the current bottleneck resource and weights it more heavily:
+
+```text title="Scoring formula"
+1. Normalize all metrics to 0.0-1.0
+2. Find the bottleneck (metric with highest utilization)
+3. If bottleneck > 70%: weight it at 50%, distribute 50% across remaining metrics
+4. Otherwise: weight all metrics evenly (25% each)
+```
+
+Best for clusters with highly variable workloads where the bottleneck resource shifts over time.
+
+---
+
+## Topic Assignment Pipeline
+
+When a topic is created, the Load Manager assigns it to a broker through this sequence:
+
+1. **Unassigned marker.** The creating broker writes an entry to `/cluster/unassigned/\<namespace\>/\<topic\>` in the metadata store.
+
+2. **Leader detection.** The Load Manager watches the `/cluster/unassigned/` prefix. A new entry triggers the assignment workflow.
+
+3. **Rankings calculation.** The leader retrieves the latest load reports for all active brokers and computes scores using the configured strategy.
+
+4. **Broker selection.** The least-loaded broker is selected. When multiple brokers have scores within 10% of the minimum, a round-robin rotation ensures even distribution.
+
+5. **Assignment write.** The leader writes the assignment to `/cluster/brokers/\<broker_id\>/\<namespace\>/\<topic\>`.
+
+6. **Topic loading.** The target broker watches its assignment prefix, detects the new entry, initializes the topic locally, and begins accepting connections.
+
+7. **Cleanup.** The leader deletes the unassigned marker and updates its in-memory usage map so the next assignment reflects the updated load immediately, before the broker's next load report arrives.
+
+### Special Cases
+
+**Manual unload:** when an administrator unloads a broker, the unassigned markers carry a `from_broker` hint. The Load Manager excludes the source broker when selecting a target.
+
+**Broker failure:** when a broker crashes, the leader detects its registration deletion, removes all assignments from the failed broker, and creates unassigned markers for each topic. The normal assignment pipeline then distributes them across healthy brokers.
+
+**Equal loads:** when all brokers have identical scores, the Load Manager uses stable round-robin to prevent all topics landing on a single broker.
+
+---
+
+## Automated Rebalancing
+
+As workloads evolve, topic distribution can drift. The rebalancing subsystem runs periodically on the leader to detect and correct imbalances.
+
+### Imbalance Detection
+
+The primary metric is the **Coefficient of Variation (CV)**:
+
+```text title="CV formula"
+CV = (standard_deviation / mean_load) × 100%
+```
+
+| CV Range | Status | Action |
+|----------|--------|--------|
+| < 20% | Well balanced | None |
+| 20-30% | Acceptable | Monitor |
+| 30-40% | Imbalanced | Consider rebalancing |
+| > 40% | Severely imbalanced | Rebalance recommended |
+
+Brokers are classified using the mean and standard deviation:
+
+- **Overloaded**: load > (mean + 1 standard deviation)
+- **Underloaded**: load < (mean - 1 standard deviation) AND load < (mean × 0.5)
+- **Normal**: everything else
+
+### Aggressiveness Levels
+
+Three preset levels control rebalancing behavior:
+
+| Level | CV Threshold | Check Interval | Max Moves/Hour | Use Case |
+|-------|-------------|----------------|----------------|----------|
+| Conservative | 40% | 10 min | 5 | Stable production, large topics |
+| Balanced | 30% | 5 min | 10 | General production |
+| Aggressive | 20% | 2 min | 20 | Fast-changing workloads, testing |
+
+### Candidate Selection
+
+When imbalance is detected, the Load Manager selects topics to move using these filters (applied in order):
+
+1. **Source broker**: only overloaded brokers are candidates for offloading
+2. **Topic age**: topics younger than `min_topic_age_seconds` (default: 300s) are skipped
+3. **Blacklist**: topics matching configured glob patterns are excluded
+4. **Cooldown**: topics moved within `cooldown_seconds` (default: 60s) are skipped
+5. **Load score**: among remaining candidates, the lightest topic is selected first (least disruption)
+
+Topic load is scored with the same weighted formula used by the Balanced strategy:
+
+```text title="Topic load scoring"
+load_score = (topic_count × 0.2) + (throughput_mbps × 0.3) +
+             (connections × 0.3) + (backlog/10000 × 0.2)
+```
+
+### Move Execution
+
+Each move follows the graceful unload workflow:
+
+1. **Create unassigned marker** with `reason: rebalance`, `from_broker`, and `to_broker` hint
+2. **Delete assignment** from the source broker, which triggers: topic seal (no new producers), in-flight message drain, clean unload
+3. **Target assignment**: the Load Manager sees the unassigned marker, respects the `to_broker` hint if that broker is active, and creates the assignment
+4. **Topic loading**: target broker initializes the topic and begins serving traffic
+5. **History recording**: the move is written to `/cluster/rebalancing_history/\<timestamp\>` for rate limiting, cooldown enforcement, and audit
+
+:::note
+Only one topic is moved per rebalancing cycle. This single-move design prevents overshooting, cascading imbalances, and metadata store overload.
+:::
+
+---
+
+## Safety Mechanisms
+
+Automated rebalancing includes multiple safeguards to prevent disruption:
+
+| Mechanism | Purpose |
+|-----------|---------|
+| Single move per cycle | Prevents overshooting and cascading imbalances |
+| Rate limiting | Maximum moves per hour enforced via history tracking |
+| Cooldown period | Topics cannot be moved again within `cooldown_seconds` |
+| Minimum topic age | New topics stabilize before becoming rebalancing candidates |
+| Topic blacklist | Critical topics permanently excluded via glob patterns |
+| Leader-only execution | Only the Raft leader makes placement decisions |
+| Active broker check | Draining and drained brokers are excluded as targets |
+| Graceful unload | Topic moves use seal → drain → unload, same as manual operations |
+
+---
+
+## Configuration
+
+```yaml title="danube_broker.yml"
+load_manager:
+  load_report_interval_seconds: 30
+  assignment_strategy: balanced        # fair | balanced | weighted_load
+
+  rebalancing:
+    enabled: false                     # Start disabled, enable after testing
+    aggressiveness: balanced           # conservative | balanced | aggressive
+    check_interval_seconds: 300
+    max_moves_per_hour: 10
+    cooldown_seconds: 60
+    min_brokers_for_rebalance: 2
+    min_topic_age_seconds: 300
+    blacklist_topics:
+      - "/system/*"
+      - "/default/critical-*"
+```
+
+### Strategy Selection Guide
+
+| Scenario | Strategy | Reason |
+|----------|----------|--------|
+| Development / testing | `fair` | Simple, predictable, lowest overhead |
+| General production | `balanced` | Best accuracy-to-overhead ratio |
+| Heterogeneous hardware | `balanced` | Accounts for CPU/memory differences |
+| Highly variable workloads | `weighted_load` | Adapts to shifting bottlenecks |
+
+---
+
+## Observability
+
+### Cluster Health Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `danube_cluster_balance_cv` | Gauge | Current coefficient of variation |
+| `danube_cluster_balance_mean_load` | Gauge | Mean broker load |
+| `danube_cluster_balance_max_load` | Gauge | Maximum broker load |
+| `danube_cluster_balance_min_load` | Gauge | Minimum broker load |
+| `danube_cluster_balance_std_dev` | Gauge | Standard deviation |
+| `danube_cluster_active_brokers` | Gauge | Count of active brokers |
+
+### Rebalancing Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `danube_rebalancing_checks_total` | Counter | Total balance check cycles |
+| `danube_rebalancing_moves_total` | Counter | Total topic moves executed |
+| `danube_rebalancing_failures_total` | Counter | Failed move attempts |
+| `danube_rebalancing_cycle_duration_seconds` | Histogram | Duration of rebalancing cycles |
+
+### Broker Load Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `danube_broker_topics_owned` | Gauge | Topics per broker |
+| `danube_broker_cpu_usage` | Gauge | CPU percentage per broker |
+| `danube_broker_memory_usage` | Gauge | Memory percentage per broker |
+| `danube_broker_throughput_mbps` | Gauge | Aggregate throughput per broker |
