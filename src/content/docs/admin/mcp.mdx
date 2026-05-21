@@ -1,0 +1,257 @@
+---
+title: AI Admin (MCP)
+description: Manage your Danube cluster using natural language through the Model Context Protocol.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The MCP (Model Context Protocol) mode transforms cluster management from command memorization to natural conversation. Instead of learning CLI syntax, describe what you want in plain English and the AI executes the appropriate operations.
+
+## What is MCP?
+
+MCP is an open protocol that enables AI assistants to interact with external systems through:
+
+- **Tools**: direct function calls the AI can invoke automatically
+- **Prompts**: pre-built multi-step workflows for complex operations
+- **Resources**: contextual information about system state
+
+Danube's MCP server exposes **40+ tools** and **7 guided prompts** for cluster management.
+
+---
+
+## Getting Started
+
+```bash title="Start the MCP server"
+danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
+```
+
+### IDE Configuration
+
+<Tabs>
+<TabItem label="Claude Desktop">
+
+```json title="~/Library/Application Support/Claude/claude_desktop_config.json"
+{
+  "mcpServers": {
+    "danube-admin": {
+      "command": "/usr/local/bin/danube-admin",
+      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
+      "env": {
+        "NO_COLOR": "1",
+        "RUST_LOG": "error"
+      }
+    }
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Windsurf">
+
+```json title="~/.codeium/windsurf/mcp_config.json"
+{
+  "mcpServers": {
+    "danube-admin": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "/usr/local/bin/danube-admin serve --mode mcp --broker-endpoint http://localhost:50051"
+      ],
+      "env": {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "NO_COLOR": "1",
+        "RUST_LOG": "error"
+      }
+    }
+  }
+}
+```
+
+</TabItem>
+<TabItem label="VSCode">
+
+```json title="MCP extension configuration"
+{
+  "servers": {
+    "danube-admin": {
+      "type": "stdio",
+      "command": "/usr/local/bin/danube-admin",
+      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
+      "env": {
+        "NO_COLOR": "1",
+        "RUST_LOG": "error"
+      }
+    }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+## Usage Examples
+
+```text title="Basic operations"
+You: "Check the health of my Danube cluster"
+AI:  [Calls health_check] → broker status, balance CV, topic counts
+
+You: "What topics are in the default namespace?"
+AI:  [Calls list_topics] → lists all topics with broker assignments
+
+You: "Create a topic for user events with 4 partitions and reliable delivery"
+AI:  [Calls create_topic] → confirms creation with details
+```
+
+```text title="Guided workflows"
+You: "Run the cluster health check workflow"
+AI:  [Loads cluster_health_check prompt]
+     Step 1: Cluster Overview → broker count, topic count
+     Step 2: Broker Health → all brokers online
+     Step 3: Load Distribution → CV analysis
+     Step 4: Recommendations → prioritized action items
+
+You: "I need to add a field to the user-events schema safely"
+AI:  [Uses manage_schema_evolution prompt]
+     Step 1: Analyzes current schema and compatibility mode
+     Step 2: Validates new schema compatibility
+     Step 3: Registers new version
+     Step 4: Verifies topics picked up the change
+```
+
+---
+
+## Available Tools
+
+### Cluster Management (9 tools)
+
+| Tool | Description |
+|------|-------------|
+| `list_brokers` | List all brokers with status and roles |
+| `get_leader` | Identify the current cluster leader |
+| `get_cluster_balance` | Load distribution metrics (CV analysis) |
+| `trigger_rebalance` | Redistribute topics across brokers (supports dry-run) |
+| `unload_broker` | Gracefully drain topics from a broker |
+| `activate_broker` | Bring a broker back into service |
+| `list_namespaces` | List all namespaces |
+| `create_namespace` / `delete_namespace` | Namespace lifecycle |
+| `get_namespace_policies` | Resource limits and policies |
+
+### Topic Management (8 tools)
+
+| Tool | Description |
+|------|-------------|
+| `list_topics` | List topics in a namespace |
+| `describe_topic` | Detailed topic info (schema, subscriptions, broker) |
+| `create_topic` / `delete_topic` | Topic lifecycle |
+| `list_subscriptions` / `unsubscribe` | Subscription management |
+| `unload_topic` | Reassign a topic to another broker |
+| `configure_topic_schema` | Associate schema and set validation policy |
+| `set_topic_validation_policy` | Update validation without changing schema |
+
+### Schema Registry (7 tools)
+
+| Tool | Description |
+|------|-------------|
+| `register_schema` | Register or create a new version |
+| `get_schema` | Get latest schema by subject |
+| `list_schema_versions` | All versions with metadata |
+| `check_schema_compatibility` | Validate before registration |
+| `get/set_schema_compatibility_mode` | Compatibility policy management |
+| `delete_schema_version` | Remove a specific version |
+
+### Diagnostics (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `health_check` | Comprehensive cluster health assessment |
+| `analyze_consumer_lag` | Diagnose lag for a topic/subscription |
+| `get_recommendations` | Prioritized action items based on cluster state |
+
+### Log Access (6 tools)
+
+| Tool | Description |
+|------|-------------|
+| `get_broker_logs` | Logs by broker ID (requires config) |
+| `list_docker_containers` / `fetch_container_logs` | Docker log access |
+| `list_k8s_pods` / `fetch_pod_logs` | Kubernetes log access |
+
+### Metrics (4 tools)
+
+:::note
+All metrics tools require Prometheus. Configure `prometheus_url` in `mcp-config.yml`.
+:::
+
+| Tool | Description |
+|------|-------------|
+| `get_cluster_metrics` | Cluster-wide summary (rates, throughput, CV) |
+| `get_broker_metrics` | Per-broker metrics (topics, RPCs, bytes in/out) |
+| `get_topic_metrics` | Topic metrics (rates, lag, latency percentiles) |
+| `query_prometheus` | Raw PromQL queries |
+
+---
+
+## Guided Workflow Prompts
+
+### Troubleshooting
+
+| Prompt | Arguments | Description |
+|--------|-----------|-------------|
+| `diagnose_consumer_lag` | topic, subscription | Step-by-step lag diagnosis |
+| `diagnose_broker_issues` | broker_id | Broker health investigation |
+| `analyze_topic_performance` | topic | Deep metrics analysis |
+| `cluster_health_check` | — | Full cluster assessment |
+
+### Operational
+
+| Prompt | Arguments | Description |
+|--------|-----------|-------------|
+| `setup_new_topic` | namespace, use_case | Guided topic creation with best practices |
+| `manage_schema_evolution` | subject, schema_type | Safe schema evolution with compatibility checks |
+| `prepare_cluster_rebalance` | max_moves, target_broker | Dry-run, execute, verify rebalance |
+
+---
+
+## Advanced Configuration
+
+For log access and Prometheus metrics, create a config file:
+
+```yaml title="mcp-config.yml"
+broker_endpoint: http://localhost:50051
+prometheus_url: http://localhost:9090
+
+deployment:
+  type: docker    # docker | kubernetes | local
+  docker:
+    container_mappings:
+      - id: "broker1"
+        container: "danube-broker1"
+      - id: "broker2"
+        container: "danube-broker2"
+```
+
+```bash title="Start with config"
+danube-admin serve --mode mcp --config /path/to/mcp-config.yml
+```
+
+---
+
+## Best Practices
+
+- **Discovery before action**: ask the AI to check state before making changes
+- **Use prompts for complex operations**: multi-step workflows are safer than individual commands
+- **Dry-run first**: for rebalancing and destructive operations, always preview
+- **Ask why, not just what**: MCP understands context and can explain decisions
+
+---
+
+## Limitations
+
+| Can do | Cannot do |
+|--------|-----------|
+| Read cluster state (brokers, topics, schemas) | Publish or consume messages |
+| Create/delete topics and namespaces | Modify broker configuration |
+| Register and evolve schemas | Access data beyond Prometheus retention |
+| Trigger rebalancing and maintenance | Execute arbitrary shell commands |
+| Access logs and metrics | — |

@@ -54,6 +54,12 @@ export default defineConfig({
                     ],
                 },
                 {
+                    label: 'Tools',
+                    items: [
+                        { label: 'Danube CLI', slug: 'tools/danube-cli' },
+                    ],
+                },
+                {
                     label: 'Security',
                     items: [
                         { label: 'Overview', slug: 'security/overview' },
@@ -61,6 +67,15 @@ export default defineConfig({
                         { label: 'Authentication (JWT)', slug: 'security/authentication' },
                         { label: 'Authorization (RBAC)', slug: 'security/authorization' },
                         { label: 'Securing a Cluster', slug: 'security/securing-a-cluster' },
+                    ],
+                },
+                {
+                    label: 'Administration',
+                    items: [
+                        { label: 'Overview', slug: 'admin/overview' },
+                        { label: 'AI Admin (MCP)', slug: 'admin/mcp' },
+                        { label: 'CLI: Cluster & Brokers', slug: 'admin/cli-cluster' },
+                        { label: 'CLI: Resources', slug: 'admin/cli-resources' },
                     ],
                 },
             ],

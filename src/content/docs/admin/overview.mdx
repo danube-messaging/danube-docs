@@ -1,0 +1,104 @@
+---
+title: Administration Overview
+description: Three ways to manage your Danube cluster — CLI, AI-native MCP, and HTTP API.
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+`danube-admin` is a single binary that provides three interfaces for managing your Danube cluster. All three share the same core functionality.
+
+## Management Interfaces
+
+<CardGrid>
+	<Card title="CLI Mode" icon="seti:shell">
+		Command-line interface for scripts, automation, and quick operations.
+
+		```bash
+		danube-admin brokers list
+		```
+
+		[CLI Reference →](/admin/cli-cluster/)
+	</Card>
+	<Card title="AI Admin (MCP)" icon="seti:robot">
+		Natural language cluster management through Claude, Windsurf, or VSCode.
+
+		[MCP Guide →](/admin/mcp/)
+	</Card>
+	<Card title="HTTP Server" icon="seti:json">
+		REST API for the Danube Admin UI and custom dashboards.
+
+		```bash
+		danube-admin serve --mode http --port 8080
+		```
+	</Card>
+</CardGrid>
+
+---
+
+## Installation
+
+```bash title="Linux"
+curl -L -o danube-admin https://github.com/danube-messaging/danube/releases/latest/download/danube-admin-linux
+chmod +x danube-admin
+sudo mv danube-admin /usr/local/bin/
+```
+
+```bash title="macOS (Apple Silicon)"
+curl -L -o danube-admin https://github.com/danube-messaging/danube/releases/latest/download/danube-admin-macos
+chmod +x danube-admin
+sudo mv danube-admin /usr/local/bin/
+```
+
+```bash title="Docker"
+docker pull ghcr.io/danube-messaging/danube-admin:latest
+```
+
+```bash title="Verify"
+danube-admin --version
+```
+
+---
+
+## Configuration
+
+```bash title="Environment variables"
+# Broker admin endpoint (required)
+export DANUBE_BROKER_ENDPOINT=http://localhost:50051
+
+# Optional defaults
+export DANUBE_NAMESPACE=default
+export DANUBE_OUTPUT_FORMAT=json
+```
+
+```bash title="Command-line flags"
+# Override endpoint per command
+danube-admin --broker-endpoint http://broker1:50051 brokers list
+
+# JSON output for scripting
+danube-admin brokers list --output json
+```
+
+---
+
+## HTTP Server Mode
+
+The HTTP server mode exposes a REST API that powers the [Danube Admin UI](https://github.com/danube-messaging/danube-admin-ui).
+
+```bash title="Start the HTTP server"
+danube-admin serve --mode http --port 8080 \
+  --broker-endpoint http://localhost:50051
+```
+
+```bash title="Example API usage"
+# List brokers
+curl http://localhost:8080/api/brokers
+
+# Create topic
+curl -X POST http://localhost:8080/api/topics \
+  -H "Content-Type: application/json" \
+  -d '{"name": "/default/events", "partitions": 4}'
+
+# Get cluster balance
+curl http://localhost:8080/api/cluster/balance
+```
+
