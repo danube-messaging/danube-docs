@@ -9,6 +9,7 @@ export default defineConfig({
     integrations: [
         starlight({
             title: 'Danube Messaging',
+            favicon: '/favicon.png',
             logo: {
                 src: './src/assets/Danube_black_square.png',
             },
@@ -79,6 +80,12 @@ export default defineConfig({
                     ],
                 },
                 {
+                    label: 'Edge',
+                    items: [
+                        { label: 'Overview', slug: 'edge/overview' },
+                    ],
+                },
+                {
                     label: 'Architecture',
                     items: [
                         { label: 'Overview', slug: 'architecture/overview' },
@@ -86,6 +93,14 @@ export default defineConfig({
                         { label: 'Load Manager', slug: 'architecture/load-manager' },
                         { label: 'Key-Shared Dispatch', slug: 'architecture/key-shared' },
                         { label: 'Reliable Topic Move', slug: 'architecture/reliable-topic-move' },
+                        { label: 'Metadata Paths', slug: 'architecture/metadata-paths' },
+                    ],
+                },
+                {
+                    label: 'Integrations',
+                    items: [
+                        { label: 'Danube Connect', slug: 'integrations/danube-connect' },
+                        { label: 'Connector Development', slug: 'integrations/connector-development' },
                     ],
                 },
                 {

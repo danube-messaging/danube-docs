@@ -1,0 +1,188 @@
+---
+title: Danube Connect
+description: Plug-and-play connector framework for integrating Danube with external systems like databases, message queues, and analytics platforms.
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Danube Connect is a connector framework that integrates Danube with external systems: databases, message queues, IoT protocols, analytics platforms, and more. Connectors run as **standalone processes** that communicate with Danube via gRPC, keeping the broker lightweight and isolated from third-party dependencies.
+
+---
+
+## Why Out-of-Process?
+
+| Embedded Integrations | Danube Connect |
+|-----------------------|----------------|
+| Connector crash takes down the broker | Isolated processes, broker unaffected |
+| Tight coupling, hard to maintain | Clean separation of concerns |
+| Bloated broker binary | Lightweight core |
+| All-or-nothing scaling | Scale connectors independently |
+
+---
+
+## Available Connectors
+
+| Connector | Type | Description |
+|-----------|------|-------------|
+| [MQTT Source](https://github.com/danube-messaging/danube-connectors/tree/main/source-mqtt) | Source | IoT device integration (MQTT 3.1.1) |
+| [HTTP Webhook Source](https://github.com/danube-messaging/danube-connectors/tree/main/source-webhook) | Source | Universal webhook ingestion |
+| [Qdrant Sink](https://github.com/danube-messaging/danube-connectors/tree/main/sink-qdrant) | Sink | Vector embeddings for RAG/AI |
+| [SurrealDB Sink](https://github.com/danube-messaging/danube-connectors/tree/main/sink-surrealdb) | Sink | Multi-model database storage |
+| [Delta Lake Sink](https://github.com/danube-messaging/danube-connectors/tree/main/sink-deltalake) | Sink | ACID data lake ingestion (S3, Azure, GCS) |
+
+---
+
+## Architecture
+
+Connectors follow a layered architecture where your code only handles external system logic:
+
+```text
+External Systems (MQTT, databases, APIs)
+          ↓
+Your Connector Logic (implement trait)
+          ↓
+danube-connect-core (SDK runtime)
+          ↓
+danube-client (gRPC)
+          ↓
+Danube Broker Cluster
+```
+
+- **Source connectors** import data into Danube from external systems. They poll or subscribe to an external source, transform events into `SourceRecord` values, and the runtime publishes them.
+- **Sink connectors** export data from Danube to external systems. They receive pre-deserialized `SinkRecord` batches from the runtime and write them to a target system.
+
+### What the SDK Handles
+
+The `danube-connect-core` runtime manages everything except external system logic:
+
+- Danube client connection and producer/consumer lifecycle
+- Schema-aware serialization (sources) and deserialization (sinks)
+- Polling loops, streaming envelope drains, and sink batch flush timing
+- Retry with exponential backoff
+- Prometheus metrics and health checks
+- Signal handling and graceful shutdown
+
+---
+
+## Quick Start
+
+Deploy any connector using Docker:
+
+```bash
+docker run -d \
+  -e DANUBE_SERVICE_URL=http://danube-broker:6650 \
+  -e CONNECTOR_NAME=mqtt-bridge \
+  -e CONNECTOR_CONFIG_PATH=/config/connector.toml \
+  -v $(pwd)/config.toml:/config/connector.toml:ro \
+  ghcr.io/danube-messaging/danube-source-mqtt:latest
+```
+
+---
+
+## Configuration
+
+Connectors use a single TOML file combining core Danube settings with connector-specific settings:
+
+```toml
+# Core (from danube-connect-core)
+danube_service_url = "http://danube-broker:6650"
+connector_name = "mqtt-bridge"
+
+[processing]
+batch_size = 500
+batch_timeout_ms = 1000
+poll_interval_ms = 100
+metrics_port = 9090
+
+# Schema mappings (source connectors)
+[[schemas]]
+topic = "/iot/sensors"
+subject = "sensor-data"
+schema_type = "json_schema"
+schema_file = "schemas/sensor.json"
+version_strategy = "latest"
+
+# Connector-specific
+[mqtt]
+broker_host = "mosquitto"
+broker_port = 1883
+
+[[mqtt.routes]]
+from = "sensors/#"
+to = "/iot/sensors"
+partitions = 8
+```
+
+**Environment variable overrides**: Use `DANUBE_SERVICE_URL`, `CONNECTOR_NAME`, and secrets (passwords, API keys). Structural config like `routes` and `schemas` stays in TOML.
+
+---
+
+## Schema Integration
+
+The runtime handles schema operations automatically, connectors work with typed `serde_json::Value` data.
+
+**Source connectors**: You create `SourceRecord` with a JSON value. The runtime validates against the schema, serializes, registers with the registry if needed, and attaches the schema ID.
+
+**Sink connectors**: The runtime fetches the schema from the registry, deserializes the payload, and hands you a `SinkRecord` with typed data. No manual byte parsing.
+
+### Supported Schema Types
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| `json_schema` | JSON Schema validation | Structured events, APIs |
+| `avro` | Apache Avro | High-performance schemas |
+| `string` | UTF-8 text | Logs, text messages |
+| `bytes` | Raw binary | Binary data |
+| `number` | Numeric data | Metrics, counters |
+
+### Version Strategies
+
+| Strategy | Syntax | Use Case |
+|----------|--------|----------|
+| Latest | `"latest"` | Development, always newest |
+| Pinned | `{ pinned = 3 }` | Production stability |
+| Minimum | `{ minimum = 2 }` | Backward compatibility |
+
+---
+
+## Observability
+
+Every connector automatically exposes:
+
+- **Prometheus metrics** (`/metrics`): messages received/sent, errors, processing duration
+- **Health checks** (`/health`): `healthy`, `degraded`, or `unhealthy`
+- **Structured logging**: JSON format with configurable log levels via `LOG_LEVEL`
+
+---
+
+## Error Handling
+
+The SDK categorizes errors to drive runtime behavior:
+
+| Error Type | Meaning | Runtime Action |
+|------------|---------|----------------|
+| `Retryable` | Temporary failure (network, rate limit) | Retry with exponential backoff |
+| `InvalidData` | Malformed message | Log and skip |
+| `Fatal` | Unrecoverable (auth, bad config) | Graceful shutdown |
+
+Connectors return the appropriate error type and the runtime handles the rest.
+
+---
+
+<CardGrid>
+  <LinkCard
+    title="Build a Connector"
+    description="Source and sink connector development guide with traits, configuration, and examples."
+    href="/integrations/connector-development/"
+  />
+  <LinkCard
+    title="Connector SDK"
+    description="danube-connect-core API reference on docs.rs."
+    href="https://docs.rs/danube-connect-core"
+  />
+  <LinkCard
+    title="Connectors Repository"
+    description="Source code and examples for all available connectors."
+    href="https://github.com/danube-messaging/danube-connectors"
+  />
+</CardGrid>

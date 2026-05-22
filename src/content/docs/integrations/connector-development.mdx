@@ -1,0 +1,351 @@
+---
+title: Connector Development
+description: How to build source and sink connectors for Danube Connect using the danube-connect-core SDK.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+This guide covers building both source and sink connectors using the `danube-connect-core` SDK. Source connectors import data into Danube, sink connectors export data from Danube.
+
+---
+
+## Division of Responsibilities
+
+| You Handle | Runtime Handles |
+|------------|-----------------|
+| Connect to external system | Connect to Danube broker |
+| Transform data to/from `SourceRecord`/`SinkRecord` | Schema serialization and deserialization |
+| Topic routing logic | Producer/consumer lifecycle |
+| External checkpoint/offset tracking | Retry with exponential backoff |
+| Error classification | Metrics, health checks, graceful shutdown |
+
+You work with typed `serde_json::Value` data. The runtime handles raw bytes, schemas, and Danube protocol details.
+
+---
+
+## Source Connectors
+
+### Trait
+
+```rust
+#[async_trait]
+pub trait SourceConnector: Send + Sync {
+    async fn initialize(&mut self, config: ConnectorConfig) -> ConnectorResult<()>;
+    async fn producer_configs(&self) -> ConnectorResult<Vec<ProducerConfig>>;
+
+    fn mode(&self) -> SourceConnectorMode {
+        SourceConnectorMode::Polling
+    }
+
+    async fn start_streaming(&mut self, sender: SourceSender) -> ConnectorResult<()>;
+    async fn poll(&mut self) -> ConnectorResult<Vec<SourceEnvelope>>;
+
+    async fn commit(&mut self, offsets: Vec<Offset>) -> ConnectorResult<()> { Ok(()) }
+    async fn shutdown(&mut self) -> ConnectorResult<()> { Ok(()) }
+    async fn health_check(&self) -> ConnectorResult<()> { Ok(()) }
+}
+```
+
+**Required**: `initialize`, `producer_configs`, and either `poll` (polling mode) or `start_streaming` (streaming mode).
+
+### Source Modes
+
+**Polling mode** (default): The runtime calls `poll()` at a configured interval. Return a `Vec<SourceEnvelope>` with new records, or an empty `Vec` when no data is available.
+
+```rust
+async fn poll(&mut self) -> ConnectorResult<Vec<SourceEnvelope>> {
+    let events = self.client.fetch().await?;
+
+    let records = events.into_iter().map(|event| {
+        SourceRecord::from_json("/events/users", &event)
+            .unwrap()
+            .with_attribute("source", "api")
+            .into()
+    }).collect();
+
+    Ok(records)
+}
+```
+
+**Streaming mode**: Override `mode()` to return `Streaming` and implement `start_streaming()`. Push records to the runtime using the provided `SourceSender`.
+
+```rust
+fn mode(&self) -> SourceConnectorMode {
+    SourceConnectorMode::Streaming
+}
+
+async fn start_streaming(&mut self, sender: SourceSender) -> ConnectorResult<()> {
+    let client = self.client.clone();
+    tokio::spawn(async move {
+        while let Some(event) = client.next_event().await {
+            let record = SourceRecord::from_json("/events/users", &event)
+                .unwrap()
+                .with_attribute("source", "stream");
+            if sender.send(record).await.is_err() { break; }
+        }
+    });
+    Ok(())
+}
+```
+
+Use polling for pull-based systems (databases, REST APIs). Use streaming for event-driven systems (MQTT, websockets).
+
+### Creating Records
+
+```rust
+// From JSON value
+SourceRecord::new("/topic", json!({"key": "value"}))
+
+// From a serializable struct
+SourceRecord::from_json("/topic", &my_struct)?
+
+// From string, number, or bytes
+SourceRecord::from_string("/topic", &text)
+SourceRecord::from_number("/topic", 42.0)?
+SourceRecord::from_bytes("/topic", &bytes)
+
+// Add attributes and routing key
+record.with_attribute("device_id", "sensor-42")
+      .with_key(&partition_key)
+
+// Attach an offset for checkpointing
+SourceEnvelope::with_offset(record, Offset::new("partition-0", 42))
+```
+
+### Offset Management
+
+Implement `commit()` if you need to track processing position for resumability. The runtime calls `commit()` after successfully publishing a batch.
+
+```rust
+async fn commit(&mut self, offsets: Vec<Offset>) -> ConnectorResult<()> {
+    for offset in offsets {
+        self.checkpoint_store.save(&offset.partition, offset.value).await?;
+    }
+    Ok(())
+}
+```
+
+Skip this if at-least-once delivery is acceptable or your source is stateless.
+
+---
+
+## Sink Connectors
+
+### Trait
+
+```rust
+#[async_trait]
+pub trait SinkConnector: Send + Sync {
+    async fn initialize(&mut self, config: ConnectorConfig) -> ConnectorResult<()>;
+    async fn consumer_configs(&self) -> ConnectorResult<Vec<ConsumerConfig>>;
+    async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()>;
+
+    async fn shutdown(&mut self) -> ConnectorResult<()> { Ok(()) }
+    async fn health_check(&self) -> ConnectorResult<()> { Ok(()) }
+}
+```
+
+**Required**: `initialize`, `consumer_configs`, `process_batch`.
+
+### Consumer Configuration
+
+```rust
+async fn consumer_configs(&self) -> ConnectorResult<Vec<ConsumerConfig>> {
+    Ok(vec![ConsumerConfig {
+        topic: "/events/users",
+        consumer_name: "my-sink-1",
+        subscription: "my-sink-group",
+        subscription_type: SubscriptionType::Shared,
+        expected_schema_subject: Some("user-events-v1"),
+    }])
+}
+```
+
+| Subscription Type | Behavior | Use Case |
+|-------------------|----------|----------|
+| `Shared` | Load-balanced across consumers | Parallel processing (most common) |
+| `Exclusive` | Single consumer, ordered | Sequential processing |
+| `FailOver` | Active-passive with failover | Ordered + high availability |
+
+### Processing Batches
+
+The runtime buffers messages and calls `process_batch()` when the batch size or timeout is reached. You receive pre-deserialized records:
+
+```rust
+async fn process_batch(&mut self, records: Vec<SinkRecord>) -> ConnectorResult<()> {
+    for record in &records {
+        let payload = record.payload();        // &serde_json::Value
+        let topic = record.topic();            // &str
+        let attrs = record.attributes();       // &HashMap<String, String>
+
+        // Or deserialize to a struct
+        let event: MyEvent = record.as_type()?;
+
+        // Access schema metadata if present
+        if let Some(schema) = record.schema() {
+            println!("{} v{}", schema.subject, schema.version);
+        }
+    }
+
+    self.database.bulk_insert(&records).await?;
+    Ok(())
+}
+```
+
+Batch size and flush timeout are controlled by the shared `[processing]` config, not connector-specific settings:
+
+```toml
+[processing]
+batch_size = 1000
+batch_timeout_ms = 1000
+```
+
+---
+
+## Configuration
+
+Both connector types use a single config struct with `ConnectorConfig` flattened to the root:
+
+```rust
+#[derive(Deserialize)]
+pub struct MyConfig {
+    #[serde(flatten)]
+    pub core: ConnectorConfig,
+    pub my_connector: MySettings,
+}
+```
+
+**Source connector TOML**:
+
+```toml
+danube_service_url = "http://danube-broker:6650"
+connector_name = "my-source"
+
+[processing]
+poll_interval_ms = 100
+metrics_port = 9090
+
+[[schemas]]
+topic = "/iot/sensors"
+subject = "sensor-data"
+schema_type = "json_schema"
+schema_file = "schemas/sensor.json"
+version_strategy = "latest"
+
+[my_connector]
+external_host = "system.example.com"
+
+[[my_connector.routes]]
+from = "input/*"
+to = "/iot/sensors"
+partitions = 4
+```
+
+**Sink connector TOML**:
+
+```toml
+danube_service_url = "http://danube-broker:6650"
+connector_name = "my-sink"
+
+[processing]
+batch_size = 500
+batch_timeout_ms = 1000
+metrics_port = 9090
+
+[my_connector]
+target_url = "http://database.example.com"
+
+[[my_connector.routes]]
+from = "/events/users"
+subscription = "sink-group-1"
+subscription_type = "Shared"
+to = "users_table"
+expected_schema_subject = "user-events-v1"
+```
+
+:::note
+Source connectors define `[[schemas]]` to configure serialization. Sink connectors typically skip this section because the runtime handles deserialization automatically.
+:::
+
+---
+
+## Error Handling
+
+Return the appropriate error type from your trait methods:
+
+| Error Type | When to Use | Runtime Action |
+|------------|-------------|----------------|
+| `Retryable` | Temporary failures (network, rate limit, timeout) | Retry with exponential backoff |
+| `InvalidData` | Malformed records that can never succeed | Log and skip |
+| `Fatal` | Unrecoverable (auth failure, bad config) | Graceful shutdown |
+| `Ok(())` / `Ok(vec![])` | Success or no data available | Continue |
+
+For partial batch failures in sinks, handle skippable records inside `process_batch()` and only return an error for the portion that truly failed.
+
+---
+
+## Main Entry Point
+
+Both source and sink connectors follow the same pattern:
+
+```rust
+#[tokio::main]
+async fn main() -> ConnectorResult<()> {
+    tracing_subscriber::fmt::init();
+
+    let config = MyConfig::load()?;
+    let connector = MyConnector::new(config.my_connector);
+
+    // Source
+    let mut runtime = SourceRuntime::new(connector, config.core).await?;
+    runtime.run().await
+
+    // Sink
+    let mut runtime = SinkRuntime::new(connector, config.core).await?;
+    runtime.run().await
+}
+```
+
+The runtime handles Danube connections, producer/consumer lifecycle, polling/batching loops, retries, metrics, health checks, and graceful shutdown.
+
+---
+
+## Testing
+
+<Steps>
+1. **Start Danube**:
+   ```bash
+   docker-compose up -d
+   ```
+
+2. **Set config path**:
+   ```bash
+   export CONNECTOR_CONFIG_PATH=./config/connector.toml
+   ```
+
+3. **Run your connector**:
+   ```bash
+   cargo run
+   ```
+
+4. **Verify** (source connectors):
+   ```bash
+   danube-cli consume --topic /your/topic --subscription test-sub
+   ```
+
+5. **Verify** (sink connectors):
+   ```bash
+   danube-cli produce --topic /your/topic --message '{"test":"data"}'
+   # Then check the target system
+   ```
+</Steps>
+
+For unit tests, test transformation logic and routing in isolation. Mock external systems and validate error handling paths.
+
+---
+
+## Resources
+
+- [danube-connect-core SDK](https://docs.rs/danube-connect-core) — API reference
+- [Connectors repository](https://github.com/danube-messaging/danube-connectors) — Source code and full examples
+- [Configuration guide](https://github.com/danube-messaging/danube-connect/blob/main/info/unified_configuration_guide.md) — Complete config reference

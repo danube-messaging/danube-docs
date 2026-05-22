@@ -1,0 +1,160 @@
+---
+title: Danube Edge
+description: Architecture and concepts of the Danube Edge broker, a lightweight MQTT gateway that bridges IoT devices into a Danube cluster.
+---
+
+import { LinkCard, Steps } from '@astrojs/starlight/components';
+
+Danube Edge is a lightweight gateway that runs at the network perimeter and bridges MQTT devices into a Danube cluster. It accepts standard MQTT connections, maps MQTT topics to Danube topics, validates payloads against schemas from the cluster registry, writes messages to a local WAL for durability, and replicates them to the cluster in the background.
+
+The edge runs as a mode of the same `danube-broker` binary. It is not a full cluster participant, it does not vote in Raft or own topics in the cluster sense. Instead, it acts as a store-and-forward relay between constrained device networks and the central cluster.
+
+:::note
+For configuration details, see [Edge Configuration](/reference/edge-configuration/).
+:::
+
+---
+
+## When to Use Edge
+
+The edge is designed for environments where devices speak MQTT and need a local ingestion point that can buffer messages during network outages:
+
+- **Factory floors** with PLCs and sensors publishing over MQTT
+- **Field deployments** where connectivity to the central cluster is intermittent
+- **Mobile gateways** that collect telemetry locally and replicate when online
+- **Multi-site architectures** where each site runs its own edge and all data converges in one cluster
+
+---
+
+## Data Flow
+
+Messages flow through three layers on the edge before reaching the cluster:
+
+<Steps>
+1. **MQTT Gateway**
+
+   A TCP server accepts MQTT connections on port 1883 (configurable). Incoming PUBLISH packets are matched against an ordered list of topic mapping rules. On the first match, the gateway extracts wildcard captures into Danube message attributes, optionally validates the payload against a schema, and writes the message into a per-topic batch buffer. Batches are flushed to the local WAL when either the batch size or timeout is reached.
+
+2. **Local WAL**
+
+   Messages are persisted to the local Write-Ahead Log before leaving the edge. This is the store-and-forward mechanism: if the network to the cluster is down, the WAL retains messages until connectivity is restored. The WAL survives edge restarts.
+
+3. **Replicator**
+
+   Each Danube topic on the edge gets its own background replication task. The replicator tails the local WAL from the last checkpointed offset, collects messages into batches, and sends them to the cluster via gRPC. On successful acknowledgment, the replicator checkpoints the last replicated offset. On failure, it retries with exponential backoff and jitter, re-discovers the target broker if the topic has migrated, and resets the WAL reader to the checkpoint on persistent failure. The replicator never gives up, it retries indefinitely.
+</Steps>
+
+---
+
+## Topic Mapping
+
+The edge does not create Danube topics dynamically from MQTT traffic. Instead, topic mappings are declared in the configuration file and registered with the cluster at startup.
+
+Each mapping rule specifies:
+
+| Field | Purpose |
+|-------|---------|
+| `mqtt_pattern` | MQTT topic filter with `+` (single-level) and `#` (multi-level) wildcards |
+| `danube_topic` | Target Danube topic, must be under the `/{edge_name}/` namespace |
+| `schema_subject` | Optional schema from the cluster registry for payload validation |
+| `extract_attributes` | Map wildcard captures (`$1`, `$2`) to Danube message attributes |
+
+Rules are evaluated in order. The first match wins. A catch-all `#` pattern can be placed last to route unmatched traffic.
+
+**Example:** an MQTT message published to `device/sensor-42/telemetry` matches the pattern `device/+/telemetry`, routes to the Danube topic `/edge1/telemetry`, and extracts `device_id = sensor-42` as a message attribute. Cluster consumers see this attribute on every message without the device needing to know about Danube.
+
+All Danube topics on the edge must be under the `/{edge_name}/` namespace. The edge validates this constraint at startup and rejects any mapping that violates it.
+
+---
+
+## Topic Readiness
+
+A topic is ready for MQTT ingestion only when three conditions are met:
+
+| Condition | Meaning |
+|-----------|---------|
+| Local WAL provisioned | The WAL handle for this topic has been created on the edge |
+| Cluster registered | The `RegisterEdge` RPC confirmed the topic on the cluster |
+| Schema resolved | The schema subject has been resolved from the cluster registry (or the topic uses raw bytes) |
+
+Messages arriving for a topic that is not ready are rejected. MQTT QoS 1 devices will retry automatically.
+
+---
+
+## Bootstrap Sequence
+
+When the edge starts, it executes a 6-phase bootstrap:
+
+1. **Namespace validation**: verify all topic mappings are under `/{edge_name}/`
+2. **Local provisioning**: create WAL handles for each Danube topic declared in the mappings
+3. **Cluster registration**: send a single `RegisterEdge` RPC to the cluster, which creates topics and resolves schemas
+4. **Readiness marking**: process the registration response and mark each topic as ready (or log why it is not)
+5. **Spawn replication**: start a per-topic replicator task that tails the WAL
+6. **Spawn MQTT and heartbeat**: start the TCP listener, the ingestion flush loop, and the periodic heartbeat
+
+If cluster registration fails (network down), topics remain not-ready and the heartbeat loop will retry registration on the next interval.
+
+---
+
+## Heartbeat and Schema Sync
+
+The edge sends a periodic heartbeat to the cluster (default: every 30 seconds). The heartbeat carries the edge's current `config_version`. If the cluster detects changes since that version, it returns a list of updates:
+
+| Change Type | Edge Action |
+|-------------|-------------|
+| Schema updated | Cache the new schema, recompile the payload validator if enforcement is active |
+| Schema removed | Mark the topic as not-ready (messages will be rejected until the schema is restored) |
+| Topic removed | Mark the topic as not-ready |
+
+This mechanism keeps the edge's schema cache synchronized with the cluster registry without requiring the edge to poll individual schema endpoints.
+
+---
+
+## Schema Validation
+
+When a topic mapping declares a `schema_subject`, the edge pulls the schema definition from the cluster during registration. Two validation modes are available:
+
+| Mode | Behavior |
+|------|----------|
+| `none` (default) | The edge stamps `schema_id` and `schema_version` on messages but does not validate payloads |
+| `enforce` | The edge compiles a payload validator (JSON Schema, Avro) and rejects messages that fail validation before they reach the WAL |
+
+In enforce mode, invalid payloads are rejected at the edge and never reach the cluster. This protects the cluster from malformed device data.
+
+When the cluster updates a schema (detected via heartbeat), the edge recompiles the validator on-the-fly without restarting.
+
+---
+
+## Resilience
+
+The edge is designed for unreliable network environments:
+
+**Store-and-forward.** Messages are written to the local WAL before replication. If the cluster is unreachable, messages accumulate locally and are replicated when connectivity returns. No messages are lost as long as the edge's local disk is intact.
+
+**Replicator retry.** Each per-topic replicator retries with exponential backoff and jitter on transient failures. On `Unavailable` errors (topic migrated to another broker), the replicator re-discovers the target broker. On persistent failure, it resets the WAL reader to the last checkpoint and retries from there. The replicator never terminates, it runs indefinitely.
+
+**Connection limits.** The MQTT gateway enforces a maximum concurrent connection count (default: 10,000) and a maximum payload size (default: 256 KB) to protect the edge from resource exhaustion.
+
+**Graceful shutdown.** All MQTT tasks (listener, flush loop) are coordinated through a shutdown channel for clean termination.
+
+---
+
+## Edge vs. Cluster Broker
+
+| Aspect | Edge Broker | Cluster Broker |
+|--------|-------------|----------------|
+| Raft participation | No (not a voter or learner) | Yes (voter or learner) |
+| Topic ownership | No (topics live on the cluster) | Yes (owns and serves topics) |
+| Client protocol | MQTT (device-facing) | gRPC (client libraries) |
+| Storage | Local WAL only (store-and-forward) | Local WAL + durable segments |
+| Replication | Edge → cluster (one-way) | Raft consensus (metadata) |
+| Schema registry | Pulls from cluster, caches locally | Source of truth |
+| Configuration | `edge.yaml` | `danube_broker.yml` |
+
+---
+
+<LinkCard
+  title="Edge Configuration Reference"
+  description="Complete reference for edge.yaml covering identity, MQTT gateway, topic mappings, and replication batching."
+  href="/reference/edge-configuration/"
+/>

@@ -1,0 +1,148 @@
+---
+title: Metadata Paths
+description: Reference of all key paths stored in the Raft metadata state machine, organized by resource type.
+---
+
+Every piece of cluster state in Danube is stored as a key-value entry in the embedded Raft state machine. This page lists the key paths used by the broker, organized by resource type. Understanding this structure is useful for developers working on cluster internals or debugging metadata issues.
+
+:::note
+Danube previously used etcd for metadata storage. The key hierarchy is the same, but all paths now live inside the embedded Raft state machine (openraft + redb). There is no external metadata dependency.
+:::
+
+---
+
+## Cluster
+
+Broker discovery, topic assignment, load balancing, and leader election.
+
+- **`/cluster/leader`**
+
+  Current Raft leader broker ID. The Load Manager runs only on this broker.
+
+- **`/cluster/register/{broker_id}`**
+
+  Broker registration. Stores a JSON object with `broker_addr`, `admin_addr`, `advertised_addr`, and `prom_exporter`. Written at startup with a TTL; removed on graceful shutdown.
+
+- **`/cluster/brokers/{broker_id}/state`**
+
+  Broker lifecycle state: `active` or `draining`. Set during rebalancing to prevent new assignments.
+
+- **`/cluster/brokers/{broker_id}/{namespace}/{topic}`**
+
+  Topic-to-broker assignment marker. Each broker watches its own prefix to load/unload topics.
+
+- **`/cluster/unassigned/{namespace}/{topic}`**
+
+  Queue for topics awaiting assignment. The Load Manager watches this prefix and assigns topics based on load rankings.
+
+- **`/cluster/load/{broker_id}`**
+
+  Periodic load reports. JSON with `resources_usage`, `topic_list`, and `topics_len`. Published by each broker at a configurable interval.
+
+- **`/cluster/load_balance`**
+
+  Load Manager's calculated metrics and assignment decisions.
+
+- **`/cluster/rebalancing_history/{timestamp}`**
+
+  Audit log of rebalancing moves. Each entry records the topic, source broker, target broker, and reason.
+
+---
+
+## Namespaces
+
+- **`/namespaces/{namespace}/policy`**
+
+  Namespace-wide default policies as JSON: `max_producers_per_topic`, `max_consumers_per_topic`, `max_message_size`, etc. A value of `0` means unlimited.
+
+- **`/namespaces/{namespace}/topics/{namespace}/{topic}`**
+
+  Topic registry within a namespace.
+
+---
+
+## Topics
+
+- **`/topics/{namespace}/{topic}`**
+
+  Topic existence marker. Value is the number of partitions (`0` = non-partitioned).
+
+- **`/topics/{namespace}/{topic}/delivery`**
+
+  Dispatch mode: `"Reliable"` or `"NonReliable"`.
+
+- **`/topics/{namespace}/{topic}/policy`**
+
+  Per-topic policy overrides (JSON).
+
+- **`/topics/{namespace}/{topic}/producers/{producer_id}`**
+
+  Active producer registration. JSON with `producer_name`, `access_mode`, `status`, and `topic_name`.
+
+- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}`**
+
+  Subscription metadata. JSON with `consumer_id`, `consumer_name`, and `subscription_type` (`0` Exclusive, `1` Shared, `2` Failover).
+
+- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}/cursor`**
+
+  Consumer progress offset (`u64`). Updated in batches (every 1000 acks or 5 seconds).
+
+---
+
+## Schema Registry
+
+- **`/schemas/_global/next_schema_id`**
+
+  Monotonically increasing schema ID counter (`u64`).
+
+- **`/schemas/{subject}/metadata`**
+
+  Complete schema subject with version history. JSON with `compatibility_mode`, `versions`, `created_at`, and `latest_version`.
+
+- **`/schemas/{subject}/compatibility`**
+
+  Compatibility mode override for a subject (string).
+
+- **`/schemas/_index/by_id/{schema_id}`**
+
+  Reverse lookup from schema ID to subject name. JSON with `schema_id` and `subject`.
+
+---
+
+## Security (RBAC)
+
+- **`/auth/roles/{role_name}`**
+
+  Role definitions. JSON with a list of permissions.
+
+- **`/auth/bindings/{binding_id}`**
+
+  Principal-to-role bindings. JSON with `principal`, `role`, and `scope`.
+
+Brokers watch the `/auth/` prefix and reload the RBAC cache on any mutation.
+
+---
+
+## Persistent Storage
+
+Paths are prefixed with the configured `metadata_prefix` (default: `/danube`).
+
+- **`{prefix}/storage/topics/{namespace}/{topic}/segments/{padded_start_offset}`**
+
+  Durable segment descriptor. JSON with `start_offset`, `end_offset`, `size`, `object_id`, etc. Offsets are zero-padded to 20 digits for lexicographic sorting.
+
+- **`{prefix}/storage/topics/{namespace}/{topic}/segments/cur`**
+
+  Pointer to the latest published durable segment (padded start offset string).
+
+- **`{prefix}/storage/topics/{namespace}/{topic}/state`**
+
+  Sealed mobility marker for topic moves. JSON with `sealed`, `last_committed_offset`, `broker_id`, and `timestamp`. Written during unload, read during recovery.
+
+---
+
+## Edge
+
+- **`/edge/checkpoints/{topic_name}`**
+
+  Last successfully replicated WAL offset per topic (`u64`). The replicator resumes from this position after restart. The `{topic_name}` includes the namespace prefix, for example `/edge/checkpoints/edge1/sensors` for the Danube topic `/edge1/sensors`.
