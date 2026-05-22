@@ -1,0 +1,175 @@
+---
+title: Edge Configuration
+description: Complete reference for edge.yaml covering edge identity, cluster connectivity, MQTT gateway, topic mappings, and replication batching.
+---
+
+The Danube Edge broker is a constrained gateway for MQTT ingestion into a Danube cluster. It runs as a lightweight process at the network edge, accepts MQTT connections, maps MQTT topics to Danube topics, and replicates messages to the cluster via WAL batching.
+
+This page documents every configuration option in `edge.yaml`.
+
+:::note
+Topics created on the edge must be under the `/{edge_name}/` namespace. The edge registers itself and its topics with the cluster at startup via `RegisterEdge`. The cluster maintains per-edge state in Raft.
+:::
+
+---
+
+## Edge Identity
+
+```yaml title="edge.yaml"
+edge:
+  edge_name: "edge1"
+  cluster_url: "http://cluster-broker:6650"
+  token: ""
+  heartbeat_interval_ms: 30000
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `edge.edge_name` | String | *(required)* | Unique name for this edge broker. All topics must be under the `/{edge_name}/` namespace. |
+| `edge.cluster_url` | String | *(required)* | gRPC URL of the cluster broker to replicate to. |
+| `edge.token` | String | `""` | Authentication token for the cluster connection. Can be overridden via the `--edge-token` CLI argument. |
+| `edge.heartbeat_interval_ms` | Integer (ms) | `30000` | How often the edge pings the cluster for configuration changes. |
+
+---
+
+## Replicator
+
+Controls WAL-to-cluster replication batching. Messages are buffered locally and sent in batches to reduce network overhead.
+
+```yaml title="edge.yaml"
+replicator:
+  batch_size: 100
+  batch_timeout_ms: 1000
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `replicator.batch_size` | Integer | `100` | Number of messages per batch before sending to the cluster |
+| `replicator.batch_timeout_ms` | Integer (ms) | `1000` | Maximum wait before sending a partial batch |
+
+The replicator flushes a batch when either `batch_size` messages have accumulated or `batch_timeout_ms` has elapsed, whichever comes first.
+
+---
+
+## MQTT Gateway
+
+### Listener
+
+```yaml title="edge.yaml"
+mqtt:
+  listener: "0.0.0.0:1883"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mqtt.listener` | String | `0.0.0.0:1883` | TCP address for MQTT client connections |
+
+### Topic Mappings
+
+Topic mappings route incoming MQTT messages to Danube topics. Rules are evaluated in order and the first match wins.
+
+```yaml title="edge.yaml"
+mqtt:
+  topic_mappings:
+    - mqtt_pattern: "device/+/telemetry"
+      danube_topic: "/edge1/telemetry"
+      schema_subject: "telemetry-events"
+      extract_attributes:
+        device_id: "$1"
+
+    - mqtt_pattern: "sensors/+/+"
+      danube_topic: "/edge1/sensors"
+      schema_subject: "sensor-readings"
+      extract_attributes:
+        sensor_type: "$1"
+        measurement: "$2"
+
+    - mqtt_pattern: "#"
+      danube_topic: "/edge1/unrouted"
+```
+
+**Each mapping supports these fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `mqtt_pattern` | Yes | MQTT topic filter with wildcards |
+| `danube_topic` | Yes | Target Danube topic (must be under `/{edge_name}/`) |
+| `schema_subject` | No | Schema subject from the cluster registry for payload validation. If absent, messages pass through as raw bytes. |
+| `extract_attributes` | No | Map wildcard captures to Danube `StreamMessage` attributes |
+
+**MQTT wildcards:**
+
+| Wildcard | Meaning | Example |
+|----------|---------|---------|
+| `+` | Single-level (one path segment) | `device/+/telemetry` matches `device/abc/telemetry` |
+| `#` | Multi-level (remainder of path) | `#` matches everything |
+
+**Attribute extraction:**
+
+Wildcard captures are referenced as `$1`, `$2`, etc., numbered left to right. These are injected as Danube message attributes and propagate to cluster consumers.
+
+For example, with `mqtt_pattern: "sensors/+/+"` and a message on `sensors/temperature/celsius`:
+- `$1` = `temperature`
+- `$2` = `celsius`
+
+### Schema Validation
+
+When `schema_subject` is specified on a mapping, the edge pulls the schema definition from the cluster registry during bootstrap and validates incoming MQTT payloads against it. The admin registers schemas on the cluster side, and the edge discovers them automatically.
+
+If validation fails, the message is rejected at the edge before it reaches the local WAL.
+
+### Ingestion Batching
+
+Messages are buffered per-topic before flushing to the local WAL.
+
+```yaml title="edge.yaml"
+mqtt:
+  ingestion:
+    batch_size: 100
+    batch_timeout_ms: 500
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ingestion.batch_size` | Integer | `100` | Flush when this many messages accumulate for a single topic |
+| `ingestion.batch_timeout_ms` | Integer (ms) | `500` | Flush after this timeout even if `batch_size` is not reached |
+
+---
+
+## Complete Example
+
+```yaml title="edge.yaml"
+edge:
+  edge_name: "edge1"
+  cluster_url: "http://cluster-broker:6650"
+  token: ""
+  heartbeat_interval_ms: 30000
+
+replicator:
+  batch_size: 100
+  batch_timeout_ms: 1000
+
+mqtt:
+  listener: "0.0.0.0:1883"
+
+  topic_mappings:
+    - mqtt_pattern: "device/+/telemetry"
+      danube_topic: "/edge1/telemetry"
+      schema_subject: "telemetry-events"
+      extract_attributes:
+        device_id: "$1"
+
+    - mqtt_pattern: "sensors/+/+"
+      danube_topic: "/edge1/sensors"
+      schema_subject: "sensor-readings"
+      extract_attributes:
+        sensor_type: "$1"
+        measurement: "$2"
+
+    - mqtt_pattern: "#"
+      danube_topic: "/edge1/unrouted"
+
+  ingestion:
+    batch_size: 100
+    batch_timeout_ms: 500
+```

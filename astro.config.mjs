@@ -88,6 +88,19 @@ export default defineConfig({
                         { label: 'Reliable Topic Move', slug: 'architecture/reliable-topic-move' },
                     ],
                 },
+                {
+                    label: 'Reference',
+                    items: [
+                        { label: 'Broker Configuration', slug: 'reference/broker-configuration' },
+                        { label: 'Edge Configuration', slug: 'reference/edge-configuration' },
+                    ],
+                },
+                {
+                    label: 'Contributing',
+                    items: [
+                        { label: 'Contribution Guide', slug: 'contributing' },
+                    ],
+                },
             ],
         }),
     ],

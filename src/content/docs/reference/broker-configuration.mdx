@@ -1,0 +1,427 @@
+---
+title: Broker Configuration
+description: Complete reference for danube_broker.yml covering cluster identity, networking, security, load management, storage, and policies.
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+This page documents every configuration option in `danube_broker.yml`. For a ready-to-use secure configuration, see `config/danube_broker_secure.yml` in the repository.
+
+:::tip
+Values shown below are the defaults from the shipped `danube_broker.yml`. A value of `0` means unlimited for all rate and count limits.
+:::
+
+---
+
+## Cluster Identity
+
+```yaml title="danube_broker.yml"
+cluster_name: "MY_CLUSTER"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cluster_name` | String | *(required)* | Identifies the cluster in metrics, logs, and multi-cluster setups. Use a descriptive name like `production-us-east`. |
+
+---
+
+## Broker Services
+
+```yaml title="danube_broker.yml"
+broker:
+  host: "0.0.0.0"
+  ports:
+    client: 6650
+    admin: 50051
+    raft: 7650
+    prometheus: 9040
+  # advertised_listeners:
+  #   broker_url: "broker-0.danube-broker-headless:6650"
+  #   connect_url: "danube-proxy.example.com:6650"
+```
+
+### Ports
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `broker.host` | `0.0.0.0` | Network interface to bind to. Use `127.0.0.1` for local-only. |
+| `broker.ports.client` | `6650` | Producer and consumer gRPC connections |
+| `broker.ports.admin` | `50051` | Admin API (gRPC) for `danube-admin` |
+| `broker.ports.raft` | `7650` | Raft inter-node gRPC transport |
+| `broker.ports.prometheus` | `9040` | Prometheus metrics scrape endpoint. Set to `null` to disable. |
+
+### Advertised Listeners
+
+Optional. Required when the broker's bind address differs from the address clients or peers should connect to (Kubernetes, proxies, NAT).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `broker.advertised_listeners.broker_url` | `host:client_port` | Address reachable inside the cluster (inter-broker, Raft identity) |
+| `broker.advertised_listeners.connect_url` | Same as `broker_url` | Address reachable by external clients (via load balancer or ingress) |
+
+---
+
+## Metadata Store (Raft)
+
+Danube embeds Raft consensus directly. No external dependency (no etcd, no ZooKeeper). The `node_id` is auto-generated on first boot and persisted in `{data_dir}/node_id`.
+
+```yaml title="danube_broker.yml"
+meta_store:
+  data_dir: "./danube-data/raft"
+  # seed_nodes:
+  #   - "broker1:7650"
+  #   - "broker2:7651"
+  #   - "broker3:7652"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `meta_store.data_dir` | Path | `./danube-data/raft` | Directory for Raft log, snapshots, and node identity. Use durable storage. Each broker must have its own directory. |
+| `meta_store.seed_nodes` | String[] | *(empty)* | Raft transport addresses for initial cluster formation. |
+
+**Cluster formation rules:**
+
+- **Single-node**: omit `seed_nodes` entirely. The broker auto-initializes a single-node Raft cluster.
+- **Multi-node**: list ALL initial peers, including this broker's own `host:raft_port`.
+
+---
+
+## Bootstrap
+
+```yaml title="danube_broker.yml"
+bootstrap_namespaces:
+  - "default"
+
+auto_create_topics: true
+
+# admin_tls: false
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bootstrap_namespaces` | String[] | `["default"]` | Namespaces created automatically on broker startup |
+| `auto_create_topics` | Boolean | `true` | Allow producers to create topics automatically. Set to `false` in production for controlled topic creation via admin API. |
+| `admin_tls` | Boolean | `false` | Enable TLS on the admin gRPC API. When `true`, reuses `auth.tls` certificates. |
+
+---
+
+## Security
+
+Controls TLS encryption, JWT authentication, and RBAC authorization. For a complete walkthrough, see [Securing a Cluster](/security/securing-a-cluster/).
+
+```yaml title="danube_broker.yml (development)"
+auth:
+  mode: none
+```
+
+```yaml title="danube_broker_secure.yml (production)"
+auth:
+  mode: tls
+  tls:
+    cert_file: "./cert/server-cert.pem"
+    key_file: "./cert/server-key.pem"
+    ca_file: "./cert/ca-cert.pem"
+  jwt:
+    secret_key: "your-secret-key"
+    issuer: "danube-auth"
+    expiration_time: 3600
+  super_admins:
+    - "admin"
+```
+
+### Security Modes
+
+| Mode | Encryption | Authentication | Authorization | Use Case |
+|------|-----------|----------------|---------------|----------|
+| `none` | Off | Off | Off | Local development and testing |
+| `tls` | TLS everywhere | JWT tokens | RBAC (default-deny) | Production |
+
+When `mode: tls` is set:
+- Client connections use server TLS
+- Inter-broker replication uses mutual TLS (mTLS)
+- Raft consensus uses mutual TLS (mTLS)
+- All requests require a valid JWT token
+- Every operation is checked against RBAC policies
+
+### TLS
+
+Required when `auth.mode: tls`. A single certificate set is shared across all broker services.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `auth.tls.cert_file` | Path | Server certificate presented to clients and peers |
+| `auth.tls.key_file` | Path | Server private key |
+| `auth.tls.ca_file` | Path | Certificate authority for verifying peers (mTLS) and client certificates |
+
+:::tip
+Danube ships with a convenience script for development certificates:
+```bash
+cd cert/ && bash gen_certs.sh
+```
+This creates CA, server, and client certificates with SANs for `localhost` / `127.0.0.1`.
+:::
+
+### JWT
+
+Required when `auth.mode: tls`. JWT tokens authenticate clients and administrators.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auth.jwt.secret_key` | String | *(required)* | HMAC-SHA256 shared secret for signing and validating tokens. Must match the `--secret-key` used with `danube-admin security tokens create`. |
+| `auth.jwt.issuer` | String | `danube-auth` | Expected `iss` claim. Tokens with a different issuer are rejected. |
+| `auth.jwt.expiration_time` | Integer (seconds) | `3600` | Default token validity duration |
+
+### Super-Admins
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auth.super_admins` | String[] | `[]` | JWT subjects that bypass RBAC entirely. Use for initial bootstrap and break-glass access. Remove once RBAC policies are in place. |
+
+---
+
+## Load Manager
+
+Controls topic assignment to brokers and automated rebalancing. For architecture details, see [Load Manager Architecture](/architecture/load-manager/).
+
+```yaml title="danube_broker.yml"
+load_manager:
+  assignment_strategy: "fair"
+  load_report_interval_seconds: 30
+  rebalancing:
+    enabled: false
+    aggressiveness: "balanced"
+    check_interval_seconds: 300
+    max_moves_per_hour: 10
+    cooldown_seconds: 60
+    min_brokers_for_rebalance: 2
+    min_topic_age_seconds: 300
+    blacklist_topics: []
+```
+
+### Assignment Strategy
+
+Controls how new topics are placed on brokers.
+
+| Strategy | Algorithm | Best For |
+|----------|-----------|----------|
+| `fair` | Topic count only | Development, testing |
+| `balanced` | `(topic_load × 0.3) + (CPU × 0.35) + (Memory × 0.35)` | Production (recommended) |
+| `weighted_load` | Adaptive bottleneck detection | Highly variable workloads |
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `assignment_strategy` | String | `fair` | Topic placement algorithm |
+| `load_report_interval_seconds` | Integer | `30` | How often brokers publish load metrics. Lower = faster response, higher metadata traffic. |
+
+### Rebalancing
+
+Automatically moves topics between brokers to maintain cluster balance.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `rebalancing.enabled` | Boolean | `false` | Enable automated rebalancing. Start disabled, enable after cluster is stable. |
+| `rebalancing.aggressiveness` | String | `balanced` | Preset: `conservative`, `balanced`, or `aggressive` |
+| `rebalancing.check_interval_seconds` | Integer | Varies | How often to evaluate balance |
+| `rebalancing.max_moves_per_hour` | Integer | Varies | Rate limit for topic moves |
+| `rebalancing.cooldown_seconds` | Integer | Varies | Minimum wait between consecutive moves |
+| `rebalancing.min_brokers_for_rebalance` | Integer | `2` | Rebalancing skipped with fewer brokers |
+| `rebalancing.min_topic_age_seconds` | Integer | `300` | Topics younger than this are never moved |
+| `rebalancing.blacklist_topics` | String[] | `[]` | Glob patterns for topics to never rebalance |
+
+**Aggressiveness presets:**
+
+| Level | CV Threshold | Check Interval | Max Moves/Hour | Cooldown |
+|-------|-------------|----------------|----------------|----------|
+| `conservative` | > 40% | 600s | 5 | 120s |
+| `balanced` | > 30% | 300s | 10 | 60s |
+| `aggressive` | > 20% | 180s | 20 | 30s |
+
+---
+
+## Storage
+
+Controls how reliable topics persist messages. Non-reliable topics bypass storage entirely.
+
+```yaml title="danube_broker.yml (local mode)"
+storage:
+  mode: local
+  local_wal_root: "./danube-data/wal"
+  metadata_prefix: "/danube"
+  local_retention:
+    time_minutes: 2880
+    size_mb: 20480
+    check_interval_minutes: 5
+  wal:
+    rotation:
+      max_bytes: 536870912
+```
+
+### Storage Modes
+
+| Mode | Durable History | Use Case |
+|------|-----------------|----------|
+| `local` | Local filesystem | Single-node, development |
+| `shared_fs` | Shared filesystem (NFS, EFS) | On-prem multi-broker |
+| `object_store` | Remote via OpenDAL (S3, GCS, Azure Blob) | Cloud-native multi-broker |
+
+### Core Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `storage.mode` | String | *(required)* | `local`, `shared_fs`, or `object_store` |
+| `storage.local_wal_root` | Path | `./danube-data/wal` | Root directory for per-topic WAL files. Use fast SSD/NVMe. In `shared_fs`/`object_store` modes, auto-derived from `meta_store.data_dir` if omitted. |
+| `storage.metadata_prefix` | String | `/danube` | Prefix for storage metadata keys in Raft. Change only when multiple independent clusters share the same Raft group. |
+
+### Local WAL Retention
+
+Prunes local WAL files after durable segments safely cover them. Most useful in `shared_fs` and `object_store` modes.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `local_retention.time_minutes` | Integer | `2880` (48h) | Delete local WAL files older than this |
+| `local_retention.size_mb` | Integer | `20480` (20 GB) | Delete oldest files when total exceeds this |
+| `local_retention.check_interval_minutes` | Integer | `5` | How often to run the retention check |
+
+### WAL Rotation
+
+Rotation creates new WAL files. Sealed files become eligible for durable export and retention.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `wal.rotation.max_bytes` | Integer (bytes) | `536870912` (512 MB) | Rotate WAL file at this size |
+| `wal.rotation.max_hours` | Integer | *(disabled)* | Rotate after this many hours. Useful for low-traffic topics. |
+
+### Advanced WAL Tuning
+
+Rarely needed. Placed under `wal.advanced`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `wal.advanced.cache_capacity` | Integer | `1024` | In-memory replay cache (number of messages). Higher = better cache hit rate, more memory. |
+| `wal.advanced.file_sync.interval_ms` | Integer (ms) | `5000` | Background flush interval. Not per-message sync. |
+| `wal.advanced.file_sync.max_batch_bytes` | Integer (bytes) | `10485760` (10 MB) | Force flush when write buffer exceeds this |
+
+### Durable Backend: Shared Filesystem
+
+Required when `mode: shared_fs`.
+
+```yaml title="shared_fs example"
+storage:
+  mode: shared_fs
+  durable:
+    root: "/mnt/danube-shared-segments"
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `durable.root` | Path | Shared directory visible to all brokers (e.g., NFS mount) |
+
+### Durable Backend: Object Store
+
+Required when `mode: object_store`. Danube uses [OpenDAL](https://opendal.apache.org/) for cloud storage access.
+
+```yaml title="S3 example"
+storage:
+  mode: object_store
+  durable:
+    backend: s3
+    root: "s3://my-bucket/danube"
+    region: "us-east-1"
+```
+
+```yaml title="GCS example"
+storage:
+  mode: object_store
+  durable:
+    backend: gcs
+    root: "gcs://my-bucket/danube"
+    credentials_path: "/path/to/service-account.json"
+```
+
+```yaml title="Azure Blob example"
+storage:
+  mode: object_store
+  durable:
+    backend: azblob
+    root: "my-container/danube"
+    endpoint: "https://myaccount.blob.core.windows.net"
+    account_name: "myaccount"
+```
+
+**S3 options:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `backend` | Yes | `s3` |
+| `root` | Yes | `s3://bucket/prefix` |
+| `region` | No | AWS region |
+| `endpoint` | No | Custom endpoint (MinIO, etc.) |
+| `access_key` / `secret_key` | No | Static credentials. Prefer IAM roles in production. |
+| `profile` | No | AWS credentials profile name |
+| `role_arn` | No | IAM role to assume |
+| `session_token` | No | Temporary session credentials |
+| `anonymous` | No | Anonymous access for public buckets |
+| `virtual_host_style` | No | Virtual-hosted-style bucket addressing |
+
+**GCS options:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `backend` | Yes | `gcs` |
+| `root` | Yes | `gcs://bucket/prefix` |
+| `project` | No | GCP project identifier |
+| `credentials_path` | No | Path to service account JSON |
+| `credentials_json` | No | Inline service account JSON |
+
+**Azure Blob options:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `backend` | Yes | `azblob` |
+| `root` | Yes | `container/prefix` |
+| `endpoint` | No | Azure Blob service endpoint |
+| `account_name` | No | Storage account name |
+| `account_key` | No | Storage account key |
+
+:::caution
+Avoid hardcoding credentials in version-controlled YAML. Use environment variables, secret mounts, or provider-native identity mechanisms (IAM roles, workload identity).
+:::
+
+---
+
+## Policies
+
+Default resource limits applied at the broker level. These can be overridden at the namespace or topic level.
+
+```yaml title="danube_broker.yml"
+policies:
+  max_producers_per_topic: 0
+  max_subscriptions_per_topic: 0
+  max_consumers_per_topic: 0
+  max_consumers_per_subscription: 0
+  max_publish_rate: 0
+  max_subscription_dispatch_rate: 0
+  max_message_size: 10485760
+```
+
+### Connection Limits
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_producers_per_topic` | `0` (unlimited) | Maximum concurrent producers per topic |
+| `max_subscriptions_per_topic` | `0` (unlimited) | Maximum subscriptions per topic |
+| `max_consumers_per_topic` | `0` (unlimited) | Maximum concurrent consumers across all subscriptions |
+| `max_consumers_per_subscription` | `0` (unlimited) | Maximum consumers sharing a single subscription |
+
+### Rate Limits
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_publish_rate` | `0` (unlimited) | Maximum publish rate (messages/second) |
+| `max_subscription_dispatch_rate` | `0` (unlimited) | Maximum dispatch rate per subscription (messages/second) |
+
+### Message Size
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_message_size` | `10485760` (10 MB) | Maximum single message size in bytes. Very large messages impact performance. |
