@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import starlightImageZoom from 'starlight-image-zoom';
 
 import cloudflare from '@astrojs/cloudflare';
 
@@ -8,6 +9,7 @@ import cloudflare from '@astrojs/cloudflare';
 export default defineConfig({
     integrations: [
         starlight({
+            plugins: [starlightImageZoom()],
             title: 'Danube Messaging',
             favicon: '/favicon.png',
             logo: {
@@ -74,6 +76,7 @@ export default defineConfig({
                     label: 'Administration',
                     items: [
                         { label: 'Overview', slug: 'admin/overview' },
+                        { label: 'Admin Dashboard UI', slug: 'admin/admin-ui' },
                         { label: 'AI Admin (MCP)', slug: 'admin/mcp' },
                         { label: 'CLI: Cluster & Brokers', slug: 'admin/cli-cluster' },
                         { label: 'CLI: Resources', slug: 'admin/cli-resources' },
