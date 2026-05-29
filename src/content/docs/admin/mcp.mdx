@@ -1,36 +1,56 @@
 ---
 title: AI Admin (MCP)
-description: Manage your Danube cluster using natural language through the Model Context Protocol.
+description: Manage your Danube cluster using natural language through the Model Context Protocol — 58 tools, 4 guided workflows, and full cluster observability.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-The MCP (Model Context Protocol) mode transforms cluster management from command memorization to natural conversation. Instead of learning CLI syntax, describe what you want in plain English and the AI executes the appropriate operations.
+The MCP server transforms Danube cluster management into a conversation. Instead of memorizing CLI syntax, describe what you want in natural language, your AI assistant calls the right tools, follows safety workflows, and explains what it finds.
 
-## What is MCP?
-
-MCP is an open protocol that enables AI assistants to interact with external systems through:
-
-- **Tools**: direct function calls the AI can invoke automatically
-- **Prompts**: pre-built multi-step workflows for complex operations
-- **Resources**: contextual information about system state
-
-Danube's MCP server exposes **40+ tools** and **7 guided prompts** for cluster management.
-
----
-
-## Getting Started
+## Quick Start
 
 ```bash title="Start the MCP server"
 danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
 ```
 
-### IDE Configuration
+The server communicates over `stdio` using the [Model Context Protocol](https://modelcontextprotocol.io/). Connect it to any MCP-compatible AI assistant.
+
+---
+
+## IDE Configuration
 
 <Tabs>
-<TabItem label="Claude Desktop">
+<TabItem label="Claude Code">
 
-```json title="~/Library/Application Support/Claude/claude_desktop_config.json"
+Claude Code auto-discovers MCP servers from a project-level config file:
+
+```json title=".mcp.json (project root)"
+{
+  "mcpServers": {
+    "danube-admin": {
+      "command": "/usr/local/bin/danube-admin",
+      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
+      "env": {
+        "NO_COLOR": "1",
+        "RUST_LOG": "error"
+      }
+    }
+  }
+}
+```
+
+Or add globally via `claude mcp add`:
+
+```bash
+claude mcp add danube-admin -- /usr/local/bin/danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
+```
+
+</TabItem>
+<TabItem label="Antigravity">
+
+Antigravity discovers MCP servers from its settings file:
+
+```json title="~/.gemini/settings.json"
 {
   "mcpServers": {
     "danube-admin": {
@@ -46,19 +66,17 @@ danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
 ```
 
 </TabItem>
-<TabItem label="Windsurf">
+<TabItem label="Cursor">
 
-```json title="~/.codeium/windsurf/mcp_config.json"
+Add to Cursor's MCP configuration:
+
+```json title="~/.cursor/mcp.json"
 {
   "mcpServers": {
     "danube-admin": {
-      "command": "sh",
-      "args": [
-        "-c",
-        "/usr/local/bin/danube-admin serve --mode mcp --broker-endpoint http://localhost:50051"
-      ],
+      "command": "/usr/local/bin/danube-admin",
+      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
       "env": {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
         "NO_COLOR": "1",
         "RUST_LOG": "error"
       }
@@ -68,9 +86,11 @@ danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
 ```
 
 </TabItem>
-<TabItem label="VSCode">
+<TabItem label="VS Code">
 
-```json title="MCP extension configuration"
+Add to VS Code's settings or Copilot MCP configuration:
+
+```json title=".vscode/mcp.json"
 {
   "servers": {
     "danube-admin": {
@@ -91,125 +111,92 @@ danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
 
 ---
 
-## Usage Examples
+## What You Can Do
 
-```text title="Basic operations"
-You: "Check the health of my Danube cluster"
-AI:  [Calls health_check] → broker status, balance CV, topic counts
+The MCP server exposes **58 tools** across 8 categories and **4 guided workflow prompts**.
 
-You: "What topics are in the default namespace?"
-AI:  [Calls list_topics] → lists all topics with broker assignments
-
-You: "Create a topic for user events with 4 partitions and reliable delivery"
-AI:  [Calls create_topic] → confirms creation with details
-```
-
-```text title="Guided workflows"
-You: "Run the cluster health check workflow"
-AI:  [Loads cluster_health_check prompt]
-     Step 1: Cluster Overview → broker count, topic count
-     Step 2: Broker Health → all brokers online
-     Step 3: Load Distribution → CV analysis
-     Step 4: Recommendations → prioritized action items
-
-You: "I need to add a field to the user-events schema safely"
-AI:  [Uses manage_schema_evolution prompt]
-     Step 1: Analyzes current schema and compatibility mode
-     Step 2: Validates new schema compatibility
-     Step 3: Registers new version
-     Step 4: Verifies topics picked up the change
-```
+<CardGrid>
+  <Card title="Cluster & Brokers" icon="setting">
+    14 tools: broker lifecycle, namespaces, Raft membership, load balancing, and rebalancing.
+  </Card>
+  <Card title="Topics" icon="document">
+    12 tools: topic CRUD, subscriptions, schema binding, validation policies, and failure policies.
+  </Card>
+  <Card title="Schema Registry" icon="puzzle">
+    9 tools: register, evolve, and manage schemas with compatibility checks and subject listing.
+  </Card>
+  <Card title="Security" icon="approve-check">
+    10 tools: RBAC roles and bindings, offline JWT token creation and validation.
+  </Card>
+  <Card title="Diagnostics" icon="warning">
+    3 tools: health check, consumer lag analysis, and prioritized recommendations.
+  </Card>
+  <Card title="Metrics" icon="graph">
+    4 tools: cluster, broker, and topic metrics via Prometheus, plus raw PromQL queries.
+  </Card>
+  <Card title="Logs" icon="list-format">
+    6 tools: broker logs, Docker container logs, and Kubernetes pod logs.
+  </Card>
+</CardGrid>
 
 ---
 
-## Available Tools
+## Usage Examples
 
-### Cluster Management (9 tools)
+### Everyday Operations
 
-| Tool | Description |
-|------|-------------|
-| `list_brokers` | List all brokers with status and roles |
-| `get_leader` | Identify the current cluster leader |
-| `get_cluster_balance` | Load distribution metrics (CV analysis) |
-| `trigger_rebalance` | Redistribute topics across brokers (supports dry-run) |
-| `unload_broker` | Gracefully drain topics from a broker |
-| `activate_broker` | Bring a broker back into service |
-| `list_namespaces` | List all namespaces |
-| `create_namespace` / `delete_namespace` | Namespace lifecycle |
-| `get_namespace_policies` | Resource limits and policies |
+```text
+You: "Show me the cluster health"
+AI:  [Calls health_check, list_brokers, get_cluster_balance]
+     → 3 brokers active, CV 12% (well balanced), 42 topics, no issues
 
-### Topic Management (8 tools)
+You: "Create a reliable topic for payment events with 4 partitions"
+AI:  [Calls create_topic with name="/default/payment-events", partitions=4, dispatch_strategy="reliable"]
+     → Topic created successfully
 
-| Tool | Description |
-|------|-------------|
-| `list_topics` | List topics in a namespace |
-| `describe_topic` | Detailed topic info (schema, subscriptions, broker) |
-| `create_topic` / `delete_topic` | Topic lifecycle |
-| `list_subscriptions` / `unsubscribe` | Subscription management |
-| `unload_topic` | Reassign a topic to another broker |
-| `configure_topic_schema` | Associate schema and set validation policy |
-| `set_topic_validation_policy` | Update validation without changing schema |
+You: "What schemas are registered?"
+AI:  [Calls list_subjects]
+     → 5 subjects: user-events (v3), orders (v2), payments (v1), ...
+```
 
-### Schema Registry (7 tools)
+### Guided Workflows
 
-| Tool | Description |
-|------|-------------|
-| `register_schema` | Register or create a new version |
-| `get_schema` | Get latest schema by subject |
-| `list_schema_versions` | All versions with metadata |
-| `check_schema_compatibility` | Validate before registration |
-| `get/set_schema_compatibility_mode` | Compatibility policy management |
-| `delete_schema_version` | Remove a specific version |
+Prompts orchestrate multi-step operations with built-in safety gates:
 
-### Diagnostics (3 tools)
+```text
+You: "I need to rebalance the cluster"
+AI:  [Loads prepare_cluster_rebalance prompt]
+     Step 1: Checks Raft quorum is healthy
+     Step 2: Runs health_check — all brokers active
+     Step 3: Checks CV — 38% (imbalanced, proceed)
+     Step 4: Dry-run — 3 topics would move, shows plan
+     Step 5: "Shall I execute?" — waits for approval
+     Step 6: Executes rebalance
+     Step 7: Verifies CV dropped to 15%
 
-| Tool | Description |
-|------|-------------|
-| `health_check` | Comprehensive cluster health assessment |
-| `analyze_consumer_lag` | Diagnose lag for a topic/subscription |
-| `get_recommendations` | Prioritized action items based on cluster state |
-
-### Log Access (6 tools)
-
-| Tool | Description |
-|------|-------------|
-| `get_broker_logs` | Logs by broker ID (requires config) |
-| `list_docker_containers` / `fetch_container_logs` | Docker log access |
-| `list_k8s_pods` / `fetch_pod_logs` | Kubernetes log access |
-
-### Metrics (4 tools)
-
-:::note
-All metrics tools require Prometheus. Configure `prometheus_url` in `mcp-config.yml`.
-:::
-
-| Tool | Description |
-|------|-------------|
-| `get_cluster_metrics` | Cluster-wide summary (rates, throughput, CV) |
-| `get_broker_metrics` | Per-broker metrics (topics, RPCs, bytes in/out) |
-| `get_topic_metrics` | Topic metrics (rates, lag, latency percentiles) |
-| `query_prometheus` | Raw PromQL queries |
+You: "Set up security for our production cluster"
+AI:  [Loads secure_cluster_setup prompt]
+     Step 1: TLS certificate guidance
+     Step 2: Broker configuration
+     Step 3: Creates admin token (offline)
+     Step 4: Creates service account tokens
+     Step 5: Creates roles (producer, consumer, operator)
+     Step 6: Creates bindings at correct scopes
+     Step 7: Verification checklist
+```
 
 ---
 
 ## Guided Workflow Prompts
 
-### Troubleshooting
+The 4 prompts encode domain knowledge that matters for safety and correctness:
 
-| Prompt | Arguments | Description |
+| Prompt | Arguments | What it does |
 |--------|-----------|-------------|
-| `diagnose_consumer_lag` | topic, subscription | Step-by-step lag diagnosis |
-| `diagnose_broker_issues` | broker_id | Broker health investigation |
-| `analyze_topic_performance` | topic | Deep metrics analysis |
-| `cluster_health_check` | — | Full cluster assessment |
-
-### Operational
-
-| Prompt | Arguments | Description |
-|--------|-----------|-------------|
-| `setup_new_topic` | namespace, use_case | Guided topic creation with best practices |
-| `manage_schema_evolution` | subject, schema_type | Safe schema evolution with compatibility checks |
-| `prepare_cluster_rebalance` | max_moves, target_broker | Dry-run, execute, verify rebalance |
+| `cluster_health_check` | — | Raft consensus → broker status → load balance → security audit → recommendations |
+| `prepare_cluster_rebalance` | `max_moves` | Quorum check → health gate → CV assessment → dry-run → approval → execute → verify |
+| `manage_schema_evolution` | `subject`, `schema_type` | Discovery → compatibility check → register → verify; encodes subject vs. topic policy rules |
+| `secure_cluster_setup` | `environment` | TLS → JWT → roles → bindings → verify; adapts to development or production |
 
 ---
 
@@ -235,23 +222,28 @@ deployment:
 danube-admin serve --mode mcp --config /path/to/mcp-config.yml
 ```
 
+:::note
+Metrics tools require Prometheus. Configure `prometheus_url` in the config file.
+Log tools require deployment configuration to map broker IDs to containers or pods.
+:::
+
 ---
 
-## Best Practices
+## Tips
 
-- **Discovery before action**: ask the AI to check state before making changes
-- **Use prompts for complex operations**: multi-step workflows are safer than individual commands
-- **Dry-run first**: for rebalancing and destructive operations, always preview
-- **Ask why, not just what**: MCP understands context and can explain decisions
+- **Discovery first**: ask the AI to check state before making changes ("What topics exist?" before deleting)
+- **Use prompts for risky operations**: rebalancing, schema evolution, and security setup have safety gates built in
+- **Dry-run everything**: rebalancing and broker unloads support `dry_run: true` to preview changes
+- **Security tools work offline**: `create_token` and `validate_token` don't need a broker connection
 
 ---
 
 ## Limitations
 
-| Can do | Cannot do |
+| The MCP server can | The MCP server cannot |
 |--------|-----------|
-| Read cluster state (brokers, topics, schemas) | Publish or consume messages |
-| Create/delete topics and namespaces | Modify broker configuration |
-| Register and evolve schemas | Access data beyond Prometheus retention |
-| Trigger rebalancing and maintenance | Execute arbitrary shell commands |
-| Access logs and metrics | — |
+| Read and manage cluster state (brokers, topics, schemas) | Publish or consume messages |
+| Create and configure topics, namespaces, and schemas | Modify broker configuration files |
+| Manage RBAC security (roles, bindings, tokens) | Access data beyond Prometheus retention |
+| Trigger rebalancing and broker maintenance | Execute arbitrary shell commands |
+| Access logs from Docker, Kubernetes, or local brokers | Handle TLS certificate generation |
