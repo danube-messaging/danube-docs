@@ -120,23 +120,24 @@ After ownership changes, producers reconnect to the new broker and continue writ
 
 Consumers resume from their subscription cursor, not from broker-local state. If a consumer previously acknowledged through offset 13, it requests offset 14 after reconnecting.
 
-`WalStorage::create_reader()` decides how to serve the request:
+The tiered storage orchestrator decides how to serve the request:
 
 **Case 1: offset is within the hot WAL window.** The reader is created directly from the new broker's WAL.
 
-**Case 2: offset predates the hot WAL window.** A hybrid reader is created:
-
-1. `DurableHistoryReader` streams the historical prefix from durable segments
-2. The stream is chained to the hot WAL at `hot_start_offset`
+**Case 2: offset predates the hot WAL window.** A tiered reader is created that reads from durable history (Cloud Storage) first, then hands off to the new broker's WAL:
 
 The consumer sees one logical stream:
 
-```text title="Seamless reader handoff"
-Offsets 14..21   → from durable history
+```text title="Seamless tiered reader handoff"
+Offsets 14..21   → from durable history (Cloud Storage)
 Offsets 22..N    → from the new broker's hot WAL
 ```
 
 No broker-specific cursor translation is needed because the offset space remained continuous.
+
+:::note
+Valkey has no role during topic moves. Because the old broker stops producers and exports all data to durable storage before completing the handoff, there is no gap for Valkey to fill. Valkey's crash recovery role applies only to **unplanned** broker failures. See [Crash Recovery](/durability/crash-recovery/) for details.
+:::
 
 ---
 
@@ -196,4 +197,4 @@ The reliable topic move protocol relies on these components in `danube-persisten
 | `StorageStateSealed` | Takeover marker recording last committed offset |
 | `SegmentDescriptor` + `segments/cur` | Durable history catalog |
 | `StorageFactory::resolve_recovery_start()` | Determines the next correct WAL offset |
-| `WalStorage` hot-cutover logic | Keeps historical and hot reads aligned after takeover |
+| `TieredStorage` hot-cutover logic | Keeps historical and hot reads aligned after takeover |

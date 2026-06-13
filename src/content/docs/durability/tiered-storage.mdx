@@ -1,0 +1,191 @@
+---
+title: Tiered Storage
+description: How Danube's tiered read and write paths work across the Hot (WAL), Warm (Valkey), and Cold (S3) storage layers.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+This page explains how messages flow through Danube's three storage tiers and how the system decides where to read from for each consumer request.
+
+---
+
+## The Three Tiers
+
+| Tier | Backing Store | Controlled By | Typical Retention |
+|------|--------------|---------------|-------------------|
+| **Hot** (WAL) | Local disk + in-memory cache | Deleter (time/size retention policy) | Hours to days (default: 24h / 10GB) |
+| **Warm** (Valkey) | Redis Streams | Rotation listener (`XTRIM`) | Last N closed segments (configurable) |
+| **Cold** (S3) | Cloud Object Storage | Segment exporter | Indefinite (all exported segments) |
+
+:::note
+Each tier is independent. Their retention policies are different, their data coverage overlaps, and they can be enabled or disabled independently via configuration.
+:::
+
+---
+
+## Write Path
+
+Every message follows the same write path, regardless of configuration:
+
+1. **Hot Tier (always):** The broker appends the message to the local WAL and assigns it a monotonic topic offset. This is the fast, local-disk write that happens on every message.
+
+2. **Warm Tier (if configured):** The broker simultaneously writes the message to a Valkey Redis Stream using `XADD`, then calls `WAIT` to confirm replica acknowledgment. This is the durability guarantee, the message is safe in Valkey even if the local disk fails.
+
+3. **Cold Tier (async):** A background exporter periodically seals rotated WAL files and uploads them to S3 as immutable segment objects. This is not on the write path, it happens asynchronously.
+
+```
+Producer → Broker
+              ├── 1. WAL append (local disk, fast)
+              ├── 2. XADD + WAIT to Valkey (if configured)
+              └── ACK to producer
+                     ...later...
+              └── 3. Background export to S3 (if configured)
+```
+
+:::tip
+The `WAIT` command in step 2 is what provides the durability guarantee. The broker does not acknowledge the producer until Valkey confirms the write has reached the configured number of replicas.
+:::
+
+---
+
+## Read Path
+
+Danube's tiered reader is the single orchestrator that decides where to read from based on the consumer's requested offset and what each tier currently holds.
+
+### Live Tail (Real-Time Consumers)
+
+When a consumer subscribes with `Latest` (the most common case for real-time workloads), the reader bypasses all tiering and goes directly to the WAL's in-memory broadcast stream. There is zero overhead, no Valkey call, no S3 download.
+
+### Historical Read
+
+When a consumer requests a specific offset, the reader checks each tier's boundaries and stitches a continuous stream. Each tier handles a non-overlapping slice of the offset space:
+
+<Steps>
+1. **Cold Tier (S3)** serves offsets `[start ... warm_start-1]`, from the requested start up to where the Warm tier begins
+
+2. **Warm Tier (Valkey)** serves offsets `[warm_start ... hot_start-1]`, from where Cold ends up to where the Hot tier begins
+
+3. **Hot Tier (WAL)** serves offsets `[hot_start ... ∞)`, all remaining offsets through to live data
+</Steps>
+
+The boundaries between tiers are:
+
+- **hot_start** = oldest offset still retained in the local WAL
+- **warm_start** = oldest offset still in the Valkey stream
+
+---
+
+## Invariants
+
+These three rules govern how tiers interact. Understanding them helps you reason about data availability and read performance.
+
+### 1. Local WAL Always Takes Precedence
+
+When a consumer requests an offset that the WAL still has, on disk or in the in-memory cache, Danube reads from the WAL directly. No network call to Valkey, no download from S3.
+
+### 2. WAL Retains More Data Than Valkey
+
+Both the WAL and Valkey receive the same writes (double-write). But their retention policies differ:
+
+- The WAL retains files for **hours or days** (controlled by the deleter's time/size retention)
+- Valkey retains only the **last N closed segments** (controlled by `max_cached_closed_segments`)
+
+In normal operation, the WAL always has more data than Valkey:
+
+```
+WAL (Hot):     [-----offsets 0 to 5000---------]   (retaining 24h worth)
+Valkey (Warm):          [--offsets 3000 to 5000-]   (last 5 segments)
+S3 (Cold):     [-----offsets 0 to 4000---------]   (all exported segments)
+```
+
+A consumer requesting offset 1000 reads entirely from local disk. Valkey is never consulted.
+
+### 3. WAL Files Are Never Deleted Before S3 Export
+
+The local WAL deleter only removes a rotated file if its entire offset range has been successfully exported to S3. This guarantees there is never a gap in the data, S3 always covers everything the WAL has discarded.
+
+---
+
+## How Each Configuration Behaves
+
+### Hot Only (WAL only)
+
+**Config:** No `write_buffer`, no `durable_storage`.
+
+```
+WAL: [---offsets 0 to 1000---]
+```
+
+All reads come from the local WAL. Once data is rotated off disk, it is gone. Best for development, testing, and edge nodes where durability is not required.
+
+### Hot + Cold (WAL + S3)
+
+**Config:** `durable_storage` configured, no `write_buffer`.
+
+```
+S3:  [---offsets 0 to 800------]   (exported segments)
+WAL:      [---offsets 500 to 1000--]   (local files + cache)
+```
+
+| Consumer Requests | Served By |
+|-------------------|-----------|
+| offset 200 | **S3** [200, 499] → **WAL** [500, ∞) |
+| offset 600 | **WAL** directly |
+| offset 950 | **WAL** directly |
+
+Historical reads are always available. No crash recovery safety net, if the broker dies before exporting to S3, those messages are lost.
+
+### Hot + Warm (WAL + Valkey)
+
+**Config:** `write_buffer` configured, no `durable_storage`.
+
+```
+WAL:    [---offsets 0 to 1000---]   (retaining 24h worth)
+Valkey:      [---offsets 700 to 1000-]   (last 5 segments)
+```
+
+In **normal operation**, the WAL has more data than Valkey, so all reads go to the WAL.
+
+**Where Valkey matters: crash recovery.** If the broker dies and the local WAL is lost, the new broker downloads buffered messages from Valkey and replays them into a fresh WAL. See [Crash Recovery](/durability/crash-recovery/) for details.
+
+### Hot + Warm + Cold (WAL + Valkey + S3)
+
+**Config:** Both `write_buffer` and `durable_storage` configured. **Full production deployment.**
+
+```
+S3:     [---offsets 0 to 4000---------]   (all exported segments)
+Valkey:          [--offsets 3000 to 5000-]   (last 5 segments)
+WAL:    [-----offsets 0 to 5000--------]   (retaining 24h)
+```
+
+The most common read paths:
+
+| Consumer Requests | What Happens |
+|-------------------|-------------|
+| `Latest` | WAL broadcast stream (fast path, zero tiering overhead) |
+| offset 4500 | **WAL** directly |
+| offset 2000 | **WAL** directly (WAL still has it) |
+
+After WAL files have been pruned by the deleter:
+
+```
+S3:     [---offsets 0 to 4000---------]
+Valkey:          [--offsets 3000 to 5000-]
+WAL:               [--offsets 4000 to 5000-]   (old files deleted)
+```
+
+| Consumer Requests | What Happens |
+|-------------------|-------------|
+| offset 2000 | **S3** [2000, 2999] → **Valkey** [3000, 3999] → **WAL** [4000, ∞) |
+| offset 3500 | **Valkey** [3500, 3999] → **WAL** [4000, ∞) |
+| offset 4200 | **WAL** directly |
+
+---
+
+## Summary: The Role of Each Tier
+
+| Tier | Primary Role | Read Path Role |
+|------|-------------|----------------|
+| **Hot (WAL)** | Source of truth for all writes. Fast local reads. | Always preferred. Serves all reads for data it still holds. |
+| **Warm (Valkey)** | Crash recovery safety net. Ensures no data loss if the broker's disk is lost before S3 export. | Rarely used for reads in normal operation. Serves the narrow gap between WAL deletion and S3 coverage. |
+| **Cold (S3)** | Long-term archival. Indefinite retention. | Serves historical reads for data rotated out of both WAL and Valkey. |

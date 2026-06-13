@@ -5,7 +5,7 @@ description: System architecture of Danube Messaging, covering brokers, Raft con
 
 import { FileTree, LinkCard, CardGrid, Card } from '@astrojs/starlight/components';
 
-Danube is a distributed publish-subscribe messaging system built in Rust. It is designed for high throughput, low latency, and operational simplicity. This page describes the major components and the technical decisions behind them.
+Danube is a distributed streaming / pub-sub messaging system built in Rust. It is designed for high throughput, low latency, and operational simplicity. This page describes the major components and the technical decisions behind them.
 
 :::note
 This section is intended for advanced users and Danube contributors who want to understand the system internals. For usage documentation, see [Getting Started](/getting-started/quickstart/) and [Concepts](/concepts/topics/).
@@ -51,19 +51,21 @@ The storage layer handles message durability for reliable dispatch. It is not us
 
 **Write-Ahead Log (WAL):** Low-latency append-only log for the hot path. Messages are written to WAL segments on the local broker before acknowledgment.
 
+**Valkey Write Buffer (optional):** When configured, messages are double-written to Valkey Redis Streams for crash recovery. This provides RPO=0 durability without making brokers stateful.
+
 **Durable Segments:** Immutable files created when WAL segments are sealed. Used for historical replay, broker recovery, and topic movement.
 
 **Storage backends** are configurable per deployment:
 
-| Backend | WAL | Durable Segments | Use Case |
-|---------|-----|------------------|----------|
-| `local` | Local filesystem | Local filesystem | Single-node, development |
-| `shared_fs` | Local staging | Shared filesystem (NFS, EFS) | Multi-node with shared storage |
-| `object_store` | Local staging | Remote via OpenDAL (S3, GCS, Azure Blob) | Cloud-native deployments |
+| Backend | WAL | Write Buffer | Durable Segments | Use Case |
+|---------|-----|-------------|------------------|----------|
+| `local` | Local filesystem | Optional (Valkey) | Local filesystem | Single-node, development |
+| `shared_fs` | Local staging | Optional (Valkey) | Shared filesystem (NFS, EFS) | Multi-node with shared storage |
+| `object_store` | Local staging | Optional (Valkey) | Remote via OpenDAL (S3, GCS, Azure Blob) | Cloud-native deployments |
 
-**Tiered reads:** consumers read from local WAL/cache when data is recent. For older data, the broker streams from durable segments and hands off to the WAL tail seamlessly.
+**Tiered reads:** Consumers read from the local WAL when data is recent. For older data, the broker reads from Valkey (warm cache) and/or durable segments (cold storage) and chains them seamlessly into the WAL tail.
 
-For details, see [Persistence & Storage](/concepts/persistence/).
+For details, see [Persistence & Storage](/concepts/persistence/) and [Durability & Storage](/durability/overview/).
 
 ---
 
@@ -127,6 +129,11 @@ For operational commands, see [CLI: Cluster & Brokers](/admin/cli-cluster/).
 ## Deep Dives
 
 <CardGrid>
+  <LinkCard
+    title="Durability & Tiered Storage"
+    description="How Danube achieves enterprise-grade durability with stateless brokers using Hot/Warm/Cold tiered storage."
+    href="/durability/overview/"
+  />
   <LinkCard
     title="Schema Registry Architecture"
     description="Storage model, Raft replication, caching, and validation layers."

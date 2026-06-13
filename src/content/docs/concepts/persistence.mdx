@@ -1,98 +1,69 @@
 ---
 title: Persistence & Storage
-description: How Danube persists messages using a local WAL, durable segment exports, and cloud storage.
+description: High-level overview of how Danube persists messages using tiered storage across local WAL, Valkey, and cloud storage.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Reliable topics persist messages so consumers can replay history and topics can move between brokers without losing data.
+Reliable topics persist messages so consumers can replay history and topics can move between brokers without losing data. Non-reliable topics bypass storage entirely.
 
-The storage system is built around three ideas:
+---
 
-1. **Recent writes** go to a fast, local per-topic Write-Ahead Log (WAL)
-2. **Historical data** is available from durable exported segments (in `shared_fs` and `object_store` modes)
-3. **Recovery and topic moves** rely on metadata stored in the embedded Raft metadata store
+## Storage Architecture
+
+Danube's persistence is built on three independent storage tiers:
+
+<CardGrid>
+  <Card title="Hot: Local WAL" icon="rocket">
+    Every message is appended to a local Write-Ahead Log (WAL) on the broker's disk and assigned a monotonic offset. This is the fast path for all writes and real-time reads.
+  </Card>
+  <Card title="Warm: Valkey" icon="star">
+    Optional. Messages are double-written to Valkey Redis Streams for crash recovery. If the broker is lost, the new broker replays buffered messages from Valkey into a fresh WAL.
+  </Card>
+  <Card title="Cold: Cloud Storage" icon="open-book">
+    Optional. A background exporter uploads sealed WAL segments to cloud object storage (S3, GCS, Azure Blob) as immutable segment objects for long-term archival and historical replay.
+  </Card>
+</CardGrid>
+
+Each tier is independent and opt-in. You can run any combination depending on your durability and retention requirements.
 
 ---
 
 ## Storage Modes
 
-Danube supports three storage modes, configured under `storage.mode` in the broker config.
+The `storage.mode` setting controls where sealed WAL segments are exported:
 
-### Local
+| Mode | Durable Storage | Use Case |
+|------|----------------|----------|
+| `local` | Local filesystem only | Single-node, development, edge |
+| `shared_fs` | Shared filesystem (NFS, EFS) | On-prem multi-broker clusters |
+| `object_store` | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native multi-broker deployments |
 
-All data stays on the broker's local disk. No background export, no remote storage.
-
-```yaml title="danube_broker.yml"
-storage:
-  mode: local
-  local_wal_root: "./danube-data/wal"
-```
-
-Best for: single-node setups, development, and simple deployments.
-
-### Shared Filesystem
-
-Hot writes go to a local WAL; background export copies sealed segments to a shared filesystem visible to all brokers.
-
-```yaml title="danube_broker.yml"
-storage:
-  mode: shared_fs
-  local_wal_root: "/var/lib/danube/shared-fs-cache"
-  durable:
-    root: "/mnt/danube-shared-segments"
-```
-
-Best for: on-prem multi-broker clusters with NFS or shared POSIX volumes.
-
-### Object Store
-
-Hot writes go to a local WAL; background export pushes sealed segments to cloud object storage (S3, GCS, Azure Blob) via OpenDAL.
-
-```yaml title="danube_broker.yml"
-storage:
-  mode: object_store
-  local_wal_root: "/var/lib/danube/object-store-cache"
-  durable:
-    backend: s3
-    root: "s3://my-bucket/danube"
-    region: "us-east-1"
-```
-
-Best for: cloud-native multi-broker deployments.
-
-### How to Choose
-
-| Need | Mode |
-|------|------|
-| Simplest setup, single broker | `local` |
-| Multi-broker with shared disk | `shared_fs` |
-| Multi-broker, cloud-native | `object_store` |
+In all modes, the local WAL handles recent writes. In `shared_fs` and `object_store` modes, a background exporter continuously publishes sealed segments to durable storage for historical replay and cross-broker availability.
 
 ---
 
-## How Storage Works
+## Write Path
 
-### Write Path
-
-1. Broker writes a message to the topic storage
-2. The WAL atomically assigns the next topic offset
-3. A write command is enqueued to the background writer
-4. After the enqueue is guaranteed, the message is published into the in-memory cache and live reader stream
+1. The broker appends the message to the local WAL and assigns the next topic offset
+2. If Valkey is configured, the message is simultaneously written to a Redis Stream with replica confirmation
+3. The message is published into the in-memory cache and live reader stream
+4. Asynchronously, sealed WAL files are exported to cloud storage (in `shared_fs` and `object_store` modes)
 
 :::note
 The offset is assigned before durable export and before reader delivery. This offset becomes the stable identity of the message for the rest of its lifetime.
 :::
 
-### Read Path
+---
 
-When a consumer reads from a topic, the broker decides where to serve the data from:
+## Read Path
 
-- **Offset is within local WAL**: read directly from WAL files and cache
-- **Offset is older than local WAL** (in `shared_fs` or `object_store`): read from durable segments first, then hand off to the WAL for recent data
-- **Offset is older than local WAL** (in `local` mode): depends on whether the local WAL files still exist
+When a consumer reads from a topic, the broker serves data from the tier closest to the source:
 
-In `shared_fs` and `object_store` modes, consumers can read old messages even after local WAL files have been pruned or a topic has moved to another broker.
+- **Live tail consumers** read directly from the WAL's in-memory broadcast stream with zero overhead
+- **Historical consumers** receive a stitched stream: Cold (cloud storage) → Warm (Valkey) → Hot (WAL), with each tier covering a non-overlapping offset range
+
+The local WAL always takes precedence for data it still holds. Valkey and cloud storage are only consulted for offsets that have been rotated out of the WAL.
 
 ---
 
@@ -103,102 +74,33 @@ When a topic moves between brokers (e.g., during rebalancing), offset continuity
 1. The old broker **seals** the topic and records the last committed offset
 2. The new broker **resumes** from `last_committed_offset + 1`
 
-In `shared_fs` and `object_store`, historical reads on the new broker are served from durable segments. In `local` mode, only the offset sequence is preserved — there is no shared durable backend.
+In `shared_fs` and `object_store` modes, historical reads on the new broker are served from durable segments. In `local` mode, only the offset sequence is preserved, there is no shared durable backend.
+
+For the full protocol, see [Reliable Topic Move](/architecture/reliable-topic-move/).
 
 ---
 
-## Configuration Reference
+## Learn More
 
-### Common Fields
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `mode` | *(required)* | `local`, `shared_fs`, or `object_store` |
-| `local_wal_root` | *(required for `local`)* | Directory for per-topic WAL files |
-| `metadata_prefix` | `"/danube"` | Raft metadata store prefix for storage metadata |
-
-### WAL Settings
-
-```yaml title="danube_broker.yml"
-storage:
-  wal:
-    cache_capacity: 1024       # in-memory replay cache (messages)
-    file_sync:
-      interval_ms: 5000        # background flush interval
-      max_batch_bytes: 10485760 # flush when buffer reaches 10 MiB
-    rotation:
-      max_bytes: 536870912     # rotate WAL file at 512 MiB
-      max_hours: 24            # rotate WAL file after 24 hours
-```
-
-:::note
-`file_sync` controls background flush cadence, it is not per-message synchronous durability. Rotation thresholds are checked on the next write after the limit is reached.
-:::
-
-### Local Retention
-
-Controls pruning of local WAL files after durable segments safely cover them. Most useful in `shared_fs` and `object_store` modes.
-
-```yaml title="danube_broker.yml"
-storage:
-  local_retention:
-    time_minutes: 2880          # prune files older than 48 hours
-    size_mb: 20480              # prune when local WAL exceeds 20 GB
-    check_interval_minutes: 5   # check every 5 minutes
-```
-
-This only deletes local WAL files — it does **not** delete durable segment objects.
-
-### Cloud Backend Configuration
-
-<Tabs>
-<TabItem label="S3">
-
-```yaml title="danube_broker.yml"
-storage:
-  durable:
-    backend: s3
-    root: "s3://my-bucket/danube"
-    region: "us-east-1"
-    endpoint: "https://s3.us-east-1.amazonaws.com"
-    access_key: "<access-key>"
-    secret_key: "<secret-key>"
-```
-
-</TabItem>
-<TabItem label="GCS">
-
-```yaml title="danube_broker.yml"
-storage:
-  durable:
-    backend: gcs
-    root: "gcs://my-bucket/danube"
-    project: "my-gcp-project"
-    credentials_path: "/path/to/credentials.json"
-```
-
-</TabItem>
-<TabItem label="Azure Blob">
-
-```yaml title="danube_broker.yml"
-storage:
-  durable:
-    backend: azblob
-    root: "my-container/danube"
-    endpoint: "https://<account>.blob.core.windows.net"
-    account_name: "<account-name>"
-    account_key: "<account-key>"
-```
-
-</TabItem>
-</Tabs>
-
-:::caution
-Never hardcode cloud credentials in version-controlled config files. Use secret management or environment variables in production.
-:::
-
----
-
-## Internals
-
-For the deep technical architecture — WAL frame format, durable segment export, `StorageFactory`, and recovery logic — see the Architecture section.
+<CardGrid>
+  <LinkCard
+    title="Durability & Storage Overview"
+    description="Why Danube uses stateless brokers with external durability, and how it compares to other platforms."
+    href="/durability/overview/"
+  />
+  <LinkCard
+    title="Tiered Storage"
+    description="How the read and write paths work across Hot, Warm, and Cold tiers with invariants and examples."
+    href="/durability/tiered-storage/"
+  />
+  <LinkCard
+    title="Configuration Guide"
+    description="Practical YAML examples for storage modes, Valkey write buffer, and cloud backends."
+    href="/durability/configuration/"
+  />
+  <LinkCard
+    title="Crash Recovery"
+    description="What happens when a broker is lost and how each tier protects against data loss."
+    href="/durability/crash-recovery/"
+  />
+</CardGrid>

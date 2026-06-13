@@ -301,6 +301,35 @@ Rarely needed. Placed under `wal.advanced`.
 | `wal.advanced.file_sync.interval_ms` | Integer (ms) | `5000` | Background flush interval. Not per-message sync. |
 | `wal.advanced.file_sync.max_batch_bytes` | Integer (bytes) | `10485760` (10 MB) | Force flush when write buffer exceeds this |
 
+### Write Buffer (Valkey)
+
+Optional. Enables double-writing messages to Valkey for crash recovery and warm caching. See [Durability & Storage](/durability/overview/) for the architectural overview and [Configuration Guide](/durability/configuration/) for deployment examples.
+
+```yaml title="danube_broker.yml"
+storage:
+  write_buffer:
+    backend: valkey
+    endpoints:
+      - "redis://127.0.0.1:6379"
+    wait_replicas: 0
+    wait_timeout_ms: 100
+    on_wait_timeout: fail
+    max_cached_closed_segments: 5
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `write_buffer.backend` | String | *(required)* | Must be `valkey` |
+| `write_buffer.endpoints` | String[] | *(required)* | Valkey/Redis endpoint URLs. Single endpoint = standalone mode. Multiple = cluster mode. |
+| `write_buffer.wait_replicas` | Integer | `0` | Replicas that must confirm each write via `WAIT`. Set `0` for standalone, `1+` for replicated setups. |
+| `write_buffer.wait_timeout_ms` | Integer | `100` | Maximum wait for replica confirmation (ms) |
+| `write_buffer.on_wait_timeout` | String | `fail` | Timeout policy: `fail` (reject write) or `ack` (proceed with warning) |
+| `write_buffer.max_cached_closed_segments` | Integer | `5` | Number of closed WAL segments to retain in Valkey. Older segments are trimmed via `XTRIM MINID`. |
+
+:::caution
+Setting `on_wait_timeout: ack` means writes succeed even when Valkey doesn't confirm. This trades durability for availability. Use `fail` in production.
+:::
+
 ### Durable Backend: Shared Filesystem
 
 Required when `mode: shared_fs`.

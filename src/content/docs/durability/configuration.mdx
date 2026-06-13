@@ -1,0 +1,292 @@
+---
+title: Configuration Guide
+description: How to configure Danube's storage modes, Valkey write buffer, and cloud storage backends.
+---
+
+import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+
+This page shows how to configure each storage tier in your Danube broker configuration.
+
+---
+
+## Storage Modes
+
+Danube supports three storage modes, configured under `storage.mode` in the broker config. The mode determines where sealed WAL segments are exported for long-term durability.
+
+| Mode | Durable Storage | Use Case |
+|------|----------------|----------|
+| `local` | Local filesystem only | Single-node, development, edge |
+| `shared_fs` | Shared filesystem (NFS, EFS) | On-prem multi-broker clusters |
+| `object_store` | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native multi-broker deployments |
+
+### Local
+
+All data stays on the broker's local disk. No background export, no remote storage.
+
+```yaml title="danube_broker.yml"
+storage:
+  mode: local
+  local_wal_root: "./danube-data/wal"
+```
+
+### Shared Filesystem
+
+Hot writes go to a local WAL. A background exporter copies sealed segments to a shared filesystem visible to all brokers.
+
+```yaml title="danube_broker.yml"
+storage:
+  mode: shared_fs
+  local_wal_root: "/var/lib/danube/wal"
+  durable:
+    root: "/mnt/danube-shared-segments"
+```
+
+### Object Store
+
+Hot writes go to a local WAL. A background exporter pushes sealed segments to cloud object storage via OpenDAL.
+
+<Tabs>
+<TabItem label="S3">
+
+```yaml title="danube_broker.yml"
+storage:
+  mode: object_store
+  durable:
+    backend: s3
+    root: "s3://my-bucket/danube"
+    region: "us-east-1"
+    # endpoint: "https://s3.us-east-1.amazonaws.com"  # optional, for custom endpoints / MinIO
+    # access_key: "<access-key>"                       # prefer IAM roles in production
+    # secret_key: "<secret-key>"
+```
+
+</TabItem>
+<TabItem label="GCS">
+
+```yaml title="danube_broker.yml"
+storage:
+  mode: object_store
+  durable:
+    backend: gcs
+    root: "gcs://my-bucket/danube"
+    # project: "my-gcp-project"
+    # credentials_path: "/path/to/credentials.json"
+```
+
+</TabItem>
+<TabItem label="Azure Blob">
+
+```yaml title="danube_broker.yml"
+storage:
+  mode: object_store
+  durable:
+    backend: azblob
+    root: "my-container/danube"
+    # endpoint: "https://<account>.blob.core.windows.net"
+    # account_name: "<account-name>"
+    # account_key: "<account-key>"
+```
+
+</TabItem>
+</Tabs>
+
+:::caution
+Never hardcode cloud credentials in version-controlled config files. Use secret management or environment variables in production.
+:::
+
+---
+
+## WAL and Retention Settings
+
+These settings apply to all storage modes.
+
+```yaml title="danube_broker.yml"
+storage:
+  metadata_prefix: "/danube"
+  local_retention:
+    time_minutes: 2880          # prune files older than 48 hours
+    size_mb: 20480              # prune when local WAL exceeds 20 GB
+    check_interval_minutes: 5   # check every 5 minutes
+  wal:
+    rotation:
+      max_bytes: 536870912      # rotate WAL file at 512 MB
+```
+
+:::note
+Local retention only deletes WAL files that have been safely exported to durable storage. It does **not** delete durable segment objects.
+:::
+
+---
+
+## Write Buffer (Valkey)
+
+The `write_buffer` block enables double-writing messages to Valkey for crash recovery and warm caching. This is independent of the storage mode, you can combine it with `local`, `shared_fs`, or `object_store`.
+
+### Quick Start
+
+Add these lines to enable durability via Valkey:
+
+```yaml title="danube_broker.yml" {5-9}
+storage:
+  mode: local
+  local_wal_root: "./danube-data/wal"
+
+  write_buffer:
+    backend: valkey
+    endpoints:
+      - "redis://127.0.0.1:6379"
+```
+
+That's it. Every message is now double-written to both the local WAL and Valkey. If the broker crashes, the next broker recovers the buffered messages from Valkey.
+
+### Options Reference
+
+```yaml title="danube_broker.yml"
+storage:
+  write_buffer:
+    backend: valkey
+    endpoints:
+      - "redis://127.0.0.1:6379"
+    wait_replicas: 0
+    wait_timeout_ms: 100
+    on_wait_timeout: fail
+    max_cached_closed_segments: 5
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend` | String | *(required)* | Must be `valkey` |
+| `endpoints` | String[] | *(required)* | Valkey/Redis endpoint URLs. Use one endpoint for standalone, multiple for cluster mode. |
+| `wait_replicas` | Integer | `0` | Number of Valkey replicas that must confirm each write. Set to `0` for standalone, `1` or higher for replicated setups. |
+| `wait_timeout_ms` | Integer | `100` | Maximum time to wait for replica confirmation (milliseconds). |
+| `on_wait_timeout` | String | `fail` | What to do if `WAIT` times out: `fail` (reject the write) or `ack` (proceed anyway). |
+| `max_cached_closed_segments` | Integer | `5` | How many closed WAL segments to keep cached in Valkey. Older segments are trimmed via `XTRIM`. |
+
+### Choosing `wait_replicas`
+
+| Deployment | `wait_replicas` | Durability Guarantee |
+|-----------|----------------|---------------------|
+| Standalone Valkey (dev/test) | `0` | Messages survive broker crash, not Valkey crash |
+| Valkey with 1 replica | `1` | Messages survive both broker and Valkey primary crash |
+| Valkey Cluster (3+ masters) | `1` | Full HA, messages survive any single node failure |
+
+### Choosing `on_wait_timeout`
+
+| Policy | Behavior | When to Use |
+|--------|----------|-------------|
+| `fail` | Reject the write, producer gets an error | Production, never silently lose the durability guarantee |
+| `ack` | Proceed with the write, log a warning | Development, or when availability is more important than strict durability |
+
+:::caution
+Setting `on_wait_timeout: ack` means the broker will acknowledge writes even if Valkey didn't confirm them. This trades durability for availability. Use only when you understand the trade-off.
+:::
+
+### Sizing `max_cached_closed_segments`
+
+This controls how many closed WAL segments Valkey retains. Each segment is typically 512 MB of messages (matching `wal.rotation.max_bytes`).
+
+| Value | Valkey Memory (approx.) | Coverage |
+|-------|------------------------|----------|
+| `3` | ~1.5 GB per topic | Last 3 rotations |
+| `5` | ~2.5 GB per topic | Last 5 rotations (default) |
+| `10` | ~5 GB per topic | Last 10 rotations |
+
+:::tip
+Higher values provide more coverage for crash recovery and warm reads, but consume more Valkey memory. For most deployments, `5` is a good starting point.
+:::
+
+### Sizing `wait_timeout_ms`
+
+The timeout for Valkey replica confirmation. Set this based on your network latency to Valkey:
+
+| Network | Recommended Timeout |
+|---------|-------------------|
+| Same host / localhost | `50–100 ms` |
+| Same datacenter | `100–200 ms` |
+| Cross-AZ | `200–500 ms` |
+
+---
+
+## Deployment Examples
+
+<Tabs>
+<TabItem label="Standalone (Dev/Test)">
+
+```yaml title="danube_broker.yml"
+storage:
+  mode: local
+  local_wal_root: "./danube-data/wal"
+  metadata_prefix: "/danube"
+  local_retention:
+    time_minutes: 2880
+    size_mb: 20480
+    check_interval_minutes: 5
+  wal:
+    rotation:
+      max_bytes: 536870912
+
+  write_buffer:
+    backend: valkey
+    endpoints:
+      - "redis://127.0.0.1:6379"
+    wait_replicas: 0
+    wait_timeout_ms: 100
+    on_wait_timeout: fail
+    max_cached_closed_segments: 5
+```
+
+Start Valkey with Docker:
+
+```bash
+docker run -d --name valkey -p 6379:6379 valkey/valkey:latest
+```
+
+</TabItem>
+<TabItem label="Valkey Cluster (Production)">
+
+```yaml title="danube_broker.yml"
+storage:
+  mode: object_store
+  local_wal_root: "/var/lib/danube/wal"
+  metadata_prefix: "/danube"
+  local_retention:
+    time_minutes: 2880
+    size_mb: 20480
+    check_interval_minutes: 5
+  wal:
+    rotation:
+      max_bytes: 536870912
+
+  durable:
+    backend: s3
+    root: "s3://my-bucket/danube"
+    region: "us-east-1"
+
+  write_buffer:
+    backend: valkey
+    endpoints:
+      - "redis://valkey-0.valkey:6379"
+      - "redis://valkey-1.valkey:6379"
+      - "redis://valkey-2.valkey:6379"
+    wait_replicas: 1
+    wait_timeout_ms: 200
+    on_wait_timeout: fail
+    max_cached_closed_segments: 10
+```
+
+:::note
+When multiple endpoints are provided, Danube connects in cluster mode. Ensure your Valkey instances are configured as a cluster.
+:::
+
+</TabItem>
+</Tabs>
+
+For a complete broker configuration reference covering all settings, see [Broker Configuration](/reference/broker-configuration/).
+
+---
+
+## What's Next
+
+- [Tiered Storage](/durability/tiered-storage/) — understand how the read path works with each configuration
+- [Crash Recovery](/durability/crash-recovery/) — what happens when a broker fails
+- [Broker Configuration Reference](/reference/broker-configuration/) — complete field reference for all settings

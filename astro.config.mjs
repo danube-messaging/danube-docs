@@ -46,6 +46,15 @@ export default defineConfig({
                     ],
                 },
                 {
+                    label: 'Durability & Storage',
+                    items: [
+                        { label: 'Overview', slug: 'durability/overview' },
+                        { label: 'Tiered Storage', slug: 'durability/tiered-storage' },
+                        { label: 'Configuration Guide', slug: 'durability/configuration' },
+                        { label: 'Crash Recovery', slug: 'durability/crash-recovery' },
+                    ],
+                },
+                {
                     label: 'Client Libraries',
                     items: [
                         { label: 'Overview', slug: 'client-libraries/overview' },

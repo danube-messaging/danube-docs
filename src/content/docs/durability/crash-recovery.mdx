@@ -1,0 +1,99 @@
+---
+title: Crash Recovery
+description: How Danube recovers from broker crashes using Valkey as a durability safety net, and what guarantees each configuration provides.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+This page explains what happens when a Danube broker crashes and how the system recovers without losing messages.
+
+---
+
+## Why Crashes Can Lose Messages
+
+When a broker receives a message, it first writes to the local WAL (Write-Ahead Log) on disk. A background exporter then asynchronously uploads sealed WAL segments to Cloud Storage (S3, GCS, or Azure Blob). There is a window between the WAL write and the Cloud Storage export where messages exist only on the broker's local disk.
+
+If the broker crashes during this window, or if the disk fails, those messages are lost.
+
+**This is the problem Valkey solves.** By double-writing every message to Valkey in real-time, the system has a second copy that survives broker failures.
+
+---
+
+## Recovery With Valkey
+
+When a broker starts and takes ownership of a topic, it checks Valkey for any buffered messages that aren't yet covered by Cloud Storage. If found, it replays them into a fresh WAL.
+
+<Steps>
+1. **Broker starts** and claims topic ownership from the metadata store
+
+2. **Check Valkey** for the topic's stream, query for any messages with offsets beyond what Cloud Storage already covers
+
+3. **Download and replay**, if Valkey has buffered messages, download them via `XRANGE` and replay them into a fresh local WAL
+
+4. **Resume normal operation**, the WAL now contains all recovered messages. New writes continue from the correct offset. Consumers reconnect and see a continuous stream.
+</Steps>
+
+From the consumer's perspective, nothing happened. The offset sequence is continuous, no messages are missing, and reads work normally.
+
+---
+
+## Recovery Without Valkey
+
+Without the write buffer, the system depends entirely on the local WAL and Cloud Storage:
+
+- **Messages already exported to Cloud Storage:** safe, always recoverable
+- **Messages in the WAL but not yet exported:** lost if the disk fails or the broker crashes
+
+The window of exposure depends on:
+- WAL rotation frequency (default: every 512 MB)
+- Cloud Storage export cadence (continuous background task)
+
+In practice, this window is typically a few minutes of recent messages.
+
+---
+
+## Recovery During Topic Moves
+
+When a topic moves between brokers (due to rebalancing or maintenance), the system follows a coordinated handoff:
+
+<Steps>
+1. **Old broker seals the topic**: stops accepting writes, records the last committed offset, and exports all remaining WAL data to Cloud Storage
+
+2. **New broker loads the topic**: reads the sealed state from metadata, creates a fresh WAL starting at `last_committed_offset + 1`
+
+3. **Valkey is not involved**: because producers were stopped during sealing and all data was exported to Cloud Storage, there is no gap for Valkey to fill. Valkey's crash recovery role applies only to **unplanned** broker failures.
+
+4. **Consumers reconnect**: they resume from their subscription cursor. The tiered reader serves historical data from Cloud Storage, then transitions to the new broker's WAL for live data.
+</Steps>
+
+For more details on topic moves, see [Reliable Topic Move](/architecture/reliable-topic-move/).
+
+---
+
+## Guarantees by Configuration
+
+Since Danube brokers are stateless and disposable, a broker crash typically means it is replaced and the local volume is lost. The table below assumes this scenario.
+
+| Configuration | Broker Lost | Valkey Crash | Guarantee |
+|--------------|------------|-------------|-----------|
+| WAL only | All unexported messages lost | N/A | Best-effort |
+| WAL + Cloud Storage | Messages not yet exported to Cloud Storage are lost | N/A | Eventual durability |
+| WAL + Valkey | Zero message loss (Valkey has a copy) | Messages in flight may be lost | RPO=0 for broker failures |
+| WAL + Valkey + Cloud Storage | Zero message loss | Cloud Storage still has all exported data | Full durability |
+
+:::note
+**RPO** = Recovery Point Objective. RPO=0 means no data loss on recovery.
+:::
+
+:::tip
+If the broker simply restarts on the same node with the same volume (e.g., process crash, OOM restart), the WAL data is still on local disk and normal operation resumes without any recovery needed.
+:::
+
+### What Each Tier Protects Against
+
+| Risk | WAL | Valkey | Cloud Storage |
+|------|-----|--------|---------------|
+| Broker restart (same volume) | Survives | Survives | Survives |
+| Broker lost (new instance, new volume) | **Lost** | Survives | Survives |
+| Valkey primary crash | Survives | **Lost** (unless replicated) | Survives |
+| Cloud Storage region outage | Survives | Survives | **Unavailable** |
