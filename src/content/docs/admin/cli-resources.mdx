@@ -219,6 +219,28 @@ Gracefully unload a topic from its current broker for reassignment.
 danube-admin topics unload /default/events
 ```
 
+### Dispatch Configuration
+
+Override the cluster-wide `max_unacked_messages` for a specific subscription. This controls how many messages the broker pipelines to consumers before waiting for acknowledgments.
+
+```bash title="Set pipelining depth"
+danube-admin topics set-dispatch-config /default/orders \
+  --subscription order-workers \
+  --max-unacked-messages 50
+```
+
+```bash title="Read current setting"
+danube-admin topics get-dispatch-config /default/orders \
+  --subscription order-workers
+```
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--subscription` | Yes | Subscription name |
+| `--max-unacked-messages` | Yes (set) | Pipelining depth (1–10,000) |
+
+Per-subscription overrides are persisted in the metadata store and take effect on the next consumer reconnect. If no override is set, the cluster-wide default from `dispatch.max_unacked_messages` in `danube_broker.yml` is used. See [Broker Configuration](/reference/broker-configuration/) for the config reference.
+
 ---
 
 ### Schema Configuration (Admin-Only)
