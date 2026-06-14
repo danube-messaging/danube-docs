@@ -53,6 +53,29 @@ Ensures **at-least-once delivery** using a WAL + cloud store-and-forward design.
 
 **Best for**: order processing, financial transactions, event sourcing, or any workload where every message must be delivered at least once.
 
+### Pipelining
+
+Reliable dispatch pipelines multiple messages to consumers without waiting for each one to be acknowledged individually. This allows the broker to keep the consumer busy while previous messages are still being processed, significantly improving throughput.
+
+The number of messages that can be in-flight simultaneously is controlled by `max_unacked_messages`:
+
+| Setting | Behavior |
+|---------|----------|
+| Low (e.g., 1–5) | Strict flow control. Each message must be acknowledged before more are sent. Lower throughput, smaller redelivery scope on failure. |
+| Default (10) | Good balance of throughput and reliability for most workloads. |
+| High (e.g., 100–1000) | Maximum throughput. More messages in-flight means more potential redelivery on consumer failure. |
+
+The broker tracks acknowledgments and advances progress only past contiguously-acked offsets. Out-of-order acknowledgments are safe — the broker will not skip unacked messages.
+
+Configure the cluster-wide default in `danube_broker.yml`:
+
+```yaml title="danube_broker.yml"
+dispatch:
+  max_unacked_messages: 10
+```
+
+Per-subscription overrides are available via the admin API. See [Broker Configuration](/reference/broker-configuration/) for the config reference and [CLI: Resources](/admin/cli-resources/) for commands.
+
 :::tip
 You can run non-reliable and reliable topics side by side in the same cluster. Choose the strategy per topic based on your reliability requirements.
 :::

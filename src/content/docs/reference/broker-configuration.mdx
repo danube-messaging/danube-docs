@@ -418,6 +418,25 @@ Avoid hardcoding credentials in version-controlled YAML. Use environment variabl
 
 ---
 
+## Dispatch
+
+Controls pipelining behavior for reliable subscriptions. Non-reliable topics ignore this section.
+
+```yaml title="danube_broker.yml"
+dispatch:
+  max_unacked_messages: 10
+```
+
+| Field | Type | Default | Range | Description |
+|-------|------|---------|-------|-------------|
+| `dispatch.max_unacked_messages` | Integer | `10` | 1–10,000 | Maximum number of unacknowledged messages per subscription. Controls how many messages the broker pipelines to a consumer before pausing. Higher values increase throughput; lower values reduce redelivery scope on failure. |
+
+The broker validates this value at startup and rejects configurations outside the allowed range.
+
+Per-subscription overrides are available via the admin API (`set-dispatch-config` / `get-dispatch-config`). See [CLI: Resources](/admin/cli-resources/) for commands.
+
+---
+
 ## Policies
 
 Default resource limits applied at the broker level. These can be overridden at the namespace or topic level.

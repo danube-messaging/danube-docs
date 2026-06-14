@@ -87,6 +87,14 @@ Broker discovery, topic assignment, load balancing, and leader election.
 
   Consumer progress offset (`u64`). Updated in batches (every 1000 acks or 5 seconds).
 
+- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}/failure_policy`**
+
+  Subscription failure policy (JSON). Configures redelivery limits, ack timeouts, backoff strategy, and poison policy.
+
+- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}/dispatch_config`**
+
+  Per-subscription dispatch configuration override (JSON). Currently contains `max_unacked_messages`. Set via admin API; overrides the cluster-wide default from `danube_broker.yml`.
+
 ---
 
 ## Schema Registry
