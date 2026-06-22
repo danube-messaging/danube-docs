@@ -32,6 +32,7 @@ export default defineConfig({
                         { label: 'Run Locally', slug: 'getting-started/local' },
                         { label: 'Docker Compose', slug: 'getting-started/docker-compose' },
                         { label: 'Kubernetes', slug: 'getting-started/kubernetes' },
+                        { label: 'AI Agent Testing', slug: 'getting-started/ai-agent-testing' },
                     ],
                 },
                 {

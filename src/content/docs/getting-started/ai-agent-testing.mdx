@@ -1,0 +1,124 @@
+---
+title: AI Agent Testing
+description: Test Danube features using AI-powered coding assistants — zero manual setup, structured scenarios, fully automated infrastructure.
+---
+
+import { Steps, Card, CardGrid } from '@astrojs/starlight/components';
+
+The [Danube Agent Skills](https://github.com/danube-messaging/danube-agent-skills) repository lets you test Danube using AI coding assistants. Describe what you want to test in plain English, and the AI sets up infrastructure, runs the test, and reports results, no manual configuration needed.
+
+## How It Works
+
+Open the repository in an AI-powered IDE (Claude Code, Cursor, Windsurf, VS Code + Copilot, or any agent that reads `SKILL.md` files), type a prompt, and the AI handles everything:
+
+- Downloads binaries from GitHub Releases
+- Generates broker configs from templates
+- Starts brokers, forms clusters, creates namespaces
+- Installs client libraries as needed
+- Runs the test scenario step by step
+- Reports pass/fail results
+
+Each test run creates an isolated directory with all configs, logs, and data. Nothing is shared between runs.
+
+## Quick Start
+
+<Steps>
+1. **Clone the repository**
+
+   ```bash title="Terminal"
+   git clone https://github.com/danube-messaging/danube-agent-skills.git
+   cd danube-agent-skills
+   ```
+
+2. **Open in your AI IDE**
+
+   Open the `danube-agent-skills` folder in your preferred AI-powered editor or terminal.
+
+3. **Tell the AI what to test**
+
+   Type a prompt like:
+
+   > *"I want to test reliable delivery with NACK redelivery"*
+
+   The AI reads the skill files, asks a few clarifying questions (which aspect, which setup method), and then executes the scenario.
+</Steps>
+
+:::tip
+You don't need to download Danube binaries, write configs, or install client libraries manually. The setup scripts handle everything automatically based on the scenario you choose.
+:::
+
+## Example Prompts
+
+Here are some prompts to get you started:
+
+- *"Set up a standalone Danube broker and run a quick produce/consume test"*
+- *"Test fan-out vs queue subscription patterns using Python"*
+- *"Set up a 3-node cluster and test broker scaling"*
+- *"I want to try schema validation with backward compatibility"*
+- *"Set up a secure cluster with TLS and test RBAC permissions"*
+- *"Test edge MQTT ingestion with store-and-forward"*
+- *"Just bring up a Danube cluster so I can play with it"*
+
+## Available Scenarios
+
+Scenarios are structured test workflows. Each one has a clear objective, deterministic test aspects to choose from, step-by-step execution, and pass/fail criteria.
+
+### User Functionality
+
+For application developers building on Danube:
+
+<CardGrid>
+  <Card title="Core Messaging" icon="rocket">
+    Basic produce and consume: pick your subscription type, reliability mode, partitions, and schema. The foundational test for Danube.
+  </Card>
+  <Card title="Subscription Patterns" icon="puzzle">
+    Fan-out (broadcast to all consumers) vs Queue (round-robin work distribution) vs Consumer Churn (join/leave mid-traffic).
+  </Card>
+  <Card title="Reliable Delivery" icon="approve-check-circle">
+    At-least-once guarantees: NACK redelivery, ack timeout, failure policies (block/drop/dead-letter), and consumer reconnection.
+  </Card>
+  <Card title="Schema Lifecycle" icon="document">
+    Schema registration, validation, compatibility modes (backward/forward/full/none), version pinning, and topic-level schema locking.
+  </Card>
+  <Card title="Key-Shared Advanced" icon="setting">
+    Glob-based key filtering, Key-Shared on partitioned topics, and poison message handling with failure policies.
+  </Card>
+</CardGrid>
+
+### Operational
+
+For platform teams and cluster administrators:
+
+<CardGrid>
+  <Card title="Broker Scaling" icon="up-caret">
+    Scale up (add a broker via Raft join), scale down (safely decommission), and reliable topic move with zero message loss.
+  </Card>
+  <Card title="Cluster Health" icon="heart">
+    Follower restart, leader restart with Raft re-election, and broker failover with automatic topic reassignment.
+  </Card>
+  <Card title="Security and RBAC" icon="open-book">
+    TLS certificate setup, JWT token management, RBAC roles and bindings, and PermissionDenied enforcement.
+  </Card>
+  <Card title="Edge MQTT" icon="external">
+    MQTT devices publish to the edge gateway with schema validation, attribute extraction, and store-and-forward during outages.
+  </Card>
+</CardGrid>
+
+### Infrastructure Only
+
+<CardGrid>
+  <Card title="Bring Up Cluster" icon="laptop">
+    Get a running Danube instance (standalone or cluster) for ad-hoc use, no automated test, just a working Danube you can interact with.
+  </Card>
+</CardGrid>
+
+## Setup Methods
+
+The AI will ask which setup method to use. Pick whichever fits your environment:
+
+| Method | Best For |
+|--------|---------|
+| **Local Binary** | Quickest start, downloads pre-built binaries, no dependencies beyond `curl` |
+| **Local Source** | Developers working on the Danube codebase, builds from source with `cargo` |
+| **Docker Compose** | Container-based setups, supports special infrastructure (MinIO, Valkey) |
+| **Kubernetes** | Production-like testing, deploys via Helm chart |
