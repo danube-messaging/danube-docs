@@ -1,0 +1,151 @@
+---
+title: Danube Iceberg
+description: Continuously export streaming data from Danube to Apache Iceberg tables, making messages queryable by Spark, Trino, DuckDB, and any Iceberg-compatible engine.
+---
+
+import { Steps, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Danube Iceberg bridges the gap between real-time messaging and batch analytics. It runs alongside your Danube cluster as a lightweight sidecar and continuously converts streaming data into Apache Iceberg tables, the open table format supported by every major data platform.
+
+Once enabled, your Danube topics become queryable SQL tables. Data engineers can run Spark notebooks, analysts can query with Trino, and data scientists can explore with DuckDB, all without building custom ETL pipelines or touching the broker.
+
+---
+
+## Why Lakehouse Integration
+
+Streaming platforms and data lakes have traditionally been separate systems. Getting data from one to the other means building and maintaining fragile ETL pipelines that introduce latency, require monitoring, and break when schemas change.
+
+Danube Iceberg eliminates this gap by making the lakehouse a native extension of the messaging platform:
+
+<CardGrid>
+  <Card title="Zero ETL" icon="rocket">
+    No Kafka Connect, no Spark Streaming jobs, no Flink pipelines. Data flows from topics to Iceberg tables automatically.
+  </Card>
+  <Card title="Zero broker impact" icon="seti:lock">
+    Reads sealed segments directly from object storage. The broker never sees analytics workloads, message throughput is unaffected.
+  </Card>
+  <Card title="Schema-aware" icon="document">
+    Resolves schemas from the Danube Schema Registry to produce typed Parquet columns. Queries work with real column names like `temperature`, `device_id`, and `severity`, not opaque byte arrays.
+  </Card>
+  <Card title="Open format" icon="open-book">
+    Apache Iceberg is supported by Spark, Trino, DuckDB, Snowflake, Athena, BigQuery, Databricks, and dozens more. No vendor lock-in.
+  </Card>
+</CardGrid>
+
+---
+
+## What It Does
+
+Danube Iceberg watches for sealed WAL segments that brokers export to object storage (S3, GCS, Azure Blob). When new segments appear, it decodes the messages, converts them to Parquet files with full column-level statistics, and registers them with an Iceberg catalog.
+
+The result: every configured topic becomes a live Iceberg table that analytics engines can query with standard SQL.
+
+<Steps>
+1. **Discover new segments**
+
+   Polls the Danube cluster for newly sealed `.dnb1` segments in object storage. Only immutable, sealed segments are processed, the active segment being written by the broker is never touched.
+
+2. **Decode and resolve schema**
+
+   Reads each segment and decodes WAL frames back into messages. If the topic has a schema registered in the Danube Schema Registry (JSON Schema or Avro), the sidecar uses it to produce typed columns. Topics without a schema use a generic envelope format.
+
+3. **Write Parquet data files**
+
+   Converts messages to Parquet files using ZSTD compression. Each file includes per-column statistics (min/max bounds, null counts) that enable query engines to skip irrelevant files, making queries like `WHERE timestamp > '2025-01-01'` fast even on large datasets.
+
+4. **Commit to Iceberg catalog**
+
+   Registers the new data files with the Iceberg catalog, making them instantly visible to all connected query engines. Each commit is atomic, readers never see partial data.
+
+5. **Checkpoint progress**
+
+   Persists a checkpoint to object storage so the sidecar picks up exactly where it left off after restarts. This provides at-least-once delivery semantics with no data loss.
+</Steps>
+
+---
+
+## Key Features
+
+### Independent from the Broker
+
+Danube Iceberg runs as a separate process with its own resource allocation. It reads from object storage, not from broker memory, so analytics workloads never compete with message delivery. You can stop, restart, or upgrade the sidecar without affecting any producers or consumers.
+
+### Schema-Aware Conversion
+
+When a topic has a registered schema (JSON Schema or Avro), the sidecar produces Parquet files with real typed columns. A temperature reading becomes a `Float64` column named `temperature`, not a binary blob you need to deserialize at query time. This means aggregations, filters, and joins work natively in SQL.
+
+For topics without a schema, the sidecar falls back to an envelope format with `offset`, `publish_time`, `producer_name`, and `payload` columns, still queryable, just without typed fields.
+
+### Crash-Safe Checkpointing
+
+Progress is tracked per topic in object storage. If the sidecar crashes or restarts, it resumes from the last checkpoint. No coordinator, no external database, no risk of reprocessing the entire history.
+
+### Query Engine Statistics
+
+Every Parquet file includes per-column statistics (min/max bounds, null counts, value counts). Query engines use these to skip entire files that don't match a query predicate, a feature called **predicate pushdown** that makes analytical queries fast even on terabytes of data.
+
+---
+
+## Supported Catalogs
+
+Danube Iceberg works with the major Iceberg catalog implementations:
+
+| Catalog | Description | Typical Use Case |
+|---------|-------------|------------------|
+| **REST** | Universal REST catalog (Nessie, Polaris, Tabular, Unity) | Multi-engine environments, self-hosted or managed |
+| **AWS Glue** | AWS Glue Data Catalog | AWS-native deployments, zero infrastructure |
+| **S3 Tables** | AWS S3 Tables (managed Iceberg) | Fully managed Iceberg on S3 |
+| **SQL** | SQL-backed (SQLite, PostgreSQL) | Development, testing, self-hosted |
+| **None** | Parquet-only mode | Write Parquet files without catalog registration |
+
+:::tip
+For most deployments, a REST catalog (Nessie or Polaris) is the best starting point. It works with every query engine and can be self-hosted or used as a managed service.
+:::
+
+---
+
+## Deployment
+
+Danube Iceberg ships as part of the `danube` project. It is built from the same Dockerfile as the broker and runs as an independent binary:
+
+```bash title="Build and run"
+cargo build --release --package danube-iceberg
+danube-iceberg --config danube_iceberg.yaml
+```
+
+Or as a Docker container:
+
+```bash title="Docker"
+docker build --target iceberg -t danube-iceberg .
+docker run -v ./config.yaml:/etc/config.yaml:ro danube-iceberg --config /etc/config.yaml
+```
+
+The sidecar needs network access to:
+- **Object storage** (S3/GCS/Azure): to read segments and write Parquet files
+- **One Danube broker**: for segment discovery and schema resolution (gRPC)
+- **Iceberg catalog**: to commit table metadata
+
+---
+
+## Docker Compose Demo
+
+A complete end-to-end demo is available in the repository at [`docker/with-lakehouse/`](https://github.com/danube-messaging/danube/tree/main/docker/with-lakehouse). It runs the full pipeline locally using Docker Compose:
+
+**IoT Simulator** (9 devices over MQTT) → **Edge Broker** → **3-node Cluster** → **danube-iceberg** → **Spark SQL** (Jupyter Notebook)
+
+The demo includes MinIO as S3-compatible storage, an Iceberg REST catalog, and Apache Spark with a Jupyter Notebook pre-configured to query all three Iceberg tables. See the [README](https://github.com/danube-messaging/danube/blob/main/docker/with-lakehouse/README.md) for step-by-step instructions.
+
+---
+
+<CardGrid>
+  <LinkCard
+    title="Iceberg Configuration Reference"
+    description="Complete YAML reference for broker, storage, catalog, topics, and compaction settings."
+    href="/reference/iceberg-configuration/"
+  />
+  <LinkCard
+    title="Durability and Storage"
+    description="How Danube persists messages and exports sealed segments to object storage."
+    href="/durability/overview/"
+  />
+</CardGrid>

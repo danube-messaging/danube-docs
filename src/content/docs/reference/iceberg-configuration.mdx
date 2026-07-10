@@ -1,0 +1,321 @@
+---
+title: Iceberg Configuration
+description: Complete reference for danube_iceberg.yaml covering broker connection, object storage, Iceberg catalogs, topic mappings, compaction, and polling.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The Danube Iceberg sidecar is configured with a single YAML file. This page documents every configuration option in `danube_iceberg.yaml`.
+
+```bash title="Running with a config file"
+danube-iceberg --config danube_iceberg.yaml
+```
+
+:::tip
+Values shown below are the defaults from the shipped `config-example.yaml`. At minimum, you must configure `broker.address`, `storage`, and at least one entry in `topics`.
+:::
+
+---
+
+## Broker Connection
+
+```yaml title="danube_iceberg.yaml"
+broker:
+  address: "localhost:6650"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `broker.address` | String | *(required)* | gRPC address of any broker in the Danube cluster. Used for segment discovery (`StorageService`) and schema resolution (`SchemaService`). |
+
+---
+
+## Object Storage
+
+Configures the storage backend for reading sealed `.dnb1` segments and writing Parquet data files.
+
+```yaml title="danube_iceberg.yaml"
+storage:
+  backend: "s3"
+  root: "s3://my-bucket/danube"
+  output_prefix: "iceberg"
+  options:
+    endpoint: "http://minio:9000"
+    region: "us-east-1"
+    access_key: "minioadmin"
+    secret_key: "minioadmin"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `storage.backend` | String | *(required)* | Storage backend type. One of: `s3`, `gcs`, `azure`, `fs`. |
+| `storage.root` | String | *(required)* | Root path for reading `.dnb1` segments. Must match the cluster broker's durable storage path. |
+| `storage.output_prefix` | String | `"iceberg"` | Subdirectory for checkpoint files within the storage root. |
+| `storage.options` | Map | `{}` | Backend-specific options (see below). |
+
+### Storage Options by Backend
+
+<Tabs>
+  <TabItem label="S3 / MinIO">
+    | Key | Description |
+    |-----|-------------|
+    | `endpoint` | S3-compatible endpoint URL (required for MinIO, optional for AWS) |
+    | `region` | AWS region (e.g., `us-east-1`) |
+    | `access_key` | AWS access key ID |
+    | `secret_key` | AWS secret access key |
+  </TabItem>
+  <TabItem label="GCS">
+    | Key | Description |
+    |-----|-------------|
+    | `service_account_path` | Path to GCP service account JSON key file |
+  </TabItem>
+  <TabItem label="Azure">
+    | Key | Description |
+    |-----|-------------|
+    | `account_name` | Azure storage account name |
+    | `account_key` | Azure storage account key |
+  </TabItem>
+  <TabItem label="Local FS">
+    No additional options needed. The `root` path should be a local directory path.
+  </TabItem>
+</Tabs>
+
+---
+
+## Iceberg Catalog
+
+Configures the Iceberg catalog where table metadata is committed. Omit this section entirely (or set `type: "none"`) for Parquet-only mode without catalog integration.
+
+<Tabs>
+  <TabItem label="REST">
+    ```yaml title="danube_iceberg.yaml"
+    catalog:
+      type: "rest"
+      name: "danube_catalog"
+      properties:
+        uri: "http://nessie:19120/api/v1"
+        warehouse: "s3://my-bucket/warehouse"
+    ```
+
+    | Property | Description |
+    |----------|-------------|
+    | `uri` | REST catalog endpoint URL |
+    | `warehouse` | Default warehouse location for new tables |
+    | `credential` | Optional OAuth2 credential |
+    | `token` | Optional bearer token |
+
+    Compatible with: Nessie, Polaris, Tabular, Snowflake Open Catalog, Databricks Unity.
+  </TabItem>
+  <TabItem label="AWS Glue">
+    ```yaml title="danube_iceberg.yaml"
+    catalog:
+      type: "glue"
+      name: "glue_catalog"
+      properties:
+        warehouse: "s3://my-datalake/warehouse"
+    ```
+
+    | Property | Description |
+    |----------|-------------|
+    | `warehouse` | S3 path for table data |
+
+    Uses AWS credentials from the environment (IAM role, env vars, or `~/.aws/credentials`).
+  </TabItem>
+  <TabItem label="S3 Tables">
+    ```yaml title="danube_iceberg.yaml"
+    catalog:
+      type: "s3tables"
+      name: "s3tables_catalog"
+      properties:
+        table_bucket_arn: "arn:aws:s3tables:us-east-1:123456789012:bucket/my-table-bucket"
+    ```
+
+    | Property | Description |
+    |----------|-------------|
+    | `table_bucket_arn` | ARN of the S3 Tables bucket |
+    | `endpoint_url` | Optional custom endpoint |
+  </TabItem>
+  <TabItem label="SQL">
+    ```yaml title="danube_iceberg.yaml – SQLite"
+    catalog:
+      type: "sql"
+      name: "sql_catalog"
+      properties:
+        uri: "sqlite://iceberg_catalog.db"
+        warehouse: "/tmp/warehouse"
+    ```
+
+    ```yaml title="danube_iceberg.yaml – PostgreSQL"
+    catalog:
+      type: "sql"
+      name: "sql_catalog"
+      properties:
+        uri: "postgresql://user:pass@localhost:5432/iceberg"
+        warehouse: "s3://my-bucket/warehouse"
+    ```
+
+    | Property | Description |
+    |----------|-------------|
+    | `uri` | Database connection string (SQLite or PostgreSQL) |
+    | `warehouse` | Path or S3 location for table data |
+  </TabItem>
+</Tabs>
+
+### Catalog Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `catalog.type` | String | `"none"` | Catalog type: `rest`, `glue`, `s3tables`, `sql`, or `none`. |
+| `catalog.name` | String | `"danube_catalog"` | Catalog identifier used when loading. |
+| `catalog.properties` | Map | `{}` | Catalog-specific properties passed to the builder. |
+
+---
+
+## Compaction
+
+Global defaults for Parquet file generation. These can be overridden per topic.
+
+```yaml title="danube_iceberg.yaml"
+compaction:
+  target_parquet_size_mb: 200
+  max_flush_interval_seconds: 300
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `compaction.target_parquet_size_mb` | Integer | `200` | Flush when the in-memory buffer reaches this size in MB. |
+| `compaction.max_flush_interval_seconds` | Integer | `300` | Maximum seconds between flushes, even if the size threshold is not reached. |
+
+:::caution
+For demos and testing, use small values (e.g., `1` MB and `30` seconds) to see data quickly. For production, use `200` MB and `300` seconds to produce optimally-sized Parquet files.
+:::
+
+---
+
+## Topics
+
+Only explicitly configured topics are exported. Each entry maps one Danube topic to one Iceberg table.
+
+```yaml title="danube_iceberg.yaml"
+topics:
+  - namespace: "default"
+    topic: "sensor-data"
+    table_name: "sensor_data"
+  - namespace: "default"
+    topic: "events"
+    table_name: "events"
+    compaction:
+      target_parquet_size_mb: 100
+      max_flush_interval_seconds: 60
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `namespace` | String | Yes | Danube namespace. Combined with `topic` to form the fully qualified topic `/{namespace}/{topic}`. |
+| `topic` | String | Yes | Danube topic name. |
+| `table_name` | String | Yes | Iceberg table name. The table is created automatically if it does not exist. |
+| `compaction` | Object | No | Per-topic override for compaction thresholds. If omitted, global defaults apply. |
+
+---
+
+## Polling
+
+Controls how frequently the sidecar checks the cluster for new sealed segments.
+
+```yaml title="danube_iceberg.yaml"
+polling:
+  interval_seconds: 30
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `polling.interval_seconds` | Integer | `30` | Seconds between segment discovery polls. Lower values reduce latency; higher values reduce API calls. |
+
+---
+
+## Complete Example
+
+```yaml title="danube_iceberg.yaml"
+# Broker connection — any broker in the Danube cluster.
+broker:
+  address: "localhost:6650"
+
+# Object storage — where segments are read from and Parquet files are written to.
+storage:
+  backend: "s3"
+  root: "s3://my-bucket/danube"
+  output_prefix: "iceberg"
+  options:
+    endpoint: "http://minio:9000"
+    region: "us-east-1"
+    access_key: "minioadmin"
+    secret_key: "minioadmin"
+
+# Iceberg catalog — manages table metadata for analytics engines.
+catalog:
+  type: "rest"
+  name: "danube_catalog"
+  properties:
+    uri: "http://nessie:19120/api/v1"
+    warehouse: "s3://my-bucket/warehouse"
+
+# Global compaction defaults.
+compaction:
+  target_parquet_size_mb: 200
+  max_flush_interval_seconds: 300
+
+# Topics to export — each topic maps to one Iceberg table.
+topics:
+  - namespace: "default"
+    topic: "sensor-data"
+    table_name: "sensor_data"
+  - namespace: "default"
+    topic: "events"
+    table_name: "events"
+    compaction:
+      target_parquet_size_mb: 100
+      max_flush_interval_seconds: 60
+
+# Polling — how often to check for new sealed segments.
+polling:
+  interval_seconds: 30
+```
+
+---
+
+## Docker
+
+The `danube-iceberg` binary is available as a Docker image target in the project's multi-stage Dockerfile:
+
+```bash title="Build"
+docker build --target iceberg -t danube-iceberg .
+```
+
+```bash title="Run"
+docker run \
+  -v ./danube_iceberg.yaml:/etc/danube_iceberg.yaml:ro \
+  danube-iceberg \
+  --config /etc/danube_iceberg.yaml
+```
+
+```yaml title="docker-compose.yml"
+services:
+  danube-iceberg:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: iceberg
+    volumes:
+      - ./danube_iceberg.yaml:/etc/danube_iceberg.yaml:ro
+    environment:
+      - RUST_LOG=danube_iceberg=info
+    command: ["--config", "/etc/danube_iceberg.yaml"]
+    depends_on:
+      - broker1
+```
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `RUST_LOG` | Controls log verbosity. Recommended: `danube_iceberg=info` for production, `danube_iceberg=debug` for troubleshooting. |

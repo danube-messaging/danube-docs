@@ -99,6 +99,12 @@ export default defineConfig({
                     ],
                 },
                 {
+                    label: 'Lakehouse with Iceberg',
+                    items: [
+                        { label: 'Overview', slug: 'lakehouse/overview' },
+                    ],
+                },
+                {
                     label: 'Architecture',
                     items: [
                         { label: 'Overview', slug: 'architecture/overview' },
@@ -121,6 +127,7 @@ export default defineConfig({
                     items: [
                         { label: 'Broker Configuration', slug: 'reference/broker-configuration' },
                         { label: 'Edge Configuration', slug: 'reference/edge-configuration' },
+                        { label: 'Iceberg Configuration', slug: 'reference/iceberg-configuration' },
                     ],
                 },
                 {
