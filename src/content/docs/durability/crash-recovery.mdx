@@ -9,13 +9,16 @@ This page explains what happens when a Danube broker crashes and how the system 
 
 ---
 
-## Why Crashes Can Lose Messages
+## When Can Crashes Lose Messages?
 
-When a broker receives a message, it first writes to the local WAL (Write-Ahead Log) on disk. A background exporter then asynchronously uploads sealed WAL segments to Cloud Storage (S3, GCS, or Azure Blob). There is a window between the WAL write and the Cloud Storage export where messages exist only on the broker's local disk.
+When a broker receives a message, it first writes to the local WAL (Write-Ahead Log) on disk. A background exporter then asynchronously uploads sealed WAL segments to Cloud Storage (S3, GCS, or Azure Blob).
 
-If the broker crashes during this window, or if the disk fails, those messages are lost.
+The crash behavior depends on the underlying storage infrastructure:
 
-**This is the problem Valkey solves.** By double-writing every message to Valkey in real-time, the system has a second copy that survives broker failures.
+- **Persistent Storage (Standard PVCs or Bare-Metal):** If a broker process crashes, restarts, or is rescheduled on the same persistent volume, **no messages are lost**. The local WAL is intact, the broker replays the log tail upon startup, and normal operation resumes with zero data loss.
+- **Ephemeral Storage (Spot Instances, Diskless Pods):** If a broker runs on disposable compute where node termination permanently destroys the local disk, any messages written to the local WAL that were not yet sealed and uploaded to Cloud Storage would vanish with the node.
+
+**This is the specific problem Valkey solves.** By buffering in-flight messages in Valkey in real-time, the cluster maintains a transient off-node copy that survives complete node and disk destruction on ephemeral infrastructure.
 
 ---
 
@@ -72,14 +75,14 @@ For more details on topic moves, see [Reliable Topic Move](/architecture/reliabl
 
 ## Guarantees by Configuration
 
-Since Danube brokers are stateless and disposable, a broker crash typically means it is replaced and the local volume is lost. The table below assumes this scenario.
+The table below contrasts durability guarantees between persistent volume deployments and disposable ephemeral compute:
 
-| Configuration | Broker Lost | Valkey Crash | Guarantee |
-|--------------|------------|-------------|-----------|
-| WAL only | All unexported messages lost | N/A | Best-effort |
-| WAL + Cloud Storage | Messages not yet exported to Cloud Storage are lost | N/A | Eventual durability |
-| WAL + Valkey | Zero message loss (Valkey has a copy) | Messages in flight may be lost | RPO=0 for broker failures |
-| WAL + Valkey + Cloud Storage | Zero message loss | Cloud Storage still has all exported data | Full durability |
+| Configuration | Broker Restart (Persistent Disk / PVC) | Node Destroyed (Ephemeral Disk Vanished) | Valkey Down | Overall Guarantee |
+|---|---|---|---|---|
+| **WAL only** | **Zero message loss** (WAL survives on disk) | Unexported messages lost | N/A | Local durability |
+| **WAL + Cloud Storage** | **Zero message loss** | Unexported window lost; all sealed safe | N/A | **Recommended for PVCs** (Zero external deps) |
+| **WAL + Valkey** | **Zero message loss** | **Zero message loss** (Replayed from Valkey) | In-flight lost | RPO=0 on ephemeral nodes (no cloud) |
+| **WAL + Valkey + Cloud Storage** | **Zero message loss** | **Zero message loss** (Replayed from Valkey) | Cloud storage safe | **Full enterprise durability on spot compute** |
 
 :::note
 **RPO** = Recovery Point Objective. RPO=0 means no data loss on recovery.

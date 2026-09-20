@@ -17,7 +17,7 @@ Reliable topics use a **Write-Ahead Log (WAL)** on the broker's local disk as th
 
 On top of the WAL, Danube offers two optional layers that extend durability beyond the local broker:
 
-- **Valkey/Redis**: real-time write buffer for crash recovery. Messages are double-written to Valkey Redis Streams so that if a broker is lost (disk failure, node termination), a replacement broker can download buffered messages from Valkey and replay them into a fresh WAL. This achieves RPO ≈ 0 without requiring replicated local disks.
+- **Valkey/Redis (Optional)**: transient write buffer for ephemeral compute. When running on disposable or spot nodes without persistent disks, messages can be double-written to Valkey Redis Streams. If an ephemeral node vanishes before S3 export, a replacement broker replays buffered messages from Valkey into a fresh WAL, achieving RPO ≈ 0. For deployments with persistent volumes (PVCs or local NVMe), the local WAL guarantees durability across restarts directly without needing Valkey.
 
 - **Cloud Object Storage (S3/GCS/Azure Blob)**: long-term archival. A background exporter uploads sealed WAL segments as immutable objects for indefinite retention and full historical replay.
 
@@ -72,10 +72,15 @@ Each tier is independent. You can run any combination:
 
 | Configuration | Tiers | Use Case |
 |--------------|-------|----------|
-| WAL only | Hot | Development, testing, edge nodes |
-| WAL + Cloud Storage | Hot + Cold | Archival and cross-broker replay without HA buffer |
-| WAL + Valkey | Hot + Warm | Crash recovery without cloud archival |
-| WAL + Valkey + Cloud Storage | Hot + Warm + Cold | Full production deployment |
+| WAL only | Hot | Development, testing, edge nodes with persistent disk |
+| WAL + Cloud Storage | Hot + Cold | Production on Persistent Volumes (PVCs / NVMe) + Cloud archival (zero external deps) |
+| WAL + Valkey | Hot + Warm | Crash recovery buffer on ephemeral nodes without cloud archival |
+| WAL + Valkey + Cloud Storage | Hot + Warm + Cold | Production on Ephemeral / Spot compute with Cloud archival |
+
+:::tip[Do I need Valkey?]
+- **Using Persistent Volumes (PVCs or Local NVMe)?** No. The local WAL persists across process crashes and pod restarts on the same volume. You can run **WAL + Cloud Storage** directly with zero external dependencies.
+- **Using Ephemeral Compute (Spot VMs / emptyDir)?** Yes. Enabling the Valkey write buffer provides RPO ≈ 0 safety against total node loss before segments are exported to Cloud Storage.
+:::
 
 ---
 
