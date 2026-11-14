@@ -77,11 +77,20 @@ pip install danube-client
 | Shared Subscription | ✅ | ✅ | ✅ | ✅ |
 | Failover Subscription | ✅ | ✅ | ✅ | ✅ |
 | Key-Shared Subscription | ✅ | ✅ | ✅ | ✅ |
+| Negative Acknowledgment (`nack`) | ✅ | ✅ | ✅ | ✅ |
+| Request / Reply (`request_reply`) | ✅ | — | — | — |
+| Lease Extension (`extend_lease`) | ✅ | — | — | — |
+| Progress Checkpoints (`report_progress`) | ✅ | — | — | — |
+| Task-Tree Cancellation (`cancel_task_tree`) | ✅ | — | — | — |
 | JSON Schema | ✅ | ✅ | ✅ | ✅ |
 | Avro | ✅ | ✅ | ✅ | ✅ |
 | Protobuf | ✅ | ✅ | ✅ | ✅ |
 | TLS / mTLS | ✅ | ✅ | ✅ | ✅ |
 | JWT Authentication | ✅ | ✅ | ✅ | ✅ |
+
+:::note
+Agent runtime primitives (`request_reply`, `extend_lease`, `report_progress`, `cancel_task_tree`) are currently implemented in the Rust client (`danube-client`). See [Danube for AI Agents](/ai-agents/overview/) for examples and attribute conventions.
+:::
 
 ---
 
@@ -189,7 +198,8 @@ consumer = client.new_consumer() \
 
 ## Next Steps
 
-- **[Setup & Connection](/client-libraries/setup/)**: TLS, JWT authentication, token rotation
-- **[Producer Guide](/client-libraries/producer/)**: Sending messages, partitions, reliable dispatch
-- **[Consumer Guide](/client-libraries/consumer/)**: Receiving messages, ack/nack, subscription types
-- **[Schema Registry](/client-libraries/schema-registry/)**: Type-safe messaging with validation
+- **[Setup & Connection](/client-libraries/setup/)**: TLS, mTLS, `--auth-mode auto-tls`, JWT authentication, token rotation
+- **[Producer Guide](/client-libraries/producer/)**: Sending messages, partition auto-discovery, `ProducerOptions`, `request_reply`
+- **[Consumer Guide](/client-libraries/consumer/)**: Receiving messages, `ack`/`nack`, lease/checkpoint primitives, subscription types
+- **[Danube for AI Agents](/ai-agents/overview/)**: End-to-end agent runtime patterns (`request_reply`, `extend_lease`, `report_progress`, `cancel_task_tree`)
+- **[Schema Registry](/client-libraries/schema-registry/)**: Type-safe messaging with validation and schema inference

@@ -1,412 +1,302 @@
 ---
 title: "CLI: Cluster & Brokers"
-description: Manage the Raft consensus layer, broker nodes, load balancing, and maintenance operations.
+description: Manage Raft cluster consensus, live storage/WAL/load-manager config, broker lifecycle, and declarative state with danube ctl.
 ---
 
-Every command supports `--output json` for scripting and `--help` for usage details. Set the broker endpoint via environment variable or flag:
+import { Aside } from '@astrojs/starlight/components';
+
+Use `danube ctl cluster`, `danube ctl brokers`, and `danube ctl apply` to operate brokers, manage Raft consensus membership, configure cluster-wide storage and load balancing dynamically, and reconcile declarative YAML/JSON manifests.
 
 ```bash
-export DANUBE_BROKER_ENDPOINT=http://localhost:50051
-# or per command:
-danube-admin --broker-endpoint http://broker1:50051 brokers list
+# Default multiplexed endpoint is http://127.0.0.1:6650
+export DANUBE_ADMIN_ENDPOINT=http://127.0.0.1:6650
+
+# Or override per command
+danube ctl --endpoint http://broker1:6650 brokers list
 ```
+
+See [Administration Overview](/admin/overview/) for TLS and JWT environment variables (`DANUBE_ADMIN_TLS`, `DANUBE_ADMIN_CA`, `DANUBE_ADMIN_CERT`, `DANUBE_ADMIN_KEY`, `DANUBE_ADMIN_DOMAIN`, `DANUBE_ADMIN_TOKEN`).
 
 ---
 
-## Cluster (Raft)
+## Brokers (`danube ctl brokers`)
 
-The `cluster` commands manage the Raft consensus layer that underpins Danube's metadata replication. All metadata changes (topic assignments, namespace creation, schema registration) are replicated through Raft.
+### `brokers list`
 
-### Status
-
-Show current Raft cluster state including leader, term, voters, and learners.
-
-```bash title="Show Raft cluster state"
-danube-admin cluster status
-```
-
-```text title="Example output"
-Raft Cluster Status:
-  Self Node ID:  9823746501928374
-  Raft Address:  127.0.0.1:7650
-  Leader:        9823746501928374
-  Term:          3
-  Last Applied:  142
-  Voters:        [9823746501928374, 1048209374659182, 7391028374651029]
-  Learners:      [5829103746519283]
-```
-
-| Field | Description |
-|-------|-------------|
-| Self Node ID | The node ID of the broker you connected to |
-| Raft Address | The Raft transport address (`host:raft_port`) |
-| Leader | Node ID of the current leader (`none` if no leader elected) |
-| Term | Current Raft term — monotonically increasing election counter |
-| Last Applied | Index of the last log entry applied to the state machine |
-| Voters | Node IDs that participate in consensus (quorum members) |
-| Learners | Node IDs replicating the log but not yet voting |
-
----
-
-### Add Node
-
-Add a new broker as a Raft learner (non-voting). The CLI auto-discovers the new node's `node_id` and `raft_addr` by connecting to its admin endpoint first, then tells the leader to add it.
-
-```bash title="Add a learner"
-danube-admin cluster add-node --node-addr http://new-broker:50054
-```
-
-| Option | Required | Description |
-|--------|----------|-------------|
-| `--node-addr` | Yes | Admin gRPC endpoint of the new broker |
-
-```text title="Example output"
-Discovering node at http://new-broker:50054...
-  Discovered: node_id=5829103746519283, raft_addr=new-broker:7653
-Adding node 5829103746519283 as learner via http://127.0.0.1:50051...
-Success: Node 5829103746519283 added as learner
-```
-
-The new broker must already be running with its Raft port accessible. Learners replicate the Raft log but do not participate in votes. After adding, use `promote-node` to grant voting rights.
-
----
-
-### Promote Node
-
-Promote a Raft learner to a full voting member (voter).
-
-```bash title="Promote learner to voter"
-danube-admin cluster promote-node --node-id <NODE_ID>
-```
-
-```text title="Example output"
-Promoting node 5829103746519283 to voter...
-Success: Node 5829103746519283 promoted to voter
-```
-
-After promotion the node participates in consensus votes and counts toward quorum. For production clusters, activate the broker after promoting so it can receive topic assignments:
+List all registered brokers in the cluster, their IDs, addresses, and statuses.
 
 ```bash
-danube-admin brokers activate <BROKER_ID>
+danube ctl brokers list
+danube ctl brokers list --output json
 ```
 
----
+### `brokers leader-broker`
 
-### Remove Node
-
-Remove a node from the Raft cluster entirely.
-
-```bash title="Remove from cluster"
-danube-admin cluster remove-node --node-id <NODE_ID>
-```
-
-:::caution
-Unload topics from the broker **before** removing it. Removing a voter reduces quorum size, ensure you maintain a majority (e.g., don't drop from 3 voters to 1).
-:::
-
----
-
-### Scale-Up Workflow
-
-```bash title="Add a broker to the cluster"
-# 1. Check current cluster state
-danube-admin cluster status
-
-# 2. Add the new broker as a learner
-danube-admin cluster add-node --node-addr http://new-broker:50054
-
-# 3. Verify it appears as a learner
-danube-admin cluster status
-
-# 4. Promote to voter
-danube-admin cluster promote-node --node-id <NODE_ID>
-
-# 5. Activate the broker so it receives topics
-danube-admin brokers activate <BROKER_ID>
-
-# 6. Verify cluster balance
-danube-admin brokers balance
-```
-
-### Scale-Down Workflow
-
-```bash title="Remove a broker from the cluster"
-# 1. Drain all topics from the broker
-danube-admin brokers unload <BROKER_ID>
-
-# 2. Remove from the Raft cluster
-danube-admin cluster remove-node --node-id <NODE_ID>
-
-# 3. Verify cluster state
-danube-admin cluster status
-
-# 4. Stop the broker process (external)
-```
-
----
-
-## Brokers
-
-Manage broker nodes, load distribution, and maintenance operations.
-
-### List Brokers
-
-Display all brokers in the cluster with their details.
-
-```bash title="List all brokers"
-danube-admin brokers list
-```
-
-```text title="Example output"
-┌──────────────┬─────────────────────┬──────────┬─────────────────────┬─────────────────────┬────────┐
-│ Broker ID    │ Address             │ Role     │ Admin Address       │ Metrics Address     │ Status │
-├──────────────┼─────────────────────┼──────────┼─────────────────────┼─────────────────────┼────────┤
-│ broker-001   │ 127.0.0.1:6650      │ leader   │ 127.0.0.1:50051     │ 127.0.0.1:9090      │ active │
-│ broker-002   │ 127.0.0.1:6651      │ follower │ 127.0.0.1:50052     │ 127.0.0.1:9091      │ active │
-└──────────────┴─────────────────────┴──────────┴─────────────────────┴─────────────────────┴────────┘
-```
-
-```json title="JSON output (--output json)"
-[
-  {
-    "broker_id": "broker-001",
-    "broker_addr": "127.0.0.1:6650",
-    "broker_role": "leader",
-    "admin_addr": "127.0.0.1:50051",
-    "metrics_addr": "127.0.0.1:9090",
-    "broker_status": "active"
-  }
-]
-```
-
----
-
-### Get Leader
-
-Identify which broker is currently the cluster leader. The leader coordinates cluster operations and is the primary target for admin commands.
-
-```bash title="Identify the cluster leader"
-danube-admin brokers leader
-```
-
----
-
-### List Namespaces
-
-```bash title="Show all namespaces managed by the cluster"
-danube-admin brokers namespaces
-```
-
----
-
-### Cluster Balance
-
-Show cluster balance metrics and broker load distribution.
-
-```bash title="Load distribution report"
-danube-admin brokers balance
-```
-
-```text title="Example output"
-╔══════════════════════════════════════════════════════════╗
-║           Cluster Balance Report                       ║
-╚══════════════════════════════════════════════════════════╝
-
-Status:                    ✅ Well Balanced
-Coefficient of Variation:  15.23%
-Assignment Strategy:       Balanced
-
-Load Statistics:
-  Mean Load:       4.50
-  Max Load:        5.00
-  Min Load:        4.00
-  Std Deviation:   0.50
-  Broker Count:    2
-
-Broker Details:
-Broker ID       Load       Topics     Status
---------------------------------------------------
-broker-001      5.00       5          OK
-broker-002      4.00       4          OK
-```
-
-**Coefficient of Variation (CV)** measures load distribution uniformity. Lower is better:
-
-| CV | Status | Action |
-|----|--------|--------|
-| < 20% | Well Balanced | None needed |
-| 20–30% | Balanced | Acceptable |
-| 30–40% | Imbalanced | Consider rebalancing |
-| > 40% | Severely Imbalanced | Rebalance recommended |
-
-**Load** is the topic count weighted by topic activity and resource usage.
-
----
-
-### Rebalance
-
-Manually trigger cluster rebalancing to distribute topics evenly across brokers.
-
-```bash title="Redistribute topics"
-# Preview moves without executing (always do this first)
-danube-admin brokers rebalance --dry-run
-
-# Execute rebalancing
-danube-admin brokers rebalance
-
-# Limit scope for gradual rebalancing
-danube-admin brokers rebalance --max-moves 10
-```
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--dry-run` | Preview proposed moves without executing | `false` |
-| `--max-moves` | Maximum number of topic moves | All necessary |
-
-```text title="Dry-run output"
-🔍 Dry-Run Mode: Preview only, no changes will be applied
-
-Proposed Moves: 3
-
-Topic                      From            To
---------------------------------------------------
-/default/events            broker-001      broker-002
-/default/logs              broker-001      broker-002
-/default/metrics           broker-001      broker-003
-
-Load Before Rebalancing:
-  broker-001: 8 topics (Overloaded)
-  broker-002: 2 topics (Underloaded)
-  broker-003: 2 topics (Underloaded)
-
-Expected Load After Rebalancing:
-  broker-001: 5 topics (OK)
-  broker-002: 4 topics (OK)
-  broker-003: 3 topics (OK)
-
-💡 Run without --dry-run to execute these moves
-```
-
-```text title="Execution output"
-✅ Rebalancing Complete!
-
-Moves Executed: 3
-Topic Movements:
-  ✓ /default/events: broker-001 → broker-002
-  ✓ /default/logs: broker-001 → broker-002
-  ✓ /default/metrics: broker-001 → broker-003
-
-💡 Run 'danube-admin brokers balance' to verify cluster state
-```
-
-:::note
-Topics are moved gracefully with no message loss. Expect a brief disruption (a few seconds) during topic reassignment.
-:::
-
-**Recommended workflow:**
+Show the current cluster controller / leader broker ID and address.
 
 ```bash
-danube-admin brokers balance            # 1. Check current balance
-danube-admin brokers rebalance --dry-run # 2. Preview moves
-danube-admin brokers rebalance           # 3. Execute
-danube-admin brokers balance            # 4. Verify results
+danube ctl brokers leader-broker
+```
+
+### `brokers namespaces`
+
+List namespaces currently tracked by the cluster.
+
+```bash
+danube ctl brokers namespaces
+danube ctl brokers namespaces --output json
+```
+
+### `brokers unload`
+
+Drain topics and partitions off a broker for maintenance, upgrades, or scale-down.
+
+```bash
+danube ctl brokers unload \
+  --broker-id broker-2 \
+  --max-parallel 1 \
+  --timeout-seconds 60
+```
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--broker-id <ID>` | required | Target broker ID to drain |
+| `--max-parallel <N>` | `1` | Maximum concurrent topic unloads |
+| `--namespaces-include <NS>` | — | Only unload topics in these namespaces (repeatable) |
+| `--namespaces-exclude <NS>` | — | Skip unloading topics in these namespaces (repeatable) |
+| `--dry-run` | `false` | Preview which topics would be unloaded without moving them |
+| `--timeout-seconds <SEC>` | `60` | Maximum wait time for unload completion |
+
+```bash title="Filter namespaces and dry-run"
+# Preview draining only /prod, excluding /internal
+danube ctl brokers unload \
+  --broker-id broker-2 \
+  --namespaces-include prod \
+  --namespaces-exclude internal \
+  --dry-run
+```
+
+### `brokers activate`
+
+Re-activate a drained or inactive broker so the Load Manager can assign topics to it again.
+
+```bash
+danube ctl brokers activate --broker-id broker-2
+danube ctl brokers activate --broker-id broker-2 --reason maintenance_complete
+```
+
+### `brokers balance`
+
+Inspect the current cluster load-balance score and per-broker topic/partition load distribution.
+
+```bash
+danube ctl brokers balance
+danube ctl brokers balance --output json
+```
+
+### `brokers rebalance`
+
+Trigger an immediate cluster rebalance via the Load Manager.
+
+```bash
+# Preview proposed topic moves
+danube ctl brokers rebalance --dry-run
+
+# Execute up to 5 moves
+danube ctl brokers rebalance --max-moves 5
 ```
 
 ---
 
-### Unload Broker
+## Cluster Consensus & Live Configuration (`danube ctl cluster`)
 
-Gracefully drain all topics from a broker for maintenance or decommissioning.
+Raft consensus and cluster-wide storage/WAL/load-manager settings are persisted in Raft metadata — no static broker YAML edits or cluster-wide restarts are needed for runtime configuration changes. See [Cluster & Topic Configuration](/getting-started/configuration-workflow/) for workflow guidance.
 
-```bash title="Unload topics from a broker"
-danube-admin brokers unload <BROKER_ID>
+### Raft Membership
+
+```bash
+# Inspect Raft leader, term, applied index, voters, and learners
+danube ctl cluster status
+
+# Add a new broker node to the Raft cluster as a learner
+danube ctl cluster add-node --node-addr 10.0.1.14:7650
+
+# Promote a learner node to a voting member
+danube ctl cluster promote-node --node-id 4
+
+# Remove a node from the Raft cluster
+danube ctl cluster remove-node --node-id 4
 ```
 
-```text title="Example output"
-Unload Started: true
-Total Topics: 45
-Succeeded: 45
-Failed: 0
-Pending: 0
+<Aside type="caution">
+Do not remove a voting member without confirming the remaining voters still maintain a strict quorum majority (`N/2 + 1`).
+</Aside>
+
+### `cluster storage`
+
+View or switch the cluster-wide durable persistence storage mode (`local`, `shared-fs`, or `object-store`).
+
+```bash
+# Show active storage mode and configuration
+danube ctl cluster storage status
+
+# Switch to local node storage only
+danube ctl cluster storage local --force
+
+# Configure shared POSIX filesystem tiered storage
+danube ctl cluster storage shared-fs --root /mnt/danube-shared --force
+
+# Configure S3 / object-store tiered storage with backend key-value options
+danube ctl cluster storage object-store \
+  --backend s3 \
+  --root s3://my-danube-bucket/segments \
+  --option region=us-east-1 \
+  --option endpoint=http://minio:9000 \
+  --force
 ```
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--dry-run` | Preview topics to be unloaded | `false` |
-| `--max-parallel` | Number of topics to unload concurrently | `1` |
-| `--namespace-include` | Only unload topics from these namespaces (repeatable) | All |
-| `--namespace-exclude` | Skip topics from these namespaces (repeatable) | None |
-| `--timeout` | Timeout per topic (seconds) | `30` |
+### `cluster write-buffer`
 
-```bash title="Advanced usage"
-# Preview what would be unloaded
-danube-admin brokers unload broker-001 --dry-run
+Enable or disable the distributed Raft/Etcd-backed write buffer used for sub-millisecond multi-node replication in `ha` or `dev` profiles.
 
-# Parallel unload with namespace filter
-danube-admin brokers unload broker-001 \
-  --max-parallel 5 \
-  --namespace-include default \
-  --namespace-include analytics \
-  --timeout 30
+```bash
+# Enable HA write buffer across quorum endpoints
+danube ctl cluster write-buffer enable \
+  --endpoints http://10.0.1.11:2379,http://10.0.1.12:2379,http://10.0.1.13:2379 \
+  --profile ha \
+  --wait-replicas 2 \
+  --wait-timeout-ms 250 \
+  --on-wait-timeout fail \
+  --max-cached-segments 64
+
+# Disable the write buffer
+danube ctl cluster write-buffer disable
+```
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--endpoints <URL,...>` | required | Comma-separated write-buffer endpoints |
+| `--profile <ha\|dev>` | — | Preset durability profile |
+| `--wait-replicas <N>` | — | Number of replicas required before acknowledging |
+| `--wait-timeout-ms <MS>` | — | Replication acknowledgment timeout in milliseconds |
+| `--on-wait-timeout <fail\|ack>` | — | Behavior when `--wait-timeout-ms` expires |
+| `--max-cached-segments <N>` | — | Maximum cached segments in buffer |
+
+### `cluster wal`
+
+Tune cluster-wide Write-Ahead Log (WAL) rotation, flush batching, cache capacity, and retention thresholds.
+
+```bash
+danube ctl cluster wal \
+  --retention-time-minutes 1440 \
+  --retention-size-mb 10240 \
+  --check-interval-minutes 5 \
+  --rotate-max-bytes 134217728 \
+  --rotate-max-hours 24 \
+  --cache-capacity 1024 \
+  --flush-interval-ms 100 \
+  --flush-max-batch-bytes 1048576
+
+# Clear WAL retention limits
+danube ctl cluster wal --clear-retention
+```
+
+### `cluster load-manager`
+
+Configure automated topic placement and rebalancing behavior across the cluster.
+
+```bash
+danube ctl cluster load-manager \
+  --assignment-strategy weighted_load \
+  --load-report-interval-seconds 10 \
+  --rebalance true \
+  --profile balanced \
+  --check-interval-seconds 30 \
+  --max-moves-per-hour 10 \
+  --cooldown-seconds 300 \
+  --min-brokers 2 \
+  --min-topic-age-seconds 60 \
+  --blacklist-topics /default/pinned-topic \
+  --replace-blacklist
+```
+
+| Flag | Values / Type | Description |
+| :--- | :--- | :--- |
+| `--assignment-strategy` | `fair`, `balanced`, `weighted_load` | Strategy used for new topic placement |
+| `--load-report-interval-seconds` | integer | Broker load report frequency |
+| `--rebalance` | `true`, `false` | Enable or pause automatic rebalancing |
+| `--profile` | `conservative`, `balanced`, `aggressive` | Rebalancing aggressiveness preset |
+| `--check-interval-seconds` | integer | Interval between rebalance evaluations |
+| `--max-moves-per-hour` | integer | Rate limit on automated topic moves |
+| `--cooldown-seconds` | integer | Post-move cooldown period |
+| `--min-brokers` | integer | Minimum brokers required before auto-rebalancing |
+| `--min-topic-age-seconds` | integer | Minimum age before a topic can be moved |
+| `--blacklist-topics` | topic list | Topics excluded from automated rebalancing |
+| `--replace-blacklist` | flag | Replace existing blacklist instead of appending |
+
+### `cluster export-config`
+
+Export the active Raft-persisted cluster configuration (or a specific broker's effective view) to `yaml` or `json`.
+
+```bash
+# Print YAML cluster config to stdout
+danube ctl cluster export-config --format yaml
+
+# Export a specific broker's view to JSON
+danube ctl cluster export-config \
+  --broker-id broker-1 \
+  --format json \
+  --output ./cluster-backup.json
 ```
 
 ---
 
-### Activate Broker
+## Declarative Desired State (`danube ctl apply`)
 
-Mark a broker as active, allowing it to receive traffic and topic assignments.
+Apply a declarative YAML or JSON manifest describing namespaces, topics, storage backends, write buffer, and load-manager settings.
 
-```bash title="Re-enable a broker"
-danube-admin brokers activate <BROKER_ID> --reason "Maintenance completed"
+```bash
+# Preview planned creates, updates, and deletions without modifying the cluster
+danube ctl apply -f cluster-state.yaml --dry-run
+
+# Apply additions/updates (additive by default)
+danube ctl apply -f cluster-state.yaml
+
+# Also delete namespaces/topics missing from the manifest
+danube ctl apply -f cluster-state.yaml --prune
+
+# Force destructive storage changes when required
+danube ctl apply -f cluster-state.yaml --force
+
+# Read manifest from stdin
+danube ctl apply -f - < cluster-state.yaml
 ```
 
----
+### Example Manifest (`cluster-state.yaml`)
 
-## Common Workflows
+```yaml
+namespaces:
+  - payments
+  - agents
 
-### Health Check
+topics:
+  - name: /payments/transactions
+    intent: audit_log
+    partitions: 4
+    schema_subject: payment-txn
 
-```bash title="Quick cluster health overview"
-danube-admin cluster status      # Raft consensus state
-danube-admin brokers list        # All brokers and their status
-danube-admin brokers leader      # Current leader
-danube-admin brokers balance     # Load distribution
+  - name: /agents/tasks
+    intent: task_queue
+    partitions: 8
+
+object_store:
+  backend: s3
+  root: s3://danube-prod/segments
+  options:
+    region: us-east-1
+  force: false
 ```
 
-### Broker Maintenance
-
-```bash title="Rolling maintenance procedure"
-# 1. Preview what will be drained
-danube-admin brokers unload broker-001 --dry-run
-
-# 2. Drain topics from the broker
-danube-admin brokers unload broker-001
-
-# 3. Perform maintenance (upgrade, config change, etc.)
-
-# 4. Reactivate the broker
-danube-admin brokers activate broker-001 --reason "Maintenance completed"
-
-# 5. Rebalance if needed
-danube-admin brokers balance
-danube-admin brokers rebalance --dry-run
-```
-
-### Cluster Expansion
-
-```bash title="Add a new broker to a running cluster"
-# 1. Start the new broker process (external)
-
-# 2. Add to Raft as learner
-danube-admin cluster add-node --node-addr http://new-broker:50054
-
-# 3. Promote to voter
-danube-admin cluster promote-node --node-id <NODE_ID>
-
-# 4. Activate for traffic
-danube-admin brokers activate <BROKER_ID> --reason "New broker added"
-
-# 5. Rebalance topics across all brokers
-danube-admin brokers rebalance
-danube-admin brokers balance
-```
+<Aside type="tip">
+Always run `danube ctl apply -f cluster-state.yaml --dry-run` before using `--prune`, since `--prune` deletes resources present in the cluster that are omitted from the manifest.
+</Aside>

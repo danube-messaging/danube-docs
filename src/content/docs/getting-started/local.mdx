@@ -1,43 +1,42 @@
 ---
 title: Run Locally
-description: Download and run a Danube broker on your local machine.
+description: Download and run the single danube binary on your local machine.
 ---
 
 import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
-Run a Danube broker directly on your machine. No Docker, no Kubernetes, just a binary.
+Run a Danube broker directly on your machine. No Docker, no Kubernetes, no YAML configuration files—just the single `danube` binary.
 
 ## Download
 
-Download the latest `danube-broker` and `danube-cli` binaries from the [releases page](https://github.com/danube-messaging/danube/releases).
+Download the latest `danube` binary from the [releases page](https://github.com/danube-messaging/danube/releases) (it bundles the broker, CLI, admin, and MCP server into one executable).
 
 ## Single-Node Quick Start
 
-The fastest way to get a broker running locally, no config file needed:
+Start a broker locally with zero config files:
 
 <Steps>
 1. **Start the broker**
 
    ```bash title="Terminal 1"
-   danube-broker --mode standalone --data-dir ./danube-data
+   danube up --mode standalone --data-dir ./danube-data
    ```
 
-   This auto-generates sensible defaults:
+   Defaults configured automatically:
 
    | Setting | Value |
    |---------|-------|
-   | Broker address | `127.0.0.1:6650` |
-   | Admin address | `127.0.0.1:50051` |
+   | Broker / Admin / Schema address | `127.0.0.1:6650` (single-port multiplexed) |
    | Raft address | `127.0.0.1:7650` |
-   | Raft data | `./danube-data/raft` |
-   | WAL storage | `./danube-data/wal` |
-   | Authentication | None |
+   | Raft & segment data | `./danube-data` |
+   | WAL directory | Inside `--data-dir` (or custom `--wal-dir`) |
+   | Authentication | `none` |
    | Storage mode | Local |
 
 2. **Produce messages**
 
    ```bash title="Terminal 2"
-   danube-cli produce \
+   danube ctl produce \
      -s http://127.0.0.1:6650 \
      -t /default/demo_topic \
      -c 10 \
@@ -47,50 +46,50 @@ The fastest way to get a broker running locally, no config file needed:
 3. **Consume messages**
 
    ```bash title="Terminal 3"
-   danube-cli consume \
+   danube ctl consume \
      -s http://127.0.0.1:6650 \
      -t /default/demo_topic \
-     -m my_subscription
+     --subscription my_subscription
    ```
 </Steps>
 
-Data persists across restarts. To start fresh, remove the data directory and re-run.
+Data persists across restarts in `./danube-data`. To start fresh, remove the data directory and re-run.
 
-## Multi-Broker Cluster (local)
+## Multi-Broker Cluster (Local)
 
-To run multiple brokers on the same machine, you need a config file. Download the sample config:
-
-```bash
-curl -O https://raw.githubusercontent.com/danube-messaging/danube/main/config/danube_broker.yml
-```
-
-Give each broker a unique port set and pass `--seed-nodes` so they discover each other:
+You can run a multi-broker Raft cluster directly on localhost with zero YAML files—just give each broker unique ports and `--data-dir`, and list `--seed-nodes`:
 
 ```bash title="Broker 1"
-danube-broker --config-file danube_broker.yml \
-  --broker-addr 0.0.0.0:6650 --admin-addr 0.0.0.0:50051 \
-  --raft-addr 0.0.0.0:7650 --data-dir ./data1/raft \
-  --seed-nodes "0.0.0.0:7650,0.0.0.0:7651" &
+danube up --mode cluster \
+  --broker-addr 127.0.0.1:6650 \
+  --raft-addr 127.0.0.1:7650 \
+  --data-dir ./data1 \
+  --seed-nodes "127.0.0.1:7650,127.0.0.1:7651" &
 ```
 
 ```bash title="Broker 2"
-danube-broker --config-file danube_broker.yml \
-  --broker-addr 0.0.0.0:6651 --admin-addr 0.0.0.0:50052 \
-  --raft-addr 0.0.0.0:7651 --data-dir ./data2/raft \
-  --seed-nodes "0.0.0.0:7650,0.0.0.0:7651" &
+danube up --mode cluster \
+  --broker-addr 127.0.0.1:6651 \
+  --raft-addr 127.0.0.1:7651 \
+  --data-dir ./data2 \
+  --seed-nodes "127.0.0.1:7650,127.0.0.1:7651" &
 ```
 
-The broker with the lowest Raft node ID initializes the cluster; the other joins automatically.
+:::note[Optional Separate Admin Port]
+Admin gRPC multiplexes onto `--broker-addr` (`6650` / `6651`) by default. Pass `--admin-addr 0.0.0.0:50051` (with `--endpoint http://127.0.0.1:50051` on `danube ctl`) whenever you want Admin gRPC isolated on a separate port.
+:::
+
+Once running, manage storage, WAL retention, load balancing, and topics dynamically via `danube ctl`—see [Configuration Workflow](/getting-started/configuration-workflow/).
 
 ## Cleanup
 
 ```bash
-# Stop the broker
-pkill danube-broker
+# Stop the broker(s)
+pkill -x danube
 
 # Remove data (for a fresh start)
-rm -rf ./danube-data
+rm -rf ./danube-data ./data1 ./data2
 
 # Verify
-ps aux | grep danube-broker
+ps aux | grep danube
 ```

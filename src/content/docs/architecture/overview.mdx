@@ -21,11 +21,11 @@ A running Danube cluster consists of brokers, an embedded Raft consensus layer, 
 
 Brokers are the central component. Each broker:
 
-- Accepts client connections (producers and consumers) over gRPC
+- Accepts client connections (producers and consumers) over gRPC on port `6650`
+- Multiplexes both client pub/sub and admin gRPC APIs (`danube ctl`) onto that single `6650` port by default (`--admin-addr` optional if you want a separate listener)
 - Routes messages from producers to matching subscriptions
 - Manages topic ownership and lifecycle
-- Participates in Raft consensus as a voter or learner
-- Exposes an admin gRPC endpoint for cluster management
+- Participates in Raft consensus as a voter or learner (port `7650`)
 
 Every broker can serve any role (leader or follower). The leader coordinates metadata writes, but all brokers serve reads from their local state machine replica.
 
@@ -35,9 +35,11 @@ Danube embeds a Raft consensus group across all brokers using [openraft](https:/
 
 - Broker registration and health state
 - Topic ownership assignments (which broker owns which topic)
+- Live cluster configuration (`/cluster/config/*` for storage, write buffer, WAL, and load manager)
 - Namespace configuration and policies
 - Schema Registry data (subjects, versions, compatibility settings)
 - Load-balancing state and topic metadata
+- Cluster audit log entries (`/cluster/audit/*`)
 
 **Key design decisions:**
 
@@ -61,7 +63,7 @@ The storage layer handles message durability for reliable dispatch. It is not us
 |---------|-----|-------------|------------------|----------|
 | `local` | Local filesystem | Optional (Valkey) | Local filesystem | Single-node, development |
 | `shared_fs` | Local staging | Optional (Valkey) | Shared filesystem (NFS, EFS) | Multi-node with shared storage |
-| `object_store` | Local staging | Optional (Valkey) | Remote via OpenDAL (S3, GCS, Azure Blob) | Cloud-native deployments |
+| `object_store` | Local staging | Optional (Valkey) | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native deployments |
 
 **Tiered reads:** Consumers read from the local WAL when data is recent. For older data, the broker reads from Valkey (warm cache) and/or durable segments (cold storage) and chains them seamlessly into the WAL tail.
 
@@ -118,11 +120,10 @@ For operational commands, see [CLI: Cluster & Brokers](/admin/cli-cluster/).
   - raft/
     - log/ (Raft log entries, redb)
     - snapshot/ (state machine snapshots)
-  - wal/
-    - segments/ (write-ahead log segments)
-  - storage/
-    - segments/ (sealed durable segments)
+  - wal/ (per-topic active `wal.log` and rotated `wal.<seq>.log` files; overridable via `--wal-dir`)
 </FileTree>
+
+When `shared_fs` or `object_store` is configured via `danube ctl cluster storage`, sealed durable segments are exported outside the local node WAL to `{root}/storage/topics/{namespace}/{topic}/segments/`.
 
 ---
 

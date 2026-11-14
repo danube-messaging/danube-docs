@@ -139,7 +139,9 @@ Each topic can be associated with exactly one schema subject. The binding follow
 
 **First-producer privilege.** The first producer to create a topic with a schema subject sets the binding. Subsequent producers must use the same subject or the broker returns an error.
 
-**Admin override.** Administrators can change a topic's schema subject using `danube-admin topics configure-schema`. This is a controlled operation intended for migrations.
+**Admin override.** Administrators can change a topic's schema subject using `danube ctl topics configure-schema`. This is a controlled operation intended for migrations.
+
+**Schema inference for existing topics.** For topics already carrying JSON payloads without a registered schema, administrators (or AI agents via MCP) can sample recent messages and synthesize a Draft-07 JSON Schema using `danube ctl topics infer-schema /default/user-events --sample-size 100`. See also [AI Agents & MCP](/ai-agents/overview/).
 
 **One subject, many topics.** Multiple topics can share the same schema subject. This is the primary mechanism for multi-environment setups (dev/staging/production topics sharing one schema evolution path).
 

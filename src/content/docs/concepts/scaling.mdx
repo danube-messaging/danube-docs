@@ -1,120 +1,150 @@
 ---
 title: Scaling the Cluster
-description: How to scale a Danube cluster up and down — node lifecycle, bare metal, Docker Compose, and Kubernetes.
+description: How to scale a Danube cluster up and down — Raft voters vs. learners, zero-YAML LoadManager tuning, bare metal, Docker Compose, and Kubernetes.
 ---
 
 import { Steps } from '@astrojs/starlight/components';
 
-This guide explains how Danube brokers join and leave a cluster, and how to scale on bare metal, Docker Compose, or Kubernetes.
+This guide explains how Danube brokers join and leave a cluster, how Raft consensus stays fast past five nodes using active non-voting learners, and how to rebalance traffic on bare metal, Docker Compose, or Kubernetes.
+
+---
 
 ## Node Lifecycle
 
-Every broker embeds a Raft consensus node. On startup, the broker inspects its local state and the cluster to decide how to proceed:
+Every broker embeds a Raft consensus node started via `danube up --mode cluster`. On startup, each broker inspects its local `data_dir` and seed peers to decide how to proceed:
 
-| Scenario | How it's detected | What happens |
+| Scenario | How It's Detected | What Happens |
 |----------|-------------------|--------------|
-| **Single-node, first boot** | No `node_id` file, empty `seed_nodes` | Auto-initializes a 1-voter cluster |
+| **Single-node, first boot** | No `node_id` file, empty `--seed-nodes` | Auto-initializes a 1-voter Raft cluster |
 | **Multi-node, first boot** | No `node_id` file, seed peers have no leader yet | Peers discover each other; lowest `node_id` bootstraps the cluster |
-| **New node, existing cluster** | No `node_id` file, a seed peer reports `has_leader = true` | Enters join mode automatically — starts in "drained" state |
-| **Restart** | `node_id` file exists on disk | Waits for Raft leader election then resumes |
+| **New node, existing cluster** | No `node_id` file, `--join` passed or seed peer reports `has_leader = true` | Starts Admin/gRPC and enters join mode in **drained** state |
+| **Restart** | `node_id` file exists on disk | Rejoins Raft, syncs latest metadata, and resumes serving |
 
 ### Broker States
 
-Once a broker joins a cluster, it transitions through these states:
+Once a broker joins the cluster, it moves through explicit lifecycle states:
 
 ```text
 drained ──► active ──► drained (unload) ──► removed
 ```
 
-- **Drained**: the broker is a Raft member but the Load Manager will not assign topics to it. New nodes start here
-- **Active**: eligible for topic assignments. Activated via `danube-admin brokers activate`
-- **Removed**: the node has been removed from Raft membership and can be safely stopped
+- **Drained**: Registered in the cluster, but the Load Manager will not assign topics to it. Newly joined nodes start here.
+- **Active**: Eligible for topic placement and client traffic after running `danube ctl brokers activate --broker-id <ID>`.
+- **Removed**: Evicted from Raft membership via `danube ctl cluster remove-node --node-id <ID>` and safe to shut down.
 
-### Auto-Detection vs. Manual Membership
+---
 
-Auto-detection determines *what the node should do*, not whether it joins the cluster. When a fresh node sees `has_leader = true`, it enters a waiting state instead of bootstrapping a new cluster (preventing accidental split-brain).
+## Raft Voter Cap & Non-Voting Learners
 
-Actually adding the node to the Raft voter set still requires explicit admin commands. This is intentional:
+Raft commit latency degrades when too many nodes participate in every quorum round-trip. To combine strong metadata consistency with large compute scale-out, Danube enforces a configurable **`target_voter_count` (default: `5`)** stored under `/cluster/config/target_voter_count`:
 
-- **Safety**: arbitrary nodes should not auto-join a Raft quorum
-- **Staged rollout**: the learner → voter → active progression lets operators verify each step
-- **Operational control**: the operator decides when a new broker starts receiving traffic
+- **Brokers 1–5 (Raft Voters)**: Promoted into the Raft voting set. A 5-voter quorum tolerates 2 simultaneous node failures while keeping metadata commits fast.
+- **Brokers 6+ (Active Non-Voting Learners)**: Once `voters.len() >= target_voter_count`, newly joined brokers remain Raft **learners**. Learners receive live Raft log replication without casting quorum votes, and once activated (`danube ctl brokers activate --broker-id <ID>`), they serve producer/consumer topic traffic identically to voting brokers. Calling `cluster promote-node` past the voter cap is safely rejected with a precondition message so the quorum stays bounded.
 
 ---
 
 ## Prerequisites
 
-- `danube-admin` CLI installed ([releases](https://github.com/danube-messaging/danube/releases))
-- `DANUBE_ADMIN_ENDPOINT` pointing to any active broker's admin port
+- `danube` binary installed (provides `danube up`, `danube ctl`, and `danube mcp`)
+- `DANUBE_ADMIN_ENDPOINT` pointing to any active broker's client/admin port (`6650` by default when `--admin-addr` is omitted)
 
 ```bash
-export DANUBE_ADMIN_ENDPOINT=http://broker-1:50051
+export DANUBE_ADMIN_ENDPOINT=http://broker-1:6650
 ```
 
 ### Cluster Overview Commands
 
-```bash title="Check current state"
-# Raft cluster membership (voters, learners, leader, term)
-danube-admin cluster status
+```bash title="Inspect cluster topology, leader, and load balance"
+# Raft consensus state (leader_id, term, last_applied, voters, learners)
+danube ctl cluster status
 
-# Active brokers with status, addresses, and roles
-danube-admin brokers list
+# Registered brokers with addresses, states, and roles
+danube ctl brokers list
 
-# Load distribution and balance metrics
-danube-admin brokers balance
+# Broker currently holding cluster leadership
+danube ctl brokers leader-broker
+
+# Load distribution and Coefficient of Variation (CV) across brokers
+danube ctl brokers balance
+```
+
+---
+
+## Live Load Manager & Zero-YAML Rebalancing
+
+Instead of editing YAML config files and restarting nodes, configure placement strategy and automated rebalancing live in Raft metadata using `danube ctl cluster load-manager` (or declaratively via `danube ctl apply`):
+
+```bash title="Configure placement strategy and automated rebalancing live"
+# Switch assignment strategy (fair, balanced, or weighted_load) and enable balanced auto-rebalancing
+danube ctl cluster load-manager \
+  --assignment-strategy weighted_load \
+  --rebalance true \
+  --profile balanced \
+  --check-interval-seconds 60 \
+  --max-moves-per-hour 10 \
+  --cooldown-seconds 300 \
+  --min-brokers 2 \
+  --min-topic-age-seconds 120 \
+  --blacklist-topics "/system/*"
+```
+
+You can also inspect current Load Manager settings at any time by running `danube ctl cluster load-manager` with no flags, or trigger an on-demand rebalance:
+
+```bash title="Preview or execute manual topic rebalancing"
+danube ctl brokers rebalance --dry-run
+danube ctl brokers rebalance --max-moves 5
 ```
 
 ---
 
 ## Scaling Up (Bare Metal / Docker Compose)
 
-Adding a new node is a 4-step process: start → add → promote → activate.
+Adding a new broker follows four steps: start → add → (promote up to voter cap) → activate.
 
 <Steps>
 1. **Start the new broker in join mode**
 
-   ```bash title="Start new broker"
-   danube-broker --config-file danube_broker.yml \
-     --broker-addr 0.0.0.0:6653 --admin-addr 0.0.0.0:50054 \
-     --raft-addr 0.0.0.0:7653 --data-dir ./danube-data/raft-4 \
+   ```bash title="Start broker-4 with zero YAML"
+   danube up --mode cluster \
+     --broker-addr 0.0.0.0:6653 \
+     --raft-addr 0.0.0.0:7653 \
+     --data-dir ./danube-data/node-4 \
+     --wal-dir /mnt/nvme-wal-4 \
      --prom-exporter 0.0.0.0:9043 \
      --join
    ```
 
-   The broker starts its admin server and waits for a Raft leader. It is not yet part of the cluster.
+   Because `--admin-addr` is omitted, Admin gRPC multiplexes cleanly on `--broker-addr` (`6653`). Check the broker's assigned `node_id` from startup logs or `./danube-data/node-4/node_id`.
 
-2. **Add as learner (non-voting)**
-
-   ```bash
-   danube-admin cluster add-node --node-addr http://broker-4:50054
-   ```
-
-   The node receives Raft log replication but does not vote. Safe to remove without impact if something goes wrong.
-
-3. **Promote to voter**
+2. **Add as a Raft learner**
 
    ```bash
-   danube-admin cluster promote-node --node-id <ID>
+   danube ctl cluster add-node --node-addr http://broker-4:6653
    ```
 
-   The broker registers in **drained** state, the Load Manager won't assign topics yet.
+   The new node streams Raft log snapshots and entries asynchronously without affecting voting quorum.
+
+3. **Promote to voter (when below `target_voter_count = 5`)**
+
+   ```bash
+   danube ctl cluster promote-node --node-id <NODE_ID>
+   ```
+
+   If the cluster already has 5 voters, skip promotion — the broker continues as a learner and still hosts topics once activated.
 
 4. **Activate the broker**
 
    ```bash
-   danube-admin brokers activate --broker-id <ID> --reason "Scale-up"
+   danube ctl brokers activate --broker-id <BROKER_ID> --reason "Scale-up"
    ```
 
 5. **Rebalance existing topics (optional)**
 
-   Activation only affects **new** topic assignments. To redistribute existing topics:
+   Activation makes the broker eligible for **new** topics immediately. To move existing partitions onto the new node (or let automated rebalancing handle it):
 
    ```bash
-   # Preview what would happen
-   danube-admin brokers rebalance --dry-run
-
-   # Execute rebalancing
-   danube-admin brokers rebalance
+   danube ctl brokers rebalance --dry-run
+   danube ctl brokers rebalance
    ```
 </Steps>
 
@@ -122,35 +152,35 @@ Adding a new node is a 4-step process: start → add → promote → activate.
 
 ## Scaling Down (Bare Metal / Docker Compose)
 
-Removing a node is the reverse: unload → remove → stop.
+Removing a node follows the reverse sequence: unload → remove → stop.
 
 :::caution
-Always remove the node from Raft membership **before** stopping the process. Otherwise you may lose quorum.
+Always unload topics and remove the node from Raft membership **before** stopping the process so voter quorum is preserved cleanly.
 :::
 
-### Understanding Quorum
+### Understanding Quorum (Up to `target_voter_count = 5`)
 
-| Cluster Size | Quorum | Can Lose |
-|-------------|--------|----------|
-| 3 | 2 | 1 node |
-| 4 | 3 | 1 node |
-| 5 | 3 | 2 nodes |
+| Voter Count | Quorum Needed | Simultaneous Voter Losses Tolerated |
+|:-----------:|:-------------:|:-----------------------------------:|
+| 3 | 2 | 1 |
+| 4 | 3 | 1 |
+| 5 | 3 | 2 |
 
 <Steps>
-1. **Unload all topics**
+1. **Unload all topics off the broker**
 
    ```bash
-   # Preview
-   danube-admin brokers unload --broker-id <ID> --dry-run
+   # Preview topic migrations
+   danube ctl brokers unload --broker-id <BROKER_ID> --dry-run
 
-   # Execute
-   danube-admin brokers unload --broker-id <ID>
+   # Execute topic migration (transitions broker to drained)
+   danube ctl brokers unload --broker-id <BROKER_ID>
    ```
 
-2. **Remove from Raft membership**
+2. **Remove the node from Raft membership**
 
    ```bash
-   danube-admin cluster remove-node --node-id <ID>
+   danube ctl cluster remove-node --node-id <NODE_ID>
    ```
 
 3. **Stop the broker process**
@@ -160,26 +190,15 @@ Always remove the node from Raft membership **before** stopping the process. Oth
    ```
 </Steps>
 
-### Bringing a Broker Back After Maintenance
+### Rejoining After Wipe or Maintenance
 
-Clean the old data directory (the node was removed from Raft, so its persisted state is stale), then rejoin using the same workflow as scale-up:
-
-```bash
-rm -rf ./danube-data/raft-3
-
-danube-broker --config-file danube_broker.yml \
-  --broker-addr 0.0.0.0:6652 --admin-addr 0.0.0.0:50053 \
-  --raft-addr 0.0.0.0:7652 --data-dir ./danube-data/raft-3 \
-  --join
-
-# Then: add-node → promote → activate → rebalance
-```
+If a removed node is brought back with stale Raft state, clear its metadata directory first (or mount a clean PVC), start it with `danube up --mode cluster ... --join`, and repeat `cluster add-node` → (`cluster promote-node` if under cap) → `brokers activate`.
 
 ---
 
 ## Scaling on Kubernetes (Helm)
 
-When using the [danube-core Helm chart](https://github.com/danube-messaging/danube_helm), brokers run as a StatefulSet with `podManagementPolicy: Parallel`. All pods start simultaneously and discover each other via headless DNS.
+When running on Kubernetes, pods run as a StatefulSet with headless DNS discovery.
 
 ### Scaling Up
 
@@ -191,31 +210,31 @@ When using the [danube-core Helm chart](https://github.com/danube-messaging/danu
      --set broker.replicaCount=5
    ```
 
-   New pods detect `has_leader = true` during discovery and enter join mode automatically.
+   New pods detect `has_leader = true` via seed discovery and enter join mode automatically.
 
-2. **Add, promote, and activate each new broker**
+2. **Add, promote (up to 5 voters), and activate each new broker**
 
-   ```bash title="Port-forward and add brokers"
-   kubectl port-forward danube-core-broker-0 50051:50051 -n danube
+   ```bash title="Port-forward port 6650 and register new pods"
+   kubectl port-forward danube-core-broker-0 6650:6650 -n danube
 
-   # For each new pod (e.g., broker-3, broker-4):
-   danube-admin cluster add-node \
-     --node-addr http://danube-core-broker-3.danube-core-broker-headless.danube.svc.cluster.local:50051
-   danube-admin cluster promote-node --node-id <ID>
-   danube-admin brokers activate --broker-id <ID>
+   # Add pod to Raft, promote if within voter cap, and activate for topic traffic:
+   danube ctl cluster add-node \
+     --node-addr http://danube-core-broker-3.danube-core-broker-headless.danube.svc.cluster.local:6650
+   danube ctl cluster promote-node --node-id <NODE_ID>
+   danube ctl brokers activate --broker-id <BROKER_ID>
    ```
 
 3. **Rebalance (optional)**
 
    ```bash
-   danube-admin brokers rebalance
+   danube ctl brokers rebalance
    ```
 </Steps>
 
 ### Scaling Down
 
 <Steps>
-1. **Unload topics and remove from Raft** (same commands as bare metal, via port-forward)
+1. **Unload topics and remove from Raft** via `danube ctl brokers unload --broker-id <BROKER_ID>` and `danube ctl cluster remove-node --node-id <NODE_ID>`.
 
 2. **Reduce replica count**
 
@@ -224,7 +243,7 @@ When using the [danube-core Helm chart](https://github.com/danube-messaging/danu
      --set broker.replicaCount=3
    ```
 
-3. **Delete orphaned PVCs**
+3. **Clean up orphaned PVCs**
 
    ```bash
    kubectl delete pvc data-danube-core-broker-3 -n danube
@@ -234,7 +253,7 @@ When using the [danube-core Helm chart](https://github.com/danube-messaging/danu
 
 ### Pod Restarts and Rolling Upgrades
 
-Pod restarts (crashes, rolling upgrades, node evictions) are handled automatically. Each pod's `node_id` is persisted in the PVC, so the broker detects a restart and resumes with its existing membership. No admin intervention is required.
+Normal pod restarts preserve `node_id` on the PersistentVolumeClaim, so pods rejoin Raft and resume serving automatically without manual `add-node` calls.
 
 ---
 
@@ -242,14 +261,16 @@ Pod restarts (crashes, rolling upgrades, node evictions) are handled automatical
 
 | Command | Purpose |
 |---------|---------|
-| `cluster status` | Show Raft membership (voters, learners, leader, term) |
-| `cluster add-node --node-addr URL` | Add a new broker as a non-voting learner |
-| `cluster promote-node --node-id ID` | Promote learner to voting member |
-| `cluster remove-node --node-id ID` | Remove a node from Raft cluster |
-| `brokers list` | List all registered brokers with status |
-| `brokers activate --broker-id ID` | Set broker state to active (eligible for topics) |
-| `brokers unload --broker-id ID` | Migrate all topics off a broker |
-| `brokers unload --broker-id ID --dry-run` | Preview unload without executing |
-| `brokers balance` | Show load distribution and CV metric |
-| `brokers rebalance` | Trigger manual topic redistribution |
-| `brokers rebalance --dry-run` | Preview rebalance moves |
+| `danube ctl cluster status` | Show Raft leader, term, `last_applied`, voters, and learners |
+| `danube ctl cluster add-node --node-addr URL` | Register a joining broker as a Raft learner |
+| `danube ctl cluster promote-node --node-id ID` | Promote a learner to voter (respecting `target_voter_count = 5`) |
+| `danube ctl cluster remove-node --node-id ID` | Remove a broker from Raft membership |
+| `danube ctl cluster load-manager ...` | Configure placement strategy and automated rebalancing live |
+| `danube ctl brokers list` | List all registered brokers, states, and addresses |
+| `danube ctl brokers leader-broker` | Show the current cluster leader broker |
+| `danube ctl brokers activate --broker-id ID` | Transition broker to active (eligible for topic placement) |
+| `danube ctl brokers unload --broker-id ID [--dry-run]` | Migrate all topics off a broker |
+| `danube ctl brokers balance` | Report cluster load distribution and CV metric |
+| `danube ctl brokers rebalance [--dry-run] [--max-moves N]` | Preview or trigger manual topic rebalancing |
+
+See [Broker Configuration Reference](/reference/broker-configuration/) and [CLI: Cluster Operations](/admin/cli-cluster/) for full flag details.

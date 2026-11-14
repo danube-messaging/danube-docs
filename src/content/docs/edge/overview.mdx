@@ -7,11 +7,30 @@ import { LinkCard, Steps } from '@astrojs/starlight/components';
 
 Danube Edge is a lightweight gateway that runs at the network perimeter and bridges MQTT devices into a Danube cluster. It accepts standard MQTT connections, maps MQTT topics to Danube topics, validates payloads against schemas from the cluster registry, writes messages to a local WAL for durability, and replicates them to the cluster in the background.
 
-The edge runs as a mode of the same `danube-broker` binary. It is not a full cluster participant, it does not vote in Raft or own topics in the cluster sense. Instead, it acts as a store-and-forward relay between constrained device networks and the central cluster.
+The edge runs as a lightweight mode of the unified `danube` binary (`danube up --mode edge`). It is not a full cluster participant—it does not vote in Raft or own topics in the cluster sense. Instead, it acts as a store-and-forward relay between constrained device networks and the central cluster.
 
-:::note
-For configuration details, see [Edge Configuration](/reference/edge-configuration/).
-:::
+## Zero-YAML Edge Startup
+
+For most IoT and edge deployments, no configuration file is required. Start an edge node directly with CLI flags:
+
+```bash
+danube up \
+  --mode edge \
+  --edge-name edge1 \
+  --cloud-endpoint https://cloud:6650 \
+  --mqtt-addr 0.0.0.0:1883 \
+  --edge-token <tok> \
+  --data-dir ./edge-data
+```
+
+In zero-YAML mode, Danube automatically consolidates all incoming MQTT topics (`#`) onto a single Danube topic `/{edge_name}/ingest` (for example, `/edge1/ingest`) and stamps each message with:
+
+- **`mqtt.topic`** attribute (and routing key) containing the original MQTT publish topic (such as `factory/line-a/temp`)
+- **`edge.node_id`** attribute set to `{edge_name}`
+
+Consolidating onto `/{edge_name}/ingest` prevents thousands of ephemeral MQTT device topics from exploding cluster Raft metadata and local WAL segment counts, while preserving full MQTT topic routing metadata downstream.
+
+See [Configuration, CLI Flags & Manifest Reference](/reference/broker-configuration/#edge-mode-and-custom-mqtt-mappings) for all edge flags and override options.
 
 ---
 
@@ -46,9 +65,69 @@ Messages flow through three layers on the edge before reaching the cluster:
 
 ---
 
-## Topic Mapping
+## Topic Mapping & Advanced Configuration (`--recovery-config`)
 
-The edge does not create Danube topics dynamically from MQTT traffic. Instead, topic mappings are declared in the configuration file and registered with the cluster at startup.
+By default, zero-YAML startup routes every MQTT topic (`#`) to `/{edge_name}/ingest` so device fleets stay consolidated in Raft and WAL storage. When you need custom topic splitting, wildcard capture attributes, payload size/connection caps, schema validation at the edge, or custom batching, supply an `edge:` block inside a `--recovery-config` YAML or JSON file:
+
+```bash
+danube up \
+  --mode edge \
+  --data-dir ./edge-data \
+  --recovery-config ./edge-recovery.yaml
+```
+
+*(When an `edge:` block is present in `--recovery-config`, it replaces the zero-YAML `edge`, `replicator`, and `mqtt` settings while preserving any `--edge-token` passed on the CLI.)*
+
+```yaml title="edge-recovery.yaml"
+edge:
+  edge:
+    edge_name: edge-factory-01
+    cluster_url: https://cloud:6650
+    token: ""
+    heartbeat_interval_ms: 30000
+  replicator:
+    batch_size: 100
+    batch_timeout_ms: 1000
+  mqtt:
+    listener: "0.0.0.0:1883"
+    max_payload_size: 262144
+    max_connections: 10000
+    ingestion:
+      batch_size: 100
+      batch_timeout_ms: 500
+    topic_mappings:
+      - mqtt_pattern: "device/+/telemetry"
+        danube_topic: "/edge-factory-01/telemetry"
+        schema_subject: "telemetry-v1"
+        validation_policy: "enforce"
+        extract_attributes:
+          device_id: "$1"
+      - mqtt_pattern: "#"
+        danube_topic: "/edge-factory-01/ingest"
+```
+
+### Custom Edge Mapping & Batching Reference
+
+| Section / Field | Default | Description |
+|-----------------|---------|-------------|
+| `edge.edge.edge_name` | `HOSTNAME` / `edge-node` | Unique edge node identifier reported in `/edge_registry/edges/{edge_name}` |
+| `edge.edge.cluster_url` | *(from `--cloud-endpoint`)* | Upstream Danube cluster gRPC endpoint (`http://` or `https://`) |
+| `edge.edge.token` | `""` | Bearer token for upstream cluster auth (overridden by `--edge-token`) |
+| `edge.edge.heartbeat_interval_ms` | `30000` | Edge-to-cluster heartbeat interval in milliseconds |
+| `edge.replicator.batch_size` | `100` | Maximum WAL messages batched per cloud replication RPC |
+| `edge.replicator.batch_timeout_ms` | `1000` | Max wait before flushing a partial replication batch to the cloud |
+| `edge.mqtt.listener` | `"0.0.0.0:1883"` | TCP address for the embedded MQTT 3.1.1/5.0 listener |
+| `edge.mqtt.max_payload_size` | `262144` | Max MQTT packet size in bytes (256 KB) rejected at codec level |
+| `edge.mqtt.max_connections` | `10000` | Maximum concurrent MQTT client connections |
+| `edge.mqtt.ingestion.batch_size` | `100` | Messages buffered per topic before flushing to local edge WAL |
+| `edge.mqtt.ingestion.batch_timeout_ms` | `500` | Max wait (ms) before flushing a partial MQTT ingestion batch |
+| `edge.mqtt.topic_mappings[].mqtt_pattern` | *(required)* | MQTT subscription pattern supporting `+` and `#` wildcards (first match wins) |
+| `edge.mqtt.topic_mappings[].danube_topic` | *(required)* | Target Danube topic path (e.g. `/{edge_name}/telemetry`) |
+| `edge.mqtt.topic_mappings[].schema_subject` | *(none)* | Optional Schema Registry subject synced from the central cluster |
+| `edge.mqtt.topic_mappings[].validation_policy` | `"none"` | `"none"` (stamp schema ID only) or `"enforce"` (validate payload and reject invalid MQTT publishes) |
+| `edge.mqtt.topic_mappings[].extract_attributes` | `{}` | Map attribute names to wildcard capture groups (`$1`, `$2`, ...) |
+
+The edge does not create Danube topics arbitrarily on every random MQTT string; mapped target topics (`/{edge_name}/ingest` or custom `danube_topic` targets) are registered with the cluster and replicated cleanly.
 
 Each mapping rule specifies:
 
@@ -149,12 +228,12 @@ The edge is designed for unreliable network environments:
 | Storage | Local WAL only (store-and-forward) | Local WAL + durable segments |
 | Replication | Edge → cluster (one-way) | Raft consensus (metadata) |
 | Schema registry | Pulls from cluster, caches locally | Source of truth |
-| Configuration | `edge.yaml` | `danube_broker.yml` |
+| Configuration | Zero-YAML CLI flags (optional `--recovery-config`) | Live `danube ctl` / `danube ctl apply` |
 
 ---
 
 <LinkCard
-  title="Edge Configuration Reference"
-  description="Complete reference for edge.yaml covering identity, MQTT gateway, topic mappings, and replication batching."
-  href="/reference/edge-configuration/"
+  title="Configuration, CLI Flags & Manifest Reference"
+  description="Complete reference for danube up flags, live cluster commands, DesiredStateManifest, and edge --recovery-config overrides."
+  href="/reference/broker-configuration/"
 />

@@ -400,9 +400,7 @@ Compatibility modes control schema evolution at the subject level. This is an **
 | `None` | No validation | Development only |
 
 ```bash title="Set compatibility mode (admin only)"
-danube-admin schema set-compatibility \
-  --subject user-events \
-  --mode BACKWARD
+danube ctl schemas set-compatibility user-events --mode backward
 ```
 
 ---
@@ -660,12 +658,27 @@ The broker validates schema fields based on the topic's validation policy:
 | **Warn** | Logs warning if `schema_id` missing or invalid; allows message |
 | **Enforce** | Rejects message if `schema_id` missing, invalid, or doesn't match |
 
-Set via admin CLI:
+Set or update topic schema governance via `danube ctl`:
 
-```bash title="Set validation policy"
-danube-admin topics set-validation-policy \
-  --topic /default/user-events \
-  --policy enforce
+```bash title="Bind schema subject and update validation policy"
+# Attach a registered schema subject to a topic with initial validation policy
+danube ctl topics configure-schema /default/user-events \
+  --subject user-events \
+  --validation-policy enforce \
+  --enable-payload-validation
+
+# Update validation policy on an existing schema-bound topic
+danube ctl topics set-validation-policy /default/user-events \
+  --policy enforce \
+  --enable-payload-validation
+```
+
+### Inferring a Schema from Live Traffic
+
+If producers have already published JSON payloads without registering a schema first, use `danube ctl topics infer-schema` to sample recent messages and synthesize a JSON Schema draft:
+
+```bash title="Infer a JSON Schema from sampled topic messages"
+danube ctl topics infer-schema /default/user-events --sample-size 100
 ```
 
 ---

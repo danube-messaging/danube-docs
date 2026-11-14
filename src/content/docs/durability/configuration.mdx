@@ -1,292 +1,353 @@
 ---
 title: Configuration Guide
-description: How to configure Danube's storage modes, Valkey write buffer, and cloud storage backends.
+description: How to configure Danube's storage modes, WAL lifecycle, Valkey write buffer, and cloud object storage live or declaratively.
 ---
 
 import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
 
-This page shows how to configure each storage tier in your Danube broker configuration.
+Danube separates per-node local disk staging from cluster-wide durability configuration. Instead of editing static YAML files on every broker and restarting the cluster, durable storage, WAL rotation/retention, Valkey buffering, and topic tiering are managed live with `danube ctl` (persisted in Raft under `/cluster/config/*` and hot-reconciled across all brokers) or declaratively with `danube ctl apply`.
+
+See [Configuration Workflow](/getting-started/configuration-workflow/) for how per-node startup flags, live Raft settings, and declarative manifests fit together.
 
 ---
 
-## Storage Modes
+<Steps>
 
-Danube supports three storage modes, configured under `storage.mode` in the broker config. The mode determines where sealed WAL segments are exported for long-term durability.
+1. ## Set the Per-Node WAL Staging Directory (Optional)
 
-| Mode | Durable Storage | Use Case |
-|------|----------------|----------|
-| `local` | Local filesystem only | Single-node, development, edge |
-| `shared_fs` | Shared filesystem (NFS, EFS) | On-prem multi-broker clusters |
-| `object_store` | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native multi-broker deployments |
+   Each broker stores its active local write-ahead log (WAL) under `{data_dir}/wal` by default. To place the hot WAL on a dedicated NVMe volume separate from `{data_dir}` (which also holds Raft logs and snapshots), pass `--wal-dir` at node startup:
 
-### Local
+   ```bash
+   danube up \
+     --data-dir /var/lib/danube \
+     --wal-dir /mnt/nvme-wal
+   ```
 
-All data stays on the broker's local disk. No background export, no remote storage.
+   This is the only storage path specified per node. Everything else—durable backend, WAL retention, write buffer, and per-topic cloud tiering—is configured cluster-wide.
 
-```yaml title="danube_broker.yml"
-storage:
-  mode: local
-  local_wal_root: "./danube-data/wal"
-```
+2. ## Choose the Cluster Durable Storage Mode
 
-### Shared Filesystem
+   Use `danube ctl cluster storage` to inspect or change where sealed WAL segments are exported for durable cross-broker storage. Changes are written to `/cluster/config/storage` in Raft and applied live across all brokers without restarts.
 
-Hot writes go to a local WAL. A background exporter copies sealed segments to a shared filesystem visible to all brokers.
+   Check the active storage configuration at any time:
 
-```yaml title="danube_broker.yml"
-storage:
-  mode: shared_fs
-  local_wal_root: "/var/lib/danube/wal"
-  durable:
-    root: "/mnt/danube-shared-segments"
-```
+   ```bash
+   danube ctl cluster storage status
+   ```
 
-### Object Store
+   <Tabs>
+   <TabItem label="Local (Default)">
 
-Hot writes go to a local WAL. A background exporter pushes sealed segments to cloud object storage via OpenDAL.
+   Single-node, development, and edge mode. Sealed WAL segments stay on each broker's local disk only.
 
-<Tabs>
-<TabItem label="S3">
+   ```bash
+   danube ctl cluster storage local
+   ```
 
-```yaml title="danube_broker.yml"
-storage:
-  mode: object_store
-  durable:
-    backend: s3
-    root: "s3://my-bucket/danube"
-    region: "us-east-1"
-    # endpoint: "https://s3.us-east-1.amazonaws.com"  # optional, for custom endpoints / MinIO
-    # access_key: "<access-key>"                       # prefer IAM roles in production
-    # secret_key: "<secret-key>"
-```
+   </TabItem>
+   <TabItem label="Shared Filesystem (NFS / EFS)">
 
-</TabItem>
-<TabItem label="GCS">
+   For on-premises multi-broker clusters sharing a POSIX mount (NFS, EFS, Lustre). Every broker must mount the same path.
 
-```yaml title="danube_broker.yml"
-storage:
-  mode: object_store
-  durable:
-    backend: gcs
-    root: "gcs://my-bucket/danube"
-    # project: "my-gcp-project"
-    # credentials_path: "/path/to/credentials.json"
-```
+   ```bash
+   danube ctl cluster storage shared-fs \
+     --root /mnt/shared-danube/storage
+   ```
 
-</TabItem>
-<TabItem label="Azure Blob">
+   </TabItem>
+   <TabItem label="Amazon S3 / S3-Compatible">
 
-```yaml title="danube_broker.yml"
-storage:
-  mode: object_store
-  durable:
-    backend: azblob
-    root: "my-container/danube"
-    # endpoint: "https://<account>.blob.core.windows.net"
-    # account_name: "<account-name>"
-    # account_key: "<account-key>"
-```
+   For AWS S3, MinIO, Ceph RGW, or Cloudflare R2 using `--backend s3` and `--option KEY=VALUE` pairs.
 
-</TabItem>
-</Tabs>
+   **AWS S3 (IAM role or instance profile):**
 
-:::caution
-Never hardcode cloud credentials in version-controlled config files. Use secret management or environment variables in production.
-:::
+   ```bash
+   danube ctl cluster storage object-store \
+     --backend s3 \
+     --root my-danube-bucket/cluster-prod \
+     --option region=us-east-1
+   ```
+
+   **MinIO / S3-compatible endpoint with explicit credentials:**
+
+   ```bash
+   danube ctl cluster storage object-store \
+     --backend s3 \
+     --root danube-wal \
+     --option endpoint=http://minio:9000 \
+     --option region=us-east-1 \
+     --option access_key=minioadmin \
+     --option secret_key=minioadmin \
+     --option virtual_host_style=false
+   ```
+
+   Supported S3 `--option` keys: `region`, `endpoint`, `access_key`, `secret_key`, `session_token`, `anonymous`, `role_arn`, `session_name`, `virtual_host_style`.
+
+   </TabItem>
+   <TabItem label="Google Cloud Storage">
+
+   For GCS buckets using `--backend gcs`:
+
+   ```bash
+   danube ctl cluster storage object-store \
+     --backend gcs \
+     --root my-gcs-bucket/danube \
+     --option project=my-gcp-project \
+     --option credentials_path=/etc/danube/gcs-sa.json
+   ```
+
+   Supported GCS `--option` keys: `project`, `endpoint`, `credential_file`, `credentials_path`, `credentials_json`.
+
+   </TabItem>
+   <TabItem label="Azure Blob Storage">
+
+   For Azure Blob Storage containers using `--backend azblob`:
+
+   ```bash
+   danube ctl cluster storage object-store \
+     --backend azblob \
+     --root my-container/danube \
+     --option account_name=mystorageaccount \
+     --option account_key=BASE64_ACCOUNT_KEY
+   ```
+
+   Supported Azure `--option` keys: `account_name`, `account_key`, `endpoint`.
+
+   </TabItem>
+   <TabItem label="Local Filesystem Object Store">
+
+   Simulates an object store on a local directory (useful for integration testing without cloud credentials):
+
+   ```bash
+   danube ctl cluster storage object-store \
+     --backend filesystem \
+     --root /tmp/danube-object-store
+   ```
+
+   </TabItem>
+   </Tabs>
+
+   :::caution
+   When enabling `object-store` or `shared-fs` on an already populated cluster, existing topics keep their current tiering behavior unless promoted per topic (Step 3) or unless you pass `--force` when reconfiguring incompatible backends.
+   :::
+
+3. ## Configure Per-Topic Storage Mode & Stream Intent
+
+   Topics can run with local-only WAL storage or promote sealed segments to the cluster's durable storage tier. New topics accept a [Stream Intent](/concepts/stream-intents/) (`--intent`), or you can switch an existing topic live between `local` and `cloud_tiered`:
+
+   ```bash
+   # Create a topic with a high-durability stream intent
+   danube ctl topics create /default/orders \
+     --intent audit_log
+
+   # Promote an existing topic to cloud tiering live
+   danube ctl topics storage-mode /default/events \
+     --mode cloud_tiered
+   ```
+
+   To revert a topic back to local-only tiering, pass `--force`:
+
+   ```bash
+   danube ctl topics storage-mode /default/events \
+     --mode local \
+     --force
+   ```
+
+4. ## Tune Live WAL Rotation, Flush & Local Retention
+
+   `danube ctl cluster wal` updates WAL buffering, flushing, rotation thresholds, and local disk retention across every broker live (persisted at `/cluster/config/wal` in Raft). Unspecified flags retain their current values.
+
+   ```bash
+   danube ctl cluster wal \
+     --retention-time-minutes 2880 \
+     --retention-size-mb 20480 \
+     --check-interval-minutes 5 \
+     --rotate-max-bytes 536870912 \
+     --rotate-max-hours 24 \
+     --cache-capacity 1024 \
+     --flush-interval-ms 5000 \
+     --flush-max-batch-bytes 10485760
+   ```
+
+   To disable automatic local WAL retention pruning:
+
+   ```bash
+   danube ctl cluster wal --clear-retention
+   ```
+
+   | Flag | Default | Description |
+   |------|---------|-------------|
+   | `--retention-time-minutes` | `2880` (single-node) | Maximum age of rotated local WAL files before deletion |
+   | `--retention-size-mb` | `20480` (single-node) | Maximum total local WAL size per topic before oldest files are pruned |
+   | `--check-interval-minutes` | `5` | How frequently the background deleter evaluates retention rules |
+   | `--rotate-max-bytes` | `536870912` (512 MB) | Maximum WAL segment file size before rotating to a new segment |
+   | `--rotate-max-hours` | `—` | Maximum segment age in hours before rotating (converted to seconds) |
+   | `--cache-capacity` | `1024` | In-memory WAL message cache capacity before eviction |
+   | `--flush-interval-ms` | `5000` | Background WAL batch flush interval in milliseconds |
+   | `--flush-max-batch-bytes` | `10485760` (10 MB) | Maximum pending WAL batch size in bytes before forcing a flush |
+   | `--clear-retention` | `false` | Clears active retention bounds instead of applying retention settings |
+
+5. ## Enable & Tune the Valkey Warm Write Buffer
+
+   For zero-data-loss (`RPO ≈ 0`) crash recovery when nodes run on ephemeral disks (such as Kubernetes `emptyDir` or spot instances), enable the Valkey warm write buffer. Messages are double-written to Valkey Streams (`XADD` + `WAIT`) before producer acknowledgment.
+
+   **Profile presets (`ha` or `dev`):**
+
+   ```bash
+   # Production HA preset: wait_replicas=1, wait_timeout_ms=100, on_wait_timeout=fail, max_cached_closed_segments=10
+   danube ctl cluster write-buffer enable \
+     --endpoints redis://valkey-0:6379,redis://valkey-1:6379,redis://valkey-2:6379 \
+     --profile ha
+
+   # Development preset: wait_replicas=0, wait_timeout_ms=50, on_wait_timeout=ack, max_cached_closed_segments=2
+   danube ctl cluster write-buffer enable \
+     --endpoints redis://valkey:6379 \
+     --profile dev
+   ```
+
+   **Custom overrides (or override individual fields alongside a profile):**
+
+   ```bash
+   danube ctl cluster write-buffer enable \
+     --endpoints redis://valkey-0:6379,redis://valkey-1:6379 \
+     --wait-replicas 1 \
+     --wait-timeout-ms 150 \
+     --on-wait-timeout fail \
+     --max-cached-segments 5
+   ```
+
+   Inspect or disable the write buffer live:
+
+   ```bash
+   danube ctl cluster write-buffer status
+   danube ctl cluster write-buffer disable
+   ```
+
+   | Flag | Manifest Field | Default | Description |
+   |------|----------------|---------|-------------|
+   | `--endpoints` | `endpoints` | *(required)* | Comma-separated (CLI) or list (YAML) of Valkey/Redis endpoint URLs |
+   | `--profile` | `profile` | *(none)* | Preset tuning profile: `ha` or `dev` |
+   | `--wait-replicas` | `wait_replicas` | `1` (`ha`: `1`, `dev`: `0`) | Number of Valkey replicas that must confirm each write |
+   | `--wait-timeout-ms` | `wait_timeout_ms` | `100` (`dev`: `50`) | Maximum time to wait for replica confirmation in milliseconds |
+   | `--on-wait-timeout` | `on_wait_timeout` | `fail` (`dev`: `ack`) | Action when `WAIT` times out: `fail` (reject write) or `ack` (proceed anyway) |
+   | `--max-cached-segments` | `max_cached_closed_segments` | `5` (`ha`: `10`, `dev`: `2`) | Number of closed WAL segments retained in Valkey before trimming via `XTRIM` |
+
+   ### Choosing `wait_replicas`
+
+   | Deployment | `--wait-replicas` | Durability Guarantee |
+   |-----------|----------------|---------------------|
+   | Standalone Valkey (dev/test) | `0` | Messages survive broker crash, not Valkey crash |
+   | Valkey with 1 replica | `1` | Messages survive both broker and Valkey primary crash |
+   | Valkey Cluster (3+ masters) | `1` | Full HA, messages survive any single node failure |
+
+   ### Choosing `on_wait_timeout`
+
+   | Policy | Behavior | When to Use |
+   |--------|----------|-------------|
+   | `fail` | Reject the write, producer gets an error | Production, never silently lose the durability guarantee |
+   | `ack` | Proceed with the write, log a warning | Development, or when availability is more important than strict durability |
+
+   :::caution
+   Setting `--on-wait-timeout ack` means the broker acknowledges writes even if Valkey did not confirm replication. This trades durability for availability—use only when that trade-off is intentional.
+   :::
+
+   ### Sizing `--max-cached-segments` (`max_cached_closed_segments`)
+
+   This controls how many closed WAL segments Valkey retains. Each segment is typically 512 MB of messages (matching `--rotate-max-bytes`).
+
+   | Value | Valkey Memory (approx.) | Coverage |
+   |-------|------------------------|----------|
+   | `3` | ~1.5 GB per topic | Last 3 rotations |
+   | `5` | ~2.5 GB per topic | Last 5 rotations (default) |
+   | `10` | ~5 GB per topic | Last 10 rotations (`ha` profile default) |
+
+   :::tip
+   Higher values provide more coverage for crash recovery and warm reads, but consume more Valkey memory. For most deployments, `5`–`10` closed segments is a good range.
+   :::
+
+   ### Sizing `--wait-timeout-ms`
+
+   Set the timeout for Valkey replica confirmation based on your network latency to Valkey:
+
+   | Network | Recommended Timeout |
+   |---------|-------------------|
+   | Same host / localhost | `50–100 ms` |
+   | Same datacenter | `100–200 ms` |
+   | Cross-AZ | `200–500 ms` |
+
+6. ## Declarative GitOps Setup with `danube ctl apply`
+
+   For reproducible environments and CI/CD pipelines, capture your storage mode, write buffer, namespaces, and topics in a single `desired_state.yaml` manifest and apply it declaratively. Always preview changes first with `--dry-run`:
+
+   ```bash
+   danube ctl apply -f desired_state.yaml --dry-run
+   danube ctl apply -f desired_state.yaml
+   ```
+
+   <Tabs>
+   <TabItem label="Dev / Test (Shared FS + Dev Valkey)">
+
+   ```yaml title="desired_state.yaml"
+   namespaces:
+     - dev
+
+   shared_fs:
+     root: /mnt/shared-danube/storage
+
+   write_buffer:
+     enabled: true
+     endpoints:
+       - "redis://valkey:6379"
+     profile: dev
+
+   topics:
+     - name: /dev/events
+       intent: event_stream
+       partitions: 3
+   ```
+
+   </TabItem>
+   <TabItem label="Production (S3 + Valkey HA)">
+
+   ```yaml title="desired_state.yaml"
+   namespaces:
+     - production
+
+   object_store:
+     backend: s3
+     root: my-danube-bucket/cluster-prod
+     options:
+       region: us-east-1
+
+   write_buffer:
+     enabled: true
+     endpoints:
+       - "redis://valkey-0.valkey-headless:6379"
+       - "redis://valkey-1.valkey-headless:6379"
+       - "redis://valkey-2.valkey-headless:6379"
+     profile: ha
+
+   topics:
+     - name: /production/orders
+       intent: audit_log
+       partitions: 6
+       storage_mode: cloud_tiered
+     - name: /production/telemetry
+       intent: event_stream
+       storage_mode: cloud_tiered
+   ```
+
+   </TabItem>
+   </Tabs>
+
+</Steps>
+
+For the full schema of `danube up` flags, `danube ctl cluster` commands, `DesiredStateManifest`, and break-glass `--recovery-config` files, see [Configuration, CLI Flags & Manifest Reference](/reference/broker-configuration/).
 
 ---
 
-## WAL and Retention Settings
+## Next Steps
 
-These settings apply to all storage modes.
-
-```yaml title="danube_broker.yml"
-storage:
-  metadata_prefix: "/danube"
-  local_retention:
-    time_minutes: 2880          # prune files older than 48 hours
-    size_mb: 20480              # prune when local WAL exceeds 20 GB
-    check_interval_minutes: 5   # check every 5 minutes
-  wal:
-    rotation:
-      max_bytes: 536870912      # rotate WAL file at 512 MB
-```
-
-:::note
-Local retention only deletes WAL files that have been safely exported to durable storage. It does **not** delete durable segment objects.
-:::
-
----
-
-## Write Buffer (Valkey)
-
-The `write_buffer` block enables double-writing messages to Valkey for crash recovery and warm caching. This is independent of the storage mode, you can combine it with `local`, `shared_fs`, or `object_store`.
-
-### Quick Start
-
-Add these lines to enable durability via Valkey:
-
-```yaml title="danube_broker.yml" {5-9}
-storage:
-  mode: local
-  local_wal_root: "./danube-data/wal"
-
-  write_buffer:
-    backend: valkey
-    endpoints:
-      - "redis://127.0.0.1:6379"
-```
-
-That's it. Every message is now double-written to both the local WAL and Valkey. If the broker crashes, the next broker recovers the buffered messages from Valkey.
-
-### Options Reference
-
-```yaml title="danube_broker.yml"
-storage:
-  write_buffer:
-    backend: valkey
-    endpoints:
-      - "redis://127.0.0.1:6379"
-    wait_replicas: 0
-    wait_timeout_ms: 100
-    on_wait_timeout: fail
-    max_cached_closed_segments: 5
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `backend` | String | *(required)* | Must be `valkey` |
-| `endpoints` | String[] | *(required)* | Valkey/Redis endpoint URLs. Use one endpoint for standalone, multiple for cluster mode. |
-| `wait_replicas` | Integer | `0` | Number of Valkey replicas that must confirm each write. Set to `0` for standalone, `1` or higher for replicated setups. |
-| `wait_timeout_ms` | Integer | `100` | Maximum time to wait for replica confirmation (milliseconds). |
-| `on_wait_timeout` | String | `fail` | What to do if `WAIT` times out: `fail` (reject the write) or `ack` (proceed anyway). |
-| `max_cached_closed_segments` | Integer | `5` | How many closed WAL segments to keep cached in Valkey. Older segments are trimmed via `XTRIM`. |
-
-### Choosing `wait_replicas`
-
-| Deployment | `wait_replicas` | Durability Guarantee |
-|-----------|----------------|---------------------|
-| Standalone Valkey (dev/test) | `0` | Messages survive broker crash, not Valkey crash |
-| Valkey with 1 replica | `1` | Messages survive both broker and Valkey primary crash |
-| Valkey Cluster (3+ masters) | `1` | Full HA, messages survive any single node failure |
-
-### Choosing `on_wait_timeout`
-
-| Policy | Behavior | When to Use |
-|--------|----------|-------------|
-| `fail` | Reject the write, producer gets an error | Production, never silently lose the durability guarantee |
-| `ack` | Proceed with the write, log a warning | Development, or when availability is more important than strict durability |
-
-:::caution
-Setting `on_wait_timeout: ack` means the broker will acknowledge writes even if Valkey didn't confirm them. This trades durability for availability. Use only when you understand the trade-off.
-:::
-
-### Sizing `max_cached_closed_segments`
-
-This controls how many closed WAL segments Valkey retains. Each segment is typically 512 MB of messages (matching `wal.rotation.max_bytes`).
-
-| Value | Valkey Memory (approx.) | Coverage |
-|-------|------------------------|----------|
-| `3` | ~1.5 GB per topic | Last 3 rotations |
-| `5` | ~2.5 GB per topic | Last 5 rotations (default) |
-| `10` | ~5 GB per topic | Last 10 rotations |
-
-:::tip
-Higher values provide more coverage for crash recovery and warm reads, but consume more Valkey memory. For most deployments, `5` is a good starting point.
-:::
-
-### Sizing `wait_timeout_ms`
-
-The timeout for Valkey replica confirmation. Set this based on your network latency to Valkey:
-
-| Network | Recommended Timeout |
-|---------|-------------------|
-| Same host / localhost | `50–100 ms` |
-| Same datacenter | `100–200 ms` |
-| Cross-AZ | `200–500 ms` |
-
----
-
-## Deployment Examples
-
-<Tabs>
-<TabItem label="Standalone (Dev/Test)">
-
-```yaml title="danube_broker.yml"
-storage:
-  mode: local
-  local_wal_root: "./danube-data/wal"
-  metadata_prefix: "/danube"
-  local_retention:
-    time_minutes: 2880
-    size_mb: 20480
-    check_interval_minutes: 5
-  wal:
-    rotation:
-      max_bytes: 536870912
-
-  write_buffer:
-    backend: valkey
-    endpoints:
-      - "redis://127.0.0.1:6379"
-    wait_replicas: 0
-    wait_timeout_ms: 100
-    on_wait_timeout: fail
-    max_cached_closed_segments: 5
-```
-
-Start Valkey with Docker:
-
-```bash
-docker run -d --name valkey -p 6379:6379 valkey/valkey:latest
-```
-
-</TabItem>
-<TabItem label="Valkey Cluster (Production)">
-
-```yaml title="danube_broker.yml"
-storage:
-  mode: object_store
-  local_wal_root: "/var/lib/danube/wal"
-  metadata_prefix: "/danube"
-  local_retention:
-    time_minutes: 2880
-    size_mb: 20480
-    check_interval_minutes: 5
-  wal:
-    rotation:
-      max_bytes: 536870912
-
-  durable:
-    backend: s3
-    root: "s3://my-bucket/danube"
-    region: "us-east-1"
-
-  write_buffer:
-    backend: valkey
-    endpoints:
-      - "redis://valkey-0.valkey:6379"
-      - "redis://valkey-1.valkey:6379"
-      - "redis://valkey-2.valkey:6379"
-    wait_replicas: 1
-    wait_timeout_ms: 200
-    on_wait_timeout: fail
-    max_cached_closed_segments: 10
-```
-
-:::note
-When multiple endpoints are provided, Danube connects in cluster mode. Ensure your Valkey instances are configured as a cluster.
-:::
-
-</TabItem>
-</Tabs>
-
-For a complete broker configuration reference covering all settings, see [Broker Configuration](/reference/broker-configuration/).
-
----
-
-## What's Next
-
-- [Tiered Storage](/durability/tiered-storage/) — understand how the read path works with each configuration
-- [Crash Recovery](/durability/crash-recovery/) — what happens when a broker fails
-- [Broker Configuration Reference](/reference/broker-configuration/) — complete field reference for all settings
+- [Tiered Storage](/durability/tiered-storage/) — understand how the read/write path behaves across WAL, Valkey, and object storage
+- [Crash Recovery](/durability/crash-recovery/) — how Danube recovers active and historical offsets when a broker fails
+- [Configuration, CLI Flags & Manifest Reference](/reference/broker-configuration/) — full flag, command, and manifest schema reference

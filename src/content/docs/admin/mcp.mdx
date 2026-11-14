@@ -1,249 +1,273 @@
 ---
 title: AI Admin (MCP)
-description: Manage your Danube cluster using natural language through the Model Context Protocol — 58 tools, 4 guided workflows, and full cluster observability.
+description: Manage, inspect, and troubleshoot Danube clusters with AI assistants using the built-in Model Context Protocol (MCP) server.
 ---
 
-import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The MCP server transforms Danube cluster management into a conversation. Instead of memorizing CLI syntax, describe what you want in natural language, your AI assistant calls the right tools, follows safety workflows, and explains what it finds.
+Danube includes a native [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server inside the unified `danube` binary (`danube mcp` / `danube ctl serve`). It exposes **71 operational tools across 7 categories**, **4 guided diagnostic prompts**, and **1 metrics catalog resource** to AI assistants such as Claude Code, Antigravity, Cursor, VS Code, and custom agent frameworks.
 
-## Quick Start
-
-```bash title="Start the MCP server"
-danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
-```
-
-The server communicates over `stdio` using the [Model Context Protocol](https://modelcontextprotocol.io/). Connect it to any MCP-compatible AI assistant.
+For broader agent-native workflows (zero-copy branching, schema inference, and `StreamIntent` profiles), see [Danube for AI Agents](/ai-agents/overview/).
 
 ---
 
-## IDE Configuration
+## Running the MCP Server
 
-<Tabs>
-<TabItem label="Claude Code">
+### Option 1: Local `stdio` Transport (`danube mcp`)
 
-Claude Code auto-discovers MCP servers from a project-level config file:
-
-```json title=".mcp.json (project root)"
-{
-  "mcpServers": {
-    "danube-admin": {
-      "command": "/usr/local/bin/danube-admin",
-      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
-      "env": {
-        "NO_COLOR": "1",
-        "RUST_LOG": "error"
-      }
-    }
-  }
-}
-```
-
-Or add globally via `claude mcp add`:
+Ideal for local IDE integrations that spawn the MCP process directly:
 
 ```bash
-claude mcp add danube-admin -- /usr/local/bin/danube-admin serve --mode mcp --broker-endpoint http://localhost:50051
+danube mcp --broker-endpoint http://localhost:6650
 ```
 
-</TabItem>
-<TabItem label="Antigravity">
+`danube mcp` is equivalent to `danube ctl serve --mode mcp`.
 
-Antigravity discovers MCP servers from its settings file:
+### Option 2: Streamable HTTP Transport (`/mcp`)
 
-```json title="~/.gemini/settings.json"
-{
-  "mcpServers": {
-    "danube-admin": {
-      "command": "/usr/local/bin/danube-admin",
-      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
-      "env": {
-        "NO_COLOR": "1",
-        "RUST_LOG": "error"
+To expose MCP over HTTP (for remote agents, containers, or shared team gateways), start `danube ctl serve` in `ui` (HTTP) or `all` (HTTP + `stdio`) mode. The HTTP server exposes `/mcp` alongside the `/ui/v1/...` Admin UI BFF routes:
+
+```bash
+danube ctl serve --mode ui \
+  --listen-addr 0.0.0.0:8080 \
+  --broker-endpoint http://localhost:6650
+```
+
+Remote MCP clients connect to `http://<host>:8080/mcp`. When `DANUBE_HTTP_TOKEN` (or `DANUBE_ADMIN_TOKEN`) is set, or `DANUBE_HTTP_REQUIRE_AUTH=true` is configured, requests to `/mcp` require an `Authorization: Bearer <jwt>` header.
+
+<Aside type="tip">
+Basic health checks, metrics queries, and log inspection work with **zero extra configuration** — `get_broker_logs` and metrics tools automatically fall back to the broker's in-memory gRPC ring buffers over port `6650` when external Docker/Kubernetes log paths or Prometheus are not configured.
+</Aside>
+
+---
+
+## IDE & Client Setup
+
+<Tabs>
+  <TabItem label="Claude Code">
+    Add the server via the CLI:
+    ```bash
+    claude mcp add danube -- danube mcp --broker-endpoint http://localhost:6650
+    ```
+  </TabItem>
+  <TabItem label="Cursor / VS Code / Antigravity">
+    Add the following to your MCP client configuration (`.mcp.json` or IDE settings):
+    ```json
+    {
+      "mcpServers": {
+        "danube": {
+          "command": "danube",
+          "args": ["mcp", "--broker-endpoint", "http://localhost:6650"],
+          "env": {
+            "DANUBE_ADMIN_TOKEN": "optional-jwt-for-secured-clusters"
+          }
+        }
       }
     }
-  }
-}
-```
-
-</TabItem>
-<TabItem label="Cursor">
-
-Add to Cursor's MCP configuration:
-
-```json title="~/.cursor/mcp.json"
-{
-  "mcpServers": {
-    "danube-admin": {
-      "command": "/usr/local/bin/danube-admin",
-      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
-      "env": {
-        "NO_COLOR": "1",
-        "RUST_LOG": "error"
+    ```
+    For secured clusters using TLS, also set `DANUBE_ADMIN_TLS=true` and `DANUBE_ADMIN_CA` (plus `DANUBE_ADMIN_CERT` / `DANUBE_ADMIN_KEY` for mTLS) inside `"env"`.
+  </TabItem>
+  <TabItem label="Streamable HTTP Client">
+    Point remote MCP clients at the HTTP server's `/mcp` endpoint:
+    ```json
+    {
+      "mcpServers": {
+        "danube-remote": {
+          "type": "streamable-http",
+          "url": "http://localhost:8080/mcp",
+          "headers": {
+            "Authorization": "Bearer <YOUR_JWT_TOKEN>"
+          }
+        }
       }
     }
-  }
-}
-```
-
-</TabItem>
-<TabItem label="VS Code">
-
-Add to VS Code's settings or Copilot MCP configuration:
-
-```json title=".vscode/mcp.json"
-{
-  "servers": {
-    "danube-admin": {
-      "type": "stdio",
-      "command": "/usr/local/bin/danube-admin",
-      "args": ["serve", "--mode", "mcp", "--broker-endpoint", "http://localhost:50051"],
-      "env": {
-        "NO_COLOR": "1",
-        "RUST_LOG": "error"
-      }
-    }
-  }
-}
-```
-
-</TabItem>
+    ```
+  </TabItem>
 </Tabs>
 
 ---
 
-## What You Can Do
+## Zero-Config Fallbacks vs Optional `mcp-config.yml`
 
-The MCP server exposes **58 tools** across 8 categories and **4 guided workflow prompts**.
+Out of the box, MCP metrics and logs require no Prometheus instance or container runtime sockets:
 
-<CardGrid>
-  <Card title="Cluster & Brokers" icon="setting">
-    14 tools: broker lifecycle, namespaces, Raft membership, load balancing, and rebalancing.
-  </Card>
-  <Card title="Topics" icon="document">
-    12 tools: topic CRUD, subscriptions, schema binding, validation policies, and failure policies.
-  </Card>
-  <Card title="Schema Registry" icon="puzzle">
-    9 tools: register, evolve, and manage schemas with compatibility checks and subject listing.
-  </Card>
-  <Card title="Security" icon="approve-check">
-    10 tools: RBAC roles and bindings, offline JWT token creation and validation.
-  </Card>
-  <Card title="Diagnostics" icon="warning">
-    3 tools: health check, consumer lag analysis, and prioritized recommendations.
-  </Card>
-  <Card title="Metrics" icon="graph">
-    4 tools: cluster, broker, and topic metrics via Prometheus, plus raw PromQL queries.
-  </Card>
-  <Card title="Logs" icon="list-format">
-    6 tools: broker logs, Docker container logs, and Kubernetes pod logs.
-  </Card>
-</CardGrid>
+* **In-memory Broker Logs (`GetBrokerLogs` RPC)**: If no `deployment` block is configured in `mcp-config.yml`, `get_broker_logs` queries the broker's tracing ring buffer directly over gRPC, supporting `lines` (`1`–`2000`), `level`, `target`, and `contains` filters.
+* **In-memory Telemetry Snapshots (`GetMetricsSnapshot` RPC)**: When Prometheus (`--prometheus-url`, default `http://localhost:9090`) is unavailable or unreachable, `get_cluster_metrics`, `get_broker_metrics`, and `get_topic_metrics` fall back to the broker's 1-hour telemetry ring buffer (sampled every 10 seconds, defaulting to a 300-second window).
 
----
+When you want historical PromQL queries or host-level Docker/Kubernetes container log fetching (`fetch_container_logs`, `fetch_pod_logs`), supply an optional `mcp-config.yml` via `--config /path/to/mcp-config.yml` (or `DANUBE_MCP_CONFIG`):
 
-## Usage Examples
-
-### Everyday Operations
-
-```text
-You: "Show me the cluster health"
-AI:  [Calls health_check, list_brokers, get_cluster_balance]
-     → 3 brokers active, CV 12% (well balanced), 42 topics, no issues
-
-You: "Create a reliable topic for payment events with 4 partitions"
-AI:  [Calls create_topic with name="/default/payment-events", partitions=4, dispatch_strategy="reliable"]
-     → Topic created successfully
-
-You: "What schemas are registered?"
-AI:  [Calls list_subjects]
-     → 5 subjects: user-events (v3), orders (v2), payments (v1), ...
-```
-
-### Guided Workflows
-
-Prompts orchestrate multi-step operations with built-in safety gates:
-
-```text
-You: "I need to rebalance the cluster"
-AI:  [Loads prepare_cluster_rebalance prompt]
-     Step 1: Checks Raft quorum is healthy
-     Step 2: Runs health_check — all brokers active
-     Step 3: Checks CV — 38% (imbalanced, proceed)
-     Step 4: Dry-run — 3 topics would move, shows plan
-     Step 5: "Shall I execute?" — waits for approval
-     Step 6: Executes rebalance
-     Step 7: Verifies CV dropped to 15%
-
-You: "Set up security for our production cluster"
-AI:  [Loads secure_cluster_setup prompt]
-     Step 1: TLS certificate guidance
-     Step 2: Broker configuration
-     Step 3: Creates admin token (offline)
-     Step 4: Creates service account tokens
-     Step 5: Creates roles (producer, consumer, operator)
-     Step 6: Creates bindings at correct scopes
-     Step 7: Verification checklist
-```
-
----
-
-## Guided Workflow Prompts
-
-The 4 prompts encode domain knowledge that matters for safety and correctness:
-
-| Prompt | Arguments | What it does |
-|--------|-----------|-------------|
-| `cluster_health_check` | — | Raft consensus → broker status → load balance → security audit → recommendations |
-| `prepare_cluster_rebalance` | `max_moves` | Quorum check → health gate → CV assessment → dry-run → approval → execute → verify |
-| `manage_schema_evolution` | `subject`, `schema_type` | Discovery → compatibility check → register → verify; encodes subject vs. topic policy rules |
-| `secure_cluster_setup` | `environment` | TLS → JWT → roles → bindings → verify; adapts to development or production |
-
----
-
-## Advanced Configuration
-
-For log access and Prometheus metrics, create a config file:
-
-```yaml title="mcp-config.yml"
-broker_endpoint: http://localhost:50051
-prometheus_url: http://localhost:9090
-
+```yaml title="mcp-config.yml (Docker example)"
+broker_endpoint: "http://localhost:6650"
+prometheus_url: "http://localhost:9090"
 deployment:
-  type: docker    # docker | kubernetes | local
+  type: "docker"
   docker:
-    container_mappings:
-      - id: "broker1"
+    brokers:
+      - id: "broker-1"
         container: "danube-broker1"
-      - id: "broker2"
+      - id: "broker-2"
         container: "danube-broker2"
+      - id: "broker-3"
+        container: "danube-broker3"
 ```
 
-```bash title="Start with config"
-danube-admin serve --mode mcp --config /path/to/mcp-config.yml
-```
+```yaml title="mcp-config.yml (Kubernetes / Local examples)"
+# Kubernetes:
+deployment:
+  type: "kubernetes"
+  kubernetes:
+    namespace: "danube"
+    broker_selector: "app=danube-broker"
 
-:::note
-Metrics tools require Prometheus. Configure `prometheus_url` in the config file.
-Log tools require deployment configuration to map broker IDs to containers or pods.
-:::
+# Local processes reading log files from disk:
+deployment:
+  type: "local"
+  local:
+    log_dir: "./logs"
+    brokers:
+      - id: "broker-1"
+        log_file: "./logs/broker1.log"
+```
 
 ---
 
-## Tips
+## Safety Guardrails (`confirm_destructive: true`)
 
-- **Discovery first**: ask the AI to check state before making changes ("What topics exist?" before deleting)
-- **Use prompts for risky operations**: rebalancing, schema evolution, and security setup have safety gates built in
-- **Dry-run everything**: rebalancing and broker unloads support `dry_run: true` to preview changes
-- **Security tools work offline**: `create_token` and `validate_token` don't need a broker connection
+Destructive or state-disrupting MCP tools reject execution unless the caller explicitly passes `confirm_destructive: true`. This prevents accidental data loss during autonomous debugging or rebalancing.
+
+Tools enforced by `confirm_destructive: true`:
+
+* **Cluster & Namespaces**: `unload_broker` (when `dry_run` is not `true`), `delete_namespace`, `promote_cluster_node`, `remove_cluster_node`, `apply_desired_state` (when `prune: true` and `dry_run` is not `true`)
+* **Topics & Subscriptions**: `delete_topic`, `unsubscribe`, `unload_topic`, `seek_subscription`, `replay_dlq`
+* **Schemas & Security**: `delete_schema_version`, `delete_role`, `delete_binding`
+
+<Aside type="tip">
+Both `trigger_rebalance`, `unload_broker`, and `apply_desired_state` support `dry_run: true`, allowing an AI assistant to inspect the exact impact plan before requesting confirmation.
+</Aside>
 
 ---
 
-## Limitations
+## Complete Tool Catalog (71 Tools)
 
-| The MCP server can | The MCP server cannot |
-|--------|-----------|
-| Read and manage cluster state (brokers, topics, schemas) | Publish or consume messages |
-| Create and configure topics, namespaces, and schemas | Modify broker configuration files |
-| Manage RBAC security (roles, bindings, tokens) | Access data beyond Prometheus retention |
-| Trigger rebalancing and broker maintenance | Execute arbitrary shell commands |
-| Access logs from Docker, Kubernetes, or local brokers | Handle TLS certificate generation |
+### 1. Cluster, Brokers & Configuration (21)
+
+| Tool | Description |
+| :--- | :--- |
+| `list_brokers` | List active brokers, addresses, roles, and statuses |
+| `get_leader` | Return the current cluster leader broker |
+| `get_cluster_balance` | Inspect cluster balance score and per-broker topic counts |
+| `trigger_rebalance` | Run or dry-run automated topic rebalancing |
+| `unload_broker` | Drain topics off a broker (supports `dry_run`, namespace include/exclude) |
+| `activate_broker` | Re-enable a drained/inactive broker for topic assignment |
+| `list_namespaces` | List all namespaces in the cluster |
+| `get_namespace_policies` | Fetch namespace limits and rate policies |
+| `create_namespace` | Create a new namespace |
+| `delete_namespace` | Delete an empty namespace (guarded) |
+| `cluster_status` | Inspect Raft leader, term, voters, learners, and commit index |
+| `add_cluster_node` | Join a new node to the Raft cluster as a learner |
+| `promote_cluster_node` | Promote a Raft learner to voter (guarded) |
+| `remove_cluster_node` | Remove a node from the Raft cluster (guarded) |
+| `configure_object_store` | Configure object-store storage parameters |
+| `cluster_configure_storage` | Switch cluster storage mode (`local`, `shared_fs`, `object_store`) |
+| `cluster_configure_write_buffer` | Enable/disable the distributed write buffer (`ha` or `dev` profile) |
+| `cluster_configure_wal` | Update cluster WAL rotation, cache, flush batch, and retention settings |
+| `cluster_configure_load_manager` | Configure assignment strategy, rebalance profile, cooldowns, and blacklist |
+| `cluster_export_config` | Export effective Raft cluster or broker config as YAML or JSON |
+| `apply_desired_state` | Reconcile a declarative YAML/JSON manifest (`dry_run`, `prune`, `force`) |
+
+### 2. Topics & Failure Policies (18)
+
+| Tool | Description |
+| :--- | :--- |
+| `list_topics` | List topics by namespace or broker |
+| `describe_topic` | Show partitions, dispatch strategy, subscriptions, producers, and consumers |
+| `create_topic` | Create a topic with optional `--intent` profile, partitions, and schema |
+| `delete_topic` | Delete a topic permanently (guarded) |
+| `list_subscriptions` | List subscriptions on a topic |
+| `unsubscribe` | Delete a subscription from a topic (guarded) |
+| `unload_topic` | Unload a topic for reassignment (guarded) |
+| `configure_topic_schema` | Bind a Schema Registry subject and validation policy to a topic |
+| `set_topic_validation_policy` | Update payload validation mode (`none`, `warn`, `enforce`) |
+| `get_topic_schema_config` | Inspect a topic's active schema association and validation config |
+| `peek_messages` | Non-destructively read retained messages (requires `ReadPayload`) |
+| `explain_consumer_stall` | Diagnose why a subscription is stalled (unacked messages, inactive consumers, failure policy, DLQ state) |
+| `infer_topic_schema` | Sample recent JSON payloads and infer a JSON Schema draft (requires `ReadPayload`) |
+| `branch_topic` | Zero-copy branch a topic at head, offset, or nanosecond timestamp |
+| `seek_subscription` | Reset an existing subscription cursor to an offset or timestamp (guarded) |
+| `replay_dlq` | Replay messages from a dead-letter topic back to the source topic (guarded) |
+| `set_subscription_failure_policy` | Set redelivery count, ack timeout, backoff strategy, DLQ topic, and poison policy |
+| `get_subscription_failure_policy` | Inspect a subscription's active failure policy |
+
+### 3. Schema Registry (9)
+
+| Tool | Description |
+| :--- | :--- |
+| `list_subjects` | List all registered Schema Registry subjects |
+| `register_schema` | Register a `json_schema`, `avro`, `protobuf`, `string`, or `bytes` schema |
+| `get_schema` | Fetch the latest schema for a subject |
+| `get_schema_by_id` | Fetch a schema by global ID (and optional version) |
+| `list_schema_versions` | List all registered version numbers for a subject |
+| `check_schema_compatibility` | Validate a candidate schema against a subject's compatibility mode |
+| `get_schema_compatibility_mode` | Inspect a subject's compatibility mode |
+| `set_schema_compatibility_mode` | Set compatibility mode (`none`, `backward`, `forward`, `full`) |
+| `delete_schema_version` | Delete a specific schema version (guarded) |
+
+### 4. Security & RBAC (10)
+
+| Tool | Description |
+| :--- | :--- |
+| `create_role` | Create an RBAC role from permissions |
+| `get_role` | Inspect permissions assigned to a role |
+| `list_roles` | List all RBAC roles |
+| `delete_role` | Delete an RBAC role (guarded) |
+| `create_binding` | Bind roles to a `user` or `service_account` at `cluster`, `namespace`, or `topic` scope |
+| `get_binding` | Inspect a specific RBAC binding |
+| `list_bindings` | List bindings by scope and optional resource |
+| `delete_binding` | Remove an RBAC binding (guarded) |
+| `create_token` | Sign a JWT token using a secret key |
+| `validate_token` | Decode and validate a JWT token |
+
+### 5. Diagnostics (3)
+
+| Tool | Description |
+| :--- | :--- |
+| `health_check` | Aggregate broker, Raft consensus, and topic-balance health check |
+| `analyze_consumer_lag` | Identify backlog and unacked buildup across subscriptions |
+| `get_recommendations` | Surface actionable cluster tuning and operational recommendations |
+
+### 6. Logs (6)
+
+| Tool | Description |
+| :--- | :--- |
+| `get_broker_logs` | Fetch broker logs (uses Docker/K8s/local config if present, otherwise broker gRPC `GetBrokerLogs` ring buffer) |
+| `list_configured_brokers` | Show configured log source targets from `mcp-config.yml` |
+| `list_docker_containers` | List Docker containers when using Docker log discovery |
+| `list_k8s_pods` | List Kubernetes pods matching broker selector |
+| `fetch_container_logs` | Tail logs from a Docker container |
+| `fetch_pod_logs` | Tail logs from a Kubernetes pod |
+
+### 7. Metrics (4)
+
+| Tool | Description |
+| :--- | :--- |
+| `get_cluster_metrics` | Cluster throughput, connections, and latency summary (Prometheus or gRPC `GetMetricsSnapshot` fallback) |
+| `get_broker_metrics` | Per-broker CPU/memory, message rates, and owned topics (Prometheus or gRPC fallback) |
+| `get_topic_metrics` | Topic ingress/egress rates, lag, and storage usage (Prometheus or gRPC fallback) |
+| `query_prometheus` | Execute custom PromQL queries against the configured Prometheus URL |
+
+---
+
+## Guided Prompts & Resources
+
+### Prompts (4)
+
+| Prompt | Arguments | Workflow |
+| :--- | :--- | :--- |
+| `cluster_health_check` | none | End-to-end health assessment across brokers, Raft quorum, lag, and logs |
+| `prepare_cluster_rebalance` | `max_moves` (optional) | Safety audit + dry-run balance check before executing topic moves |
+| `manage_schema_evolution` | `subject`, `schema_type` (optional) | Compatibility check, registration guidance, and topic binding verification |
+| `secure_cluster_setup` | `environment` (optional) | Guided RBAC role/binding planning, TLS posture, and token setup |
+
+### Resources (1)
+
+* `danube://metrics` — **Danube Prometheus Metrics Catalog**: Machine-readable reference of Danube broker/topic metric names, labels, and types so AI assistants can write accurate PromQL queries and interpret telemetry snapshots.

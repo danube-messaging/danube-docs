@@ -5,35 +5,37 @@ description: An overview of Danube Messaging, its design principles, and what ma
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Danube is an open-source messaging platform built in Rust for teams that need reliable pub/sub and streaming without the operational overhead. Built on [Tokio](https://tokio.rs/) and [openraft](https://github.com/databendlabs/openraft), metadata is replicated through embedded Raft consensus, so there are no external dependencies to deploy or manage.
+Danube is an open-source, AI-native messaging and streaming platform built in Rust for teams that need reliable pub/sub, task queuing, and event streaming without operational overhead. Built on [Tokio](https://tokio.rs/) and [openraft](https://github.com/databendlabs/openraft), cluster metadata and shared configuration replicate through embedded Raft consensus—so there are no external coordinators or static broker YAML files to deploy or manage.
 
-Producers publish to **topics**, consumers receive messages via named **subscriptions**. Choose best-effort dispatch for fire-and-forget workloads or persistent dispatch with at-least-once delivery per topic.
+Producers publish to **topics**, and consumers receive messages via named **subscriptions**. Create topics with high-level **Stream Intents** (`realtime`, `event_stream`, `task_queue`, `audit_log`) or configure explicit `NonReliable` and `Reliable` dispatch per topic.
 
 ## Design Principles
 
 <CardGrid>
-	<Card title="Zero Dependencies" icon="puzzle">
-		All cluster metadata is stored in an embedded Raft consensus engine (openraft + redb), built directly into the broker. One self-contained binary is all you deploy.
+	<Card title="Zero Dependencies & Zero YAML" icon="puzzle">
+		Cluster metadata and `/cluster/config/*` policies live inside an embedded Raft engine (`openraft` + `redb`). Client gRPC, Schema Registry, and Admin gRPC multiplex onto a single port (`6650`), so one binary starts a cluster with CLI flags alone.
 	</Card>
-	<Card title="One Binary, Three Modes" icon="setting">
-		Run as **Standalone** for dev, **Cluster** for production, or **Edge** for IoT ingestion, all from the same `danube-broker` binary.
+	<Card title="One Binary, All Modes" icon="setting">
+		Run as **Standalone** for dev, **Cluster** for production (`--node-role broker|lakehouse|all`), **Edge** for MQTT ingestion, **CLI/UI** (`danube ctl`), or **MCP** (`danube mcp`), all from the single `danube` binary.
 	</Card>
 	<Card title="Rust-Native" icon="rocket">
 		Built on Tokio for async I/O. No JVM, no GC pauses, no warm-up time. Predictable latency with a memory footprint measured in megabytes.
 	</Card>
-	<Card title="Cloud-Native Storage" icon="open-book">
-		Local WAL for fast writes with background export to S3, GCS, or Azure Blob via OpenDAL. Topics move between brokers without data loss.
+	<Card title="Built for AI Agents" icon="star">
+		First-class agentic primitives (`extend_lease`, `report_progress`, `cancel_task_tree`, `request_reply`), zero-copy topic branching, schema inference, and a 71-tool MCP server backed by built-in telemetry and log ring buffers.
 	</Card>
 </CardGrid>
 
 ## Core Capabilities
 
-- **Message Delivery**: Topics (partitioned and non-partitioned), best-effort and persistent dispatch with NACK, retry backoff, and dead-letter queues.
+- **Workload Intents & Message Delivery**: Four canonical `--intent` profiles (`realtime`, `event_stream`, `task_queue`, `audit_log`), partitioned and non-partitioned topics, `NonReliable` / `Reliable` dispatch, NACKs, exponential retry backoff, and dead-letter queues.
+- **Agent Runtime Primitives**: Visibility lease extension (`extend_lease`), resumable progress checkpoints (`report_progress` / `x-danube-checkpoint-b64`), tree cancellation (`cancel_task_tree`), and correlated `request_reply` RPC.
+- **Time-Travel & Topic Branching**: Zero-copy `topics branch` at any offset or nanosecond timestamp, subscription `seek`, `peek`, `replay-dlq`, and live `infer-schema`.
 - **Subscriptions**: Exclusive, Shared, Failover, and Key-Shared with per-key ordering via consistent hashing and glob-pattern key filtering.
-- **Persistence**: Local WAL for fast writes, durable segments on shared filesystems or object stores (S3, GCS, Azure). Tiered replay across restarts and broker transfers.
+- **Persistence & Lakehouse**: Local WAL for fast writes, durable segments on shared filesystems or object stores (S3, GCS, Azure), plus optional Apache Iceberg lakehouse export.
 - **Schema Registry**: Built-in schema management with JSON Schema, Avro, and Protobuf. Version control with backward, forward, and full compatibility enforcement.
-- **Security**: TLS/mTLS encryption, JWT and API-key authentication, fine-grained RBAC with default-deny semantics.
-- **AI Administration**: MCP integration for natural language cluster management via Claude, Cursor, and Windsurf. 40+ tools covering topics, schemas, brokers, diagnostics, and metrics.
+- **Security**: Zero-trust `--auth-mode auto-tls`, manual TLS/mTLS encryption, JWT and API-key authentication, and fine-grained RBAC with default-deny semantics.
+- **AI Control Plane (`danube mcp`)**: Native Model Context Protocol server with **71 tools**, **4 guided workflows** (including `explain_consumer_stall`), GitOps `apply_desired_state`, and built-in 1-hour gRPC telemetry/log ring buffers—no Prometheus required.
 - **Danube Connect**: Plug-and-play connector ecosystem with source connectors (MQTT, HTTP webhooks, databases) and sink connectors (Delta Lake, Qdrant, SurrealDB).
 
 ## Client Libraries
@@ -50,6 +52,8 @@ Danube provides first-class client libraries for four languages:
 ## Next Steps
 
 <CardGrid>
-	<LinkCard title="Key Concepts" description="Topics, subscriptions, dispatch strategies, and namespaces." href="/introduction/key-concepts/" />
-	<LinkCard title="Quickstart" description="Start a broker and send your first message in under a minute." href="/getting-started/quickstart/" />
+	<LinkCard title="Key Concepts" description="Topics, subscriptions, stream intents, dispatch strategies, and branching." href="/introduction/key-concepts/" />
+	<LinkCard title="Quickstart" description="Start a single `danube` broker and send your first message in under a minute." href="/getting-started/quickstart/" />
+	<LinkCard title="Configuration Workflow" description="How local node flags, Raft state, GitOps apply, and intents fit together." href="/getting-started/configuration-workflow/" />
+	<LinkCard title="Danube for AI Agents" description="Workload intents, agentic SDK primitives, time-travel branching, and 71-tool MCP operations." href="/ai-agents/overview/" />
 </CardGrid>

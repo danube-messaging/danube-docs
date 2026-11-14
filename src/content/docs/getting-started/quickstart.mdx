@@ -9,7 +9,7 @@ This guide gets you from zero to producing and consuming messages in under a min
 
 ## Prerequisites
 
-Download the latest `danube-broker` and `danube-cli` binaries from the [releases page](https://github.com/danube-messaging/danube/releases), or pull the [container image](https://github.com/danube-messaging/danube/pkgs/container/danube-broker).
+Download the single `danube` binary from the [releases page](https://github.com/danube-messaging/danube/releases) (it includes broker, CLI, admin, and MCP server), or pull the [container image](https://github.com/danube-messaging/danube/pkgs/container/danube).
 
 <Tabs>
 <TabItem label="Binary">
@@ -18,15 +18,15 @@ Download the latest `danube-broker` and `danube-cli` binaries from the [releases
 1. **Start the broker**
 
    ```bash title="Terminal 1"
-   danube-broker --mode standalone --data-dir ./danube-data
+   danube up --mode standalone --data-dir ./danube-data
    ```
 
-   Broker ready on `127.0.0.1:6650`, admin on `127.0.0.1:50051`. No config file needed.
+   Broker ready on `127.0.0.1:6650` (Client gRPC, Schema Registry, and Admin gRPC multiplex on this single port). No YAML config file needed.
 
 2. **Produce messages**
 
    ```bash title="Terminal 2"
-   danube-cli produce \
+   danube ctl produce \
      -s http://127.0.0.1:6650 \
      -t /default/quickstart \
      -c 10 \
@@ -36,10 +36,10 @@ Download the latest `danube-broker` and `danube-cli` binaries from the [releases
 3. **Consume messages**
 
    ```bash title="Terminal 3"
-   danube-cli consume \
+   danube ctl consume \
      -s http://127.0.0.1:6650 \
      -t /default/quickstart \
-     -m my-subscription
+     --subscription my-subscription
    ```
 
    You should see the 10 messages arrive at the consumer.
@@ -52,16 +52,17 @@ Download the latest `danube-broker` and `danube-cli` binaries from the [releases
 1. **Start the broker**
 
    ```bash title="Terminal 1"
-   docker run -p 6650:6650 -p 50051:50051 \
-     ghcr.io/danube-messaging/danube-broker:latest \
-     --mode standalone --data-dir /data \
-     --broker-addr 0.0.0.0:6650 --admin-addr 0.0.0.0:50051
+   docker run -d --name danube \
+     -p 6650:6650 -p 9040:9040 \
+     ghcr.io/danube-messaging/danube:latest \
+     up --mode standalone --data-dir /danube-data \
+     --broker-addr 0.0.0.0:6650 --prom-exporter 0.0.0.0:9040
    ```
 
 2. **Produce messages**
 
    ```bash title="Terminal 2"
-   danube-cli produce \
+   docker exec danube danube ctl produce \
      -s http://127.0.0.1:6650 \
      -t /default/quickstart \
      -c 10 \
@@ -71,10 +72,10 @@ Download the latest `danube-broker` and `danube-cli` binaries from the [releases
 3. **Consume messages**
 
    ```bash title="Terminal 3"
-   danube-cli consume \
+   docker exec danube danube ctl consume \
      -s http://127.0.0.1:6650 \
      -t /default/quickstart \
-     -m my-subscription
+     --subscription my-subscription
    ```
 </Steps>
 
@@ -87,9 +88,19 @@ Data persists across restarts in the `./danube-data` directory. To start fresh, 
 
 ## What Just Happened?
 
-1. The broker started in **standalone mode**, a single-node setup with zero configuration.
-2. `danube-cli produce` created a topic `/default/quickstart` and published 10 messages.
-3. `danube-cli consume` created a subscription `my-subscription` and received the messages via best-effort dispatch.
+1. `danube up --mode standalone` started a single-node broker with zero configuration and multiplexed Client, Schema, and Admin services on port `6650`.
+2. `danube ctl produce` auto-created `/default/quickstart` and published 10 messages.
+3. `danube ctl consume` created a subscription `my-subscription` and received the messages.
+
+:::tip[Create Intent-Driven Durable Topics]
+To enable WAL durability, automatic retry backoff, and dead-letter queues without manually configuring low-level flags, provision topics with `--intent`:
+
+```bash
+danube ctl topics create /default/tasks --intent task_queue
+```
+
+See [Stream Intents](/concepts/stream-intents/) and [Danube for AI Agents](/ai-agents/overview/) for all four workload profiles (`realtime`, `event_stream`, `task_queue`, `audit_log`).
+:::
 
 ## Try With a Client Library
 
@@ -308,6 +319,8 @@ asyncio.run(main())
 
 ## Next Steps
 
-- **[Broker Modes](/getting-started/broker-modes/)**: Learn about Standalone, Cluster, and Edge modes.
-- **[Topics & Partitions](/concepts/topics/)**: Understand how messages are organized.
-- **[Subscriptions](/concepts/subscriptions/)**: Explore Exclusive, Shared, Failover, and Key-Shared patterns.
+- **[Configuration Workflow](/getting-started/configuration-workflow/)**: Learn the 4-layer model for node flags, Raft policies, GitOps apply, and topic intents.
+- **[Broker Modes](/getting-started/broker-modes/)**: Compare `standalone`, `cluster`, and zero-YAML `edge` modes.
+- **[CLI Messaging & Operations](/admin/cli-messaging/)**: Explore `danube ctl` commands for producing, consuming, peeking, branching, and DLQ replay.
+- **[Danube for AI Agents](/ai-agents/overview/)**: Workload intents, agentic primitives, time-travel branching, and the 71-tool `danube mcp` server.
+- **[Topics & Partitions](/concepts/topics/)** and **[Subscriptions](/concepts/subscriptions/)**: Core messaging patterns.

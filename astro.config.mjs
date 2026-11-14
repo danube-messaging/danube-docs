@@ -22,6 +22,7 @@ export default defineConfig({
                     items: [
                         { label: 'What is Danube?', slug: 'introduction/what-is-danube' },
                         { label: 'Key Concepts', slug: 'introduction/key-concepts' },
+                        { label: 'Danube for AI Agents', slug: 'ai-agents/overview' },
                     ],
                 },
                 {
@@ -29,6 +30,7 @@ export default defineConfig({
                     items: [
                         { label: 'Quickstart', slug: 'getting-started/quickstart' },
                         { label: 'Broker Modes', slug: 'getting-started/broker-modes' },
+                        { label: 'Cluster & Topic Configuration', slug: 'getting-started/configuration-workflow' },
                         { label: 'Run Locally', slug: 'getting-started/local' },
                         { label: 'Docker Compose', slug: 'getting-started/docker-compose' },
                         { label: 'Kubernetes', slug: 'getting-started/kubernetes' },
@@ -39,7 +41,8 @@ export default defineConfig({
                     label: 'Concepts',
                     items: [
                         { label: 'Topics & Partitions', slug: 'concepts/topics' },
-                        { label: 'Subscriptions', slug: 'concepts/subscriptions' },
+                        { label: 'Stream Intents & Profiles', slug: 'concepts/stream-intents' },
+                        { label: 'Subscriptions & Failure Policies', slug: 'concepts/subscriptions' },
                         { label: 'Dispatch Strategies', slug: 'concepts/dispatch-strategies' },
                         { label: 'Messages & Schemas', slug: 'concepts/messages' },
                         { label: 'Persistence & Storage', slug: 'concepts/persistence' },
@@ -67,12 +70,6 @@ export default defineConfig({
                     ],
                 },
                 {
-                    label: 'Tools',
-                    items: [
-                        { label: 'Danube CLI', slug: 'tools/danube-cli' },
-                    ],
-                },
-                {
                     label: 'Security',
                     items: [
                         { label: 'Overview', slug: 'security/overview' },
@@ -90,6 +87,7 @@ export default defineConfig({
                         { label: 'AI Admin (MCP)', slug: 'admin/mcp' },
                         { label: 'CLI: Cluster & Brokers', slug: 'admin/cli-cluster' },
                         { label: 'CLI: Resources', slug: 'admin/cli-resources' },
+                        { label: 'CLI: Produce & Consume', slug: 'admin/cli-messaging' },
                     ],
                 },
                 {
@@ -125,9 +123,8 @@ export default defineConfig({
                 {
                     label: 'Reference',
                     items: [
-                        { label: 'Broker Configuration', slug: 'reference/broker-configuration' },
-                        { label: 'Edge Configuration', slug: 'reference/edge-configuration' },
-                        { label: 'Iceberg Configuration', slug: 'reference/iceberg-configuration' },
+                        { label: 'Configuration & CLI Reference', slug: 'reference/broker-configuration' },
+                        { label: 'Lakehouse Configuration', slug: 'reference/iceberg-configuration' },
                     ],
                 },
                 {

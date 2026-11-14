@@ -11,9 +11,9 @@ The **Danube Admin UI** is a modern, responsive web dashboard designed for clust
 
 ## How It Works
 
-The Admin UI is a single-page web application (built with React and Material UI) that runs entirely in your browser. 
+The Admin UI is a single-page web application ([danube-admin-ui](https://github.com/danube-messaging/danube-admin-ui), built with React and Material UI) that runs in your browser.
 
-It communicates over REST/HTTP with the **Danube Admin Server**, a lightweight Rust backend (referred to as the BFF, or Backend-for-Frontend) that acts as a gateway between the UI and your cluster. The Admin Server translates HTTP requests into gRPC calls directed at the active cluster leader broker, and also queries Prometheus for real-time throughput metrics.
+It communicates over REST/HTTP (`/ui/v1/...`) with the **Danube Admin BFF Server**, built directly into the unified `danube` binary (`danube ctl serve --mode ui`). The BFF translates HTTP requests into gRPC calls against your cluster's multiplexed endpoint (default port `6650`) and optionally queries Prometheus for time-series charts.
 
 ---
 
@@ -67,41 +67,33 @@ Manage access control policies for your messaging resources. You can configure c
 
 ---
 
-## Try It Out with Docker Compose
+## Running the BFF with a Docker Compose Cluster
 
-The easiest way to spin up Danube with the Admin Server and Web UI is using Docker Compose. The setup launches **3 Brokers (Raft Consensus)**, a **CLI tool container**, a **Prometheus instance**, the **Admin BFF Server**, and the **Web UI**.
+The unified `docker/docker-compose.yml` boots a 3-broker Raft cluster (`broker1`, `broker2`, `broker3`) from the single `danube` image with **zero mounted YAML config files**, exposing multiplexed data + admin gRPC on ports `6650`, `6651`, and `6652`.
 
 <Steps>
-1. **Create a local directory** for the configuration:
+1. **Start the 3-broker cluster**:
    ```bash
-   mkdir danube-ui-demo && cd danube-ui-demo
-   ```
-
-2. **Download the required files**:
-   Download the Docker Compose file, broker configuration, and Prometheus configuration from the official GitHub repository:
-   ```bash
-   # Download Docker Compose setup
-   wget https://raw.githubusercontent.com/danube-messaging/danube/main/docker/with-ui/docker-compose.yml
-
-   # Download Broker configuration
-   wget https://raw.githubusercontent.com/danube-messaging/danube/main/docker/danube_broker.yml
-
-   # Download Prometheus configuration
-   wget https://raw.githubusercontent.com/danube-messaging/danube/main/docker/prometheus.yml
-   ```
-
-3. **Start the services**:
-   ```bash
+   wget https://raw.githubusercontent.com/danube-messaging/danube/main/docker/docker-compose.yml
    docker compose up -d
    ```
 
-4. **Access the Dashboard**:
-   Once the containers are running, open your web browser and navigate to:
-   * **Admin UI**: [http://localhost:8081](http://localhost:8081)
-   * **Prometheus UI**: [http://localhost:9090](http://localhost:9090)
+2. **Start the Admin BFF server (`danube ctl serve --mode ui`)**:
+   Point the BFF at `broker1` on the multiplexed port `6650` (and pass `--cors-allow-origin` for your frontend origin if serving the React UI separately):
+   ```bash
+   danube ctl serve --mode ui \
+     --listen-addr 0.0.0.0:8080 \
+     --broker-endpoint http://127.0.0.1:6650
+   ```
+   This serves the `/ui/v1/...` REST BFF endpoints as well as the `/mcp` Streamable HTTP endpoint on `http://localhost:8080`. See [Administration Overview](/admin/overview/) for the complete BFF route table and Bearer auth environment variables (`DANUBE_HTTP_TOKEN`, `DANUBE_ADMIN_TOKEN`).
 
-5. **Stop and Clean Up**:
-   When you are done exploring, you can stop the cluster and clean up the volumes:
+3. **Connect the Web UI**:
+   Run or deploy the [Danube Admin UI](https://github.com/danube-messaging/danube-admin-ui) frontend configured against the BFF address (`http://localhost:8080`), or test the BFF health directly:
+   ```bash
+   curl http://localhost:8080/ui/v1/health
+   ```
+
+4. **Stop and Clean Up**:
    ```bash
    docker compose down -v
    ```

@@ -1,18 +1,28 @@
 ---
-title: Iceberg Configuration
-description: Complete reference for danube_iceberg.yaml covering broker connection, object storage, Iceberg catalogs, topic mappings, compaction, and polling.
+title: Lakehouse Configuration Reference
+description: Complete schema for DANUBE_LAKEHOUSE_CONFIG YAML covering broker connection, object storage, Iceberg catalogs, topic mappings, compaction, and polling.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-The Danube Iceberg sidecar is configured with a single YAML file. This page documents every configuration option in `danube_iceberg.yaml`.
+Danube's embedded `LakehouseRuntime` is enabled by pointing the `DANUBE_LAKEHOUSE_CONFIG` environment variable to a YAML file. This page documents the complete `DANUBE_LAKEHOUSE_CONFIG` schema (parsed by `danube-iceberg`) and how to launch it on either co-located nodes (`--node-role all`) or dedicated Lakehouse workers (`--node-role lakehouse`).
 
-```bash title="Running with a config file"
-danube-iceberg --config danube_iceberg.yaml
+```bash title="Running with DANUBE_LAKEHOUSE_CONFIG"
+# Dedicated Lakehouse worker node (auto-registered as drained)
+DANUBE_LAKEHOUSE_CONFIG=./lakehouse.yaml \
+  danube up --data-dir /var/lib/danube-lakehouse --seed-nodes broker1:7650 --join --node-role lakehouse
+
+# Or co-located on a broker node (--node-role all is the default)
+DANUBE_LAKEHOUSE_CONFIG=./lakehouse.yaml \
+  danube up --data-dir /var/lib/danube
 ```
 
+:::note
+`LakehouseRuntime` requires compiling `danube` with `--features danube-broker/lakehouse` (included in the unified `Dockerfile`) or `--features danube-broker/lakehouse-aws` when using AWS Glue or S3 Tables catalogs.
+:::
+
 :::tip
-Values shown below are the defaults from the shipped `config-example.yaml`. At minimum, you must configure `broker.address`, `storage`, and at least one entry in `topics`.
+At minimum, you must configure `broker.address`, `storage`, and at least one entry in `topics`. Unspecified optional sections use the defaults documented below.
 :::
 
 ---
@@ -220,7 +230,7 @@ topics:
 
 ## Polling
 
-Controls how frequently the sidecar checks the cluster for new sealed segments.
+Controls how frequently `LakehouseRuntime` checks the cluster for new sealed segments.
 
 ```yaml title="danube_iceberg.yaml"
 polling:
@@ -285,31 +295,48 @@ polling:
 
 ## Docker
 
-The `danube-iceberg` binary is available as a Docker image target in the project's multi-stage Dockerfile:
+The repository's unified `Dockerfile` compiles `/usr/local/bin/danube` with `--features danube-broker/lakehouse`, so the same image serves both broker nodes and dedicated Lakehouse workers:
 
-```bash title="Build"
-docker build --target iceberg -t danube-iceberg .
+```bash title="Build unified image"
+docker build -t danube .
 ```
 
-```bash title="Run"
-docker run \
-  -v ./danube_iceberg.yaml:/etc/danube_iceberg.yaml:ro \
-  danube-iceberg \
-  --config /etc/danube_iceberg.yaml
+```bash title="Run dedicated Lakehouse worker"
+docker run -d \
+  -e DANUBE_LAKEHOUSE_CONFIG=/etc/danube/lakehouse.yaml \
+  -v ./lakehouse.yaml:/etc/danube/lakehouse.yaml:ro \
+  danube \
+  up \
+  --data-dir /danube-data \
+  --broker-addr 0.0.0.0:6650 \
+  --seed-nodes broker1:7650 \
+  --join \
+  --node-role lakehouse
 ```
 
 ```yaml title="docker-compose.yml"
 services:
-  danube-iceberg:
+  lakehouse-worker:
     build:
       context: .
       dockerfile: Dockerfile
-      target: iceberg
     volumes:
-      - ./danube_iceberg.yaml:/etc/danube_iceberg.yaml:ro
+      - ./lakehouse.yaml:/etc/danube/lakehouse.yaml:ro
+      - lakehouse_data:/danube-data
     environment:
-      - RUST_LOG=danube_iceberg=info
-    command: ["--config", "/etc/danube_iceberg.yaml"]
+      - DANUBE_LAKEHOUSE_CONFIG=/etc/danube/lakehouse.yaml
+      - RUST_LOG=warn,danube_broker=info,danube_iceberg=info
+    command:
+      - up
+      - --data-dir
+      - /danube-data
+      - --broker-addr
+      - 0.0.0.0:6650
+      - --seed-nodes
+      - broker1:7650
+      - --join
+      - --node-role
+      - lakehouse
     depends_on:
       - broker1
 ```
@@ -318,4 +345,5 @@ services:
 
 | Variable | Description |
 |----------|-------------|
-| `RUST_LOG` | Controls log verbosity. Recommended: `danube_iceberg=info` for production, `danube_iceberg=debug` for troubleshooting. |
+| `DANUBE_LAKEHOUSE_CONFIG` | Path to the Lakehouse YAML config file. When set on `--node-role all` or `--node-role lakehouse`, activates the embedded `LakehouseRuntime`; when unset, `LakehouseRuntime` stays in idle standby. |
+| `RUST_LOG` | Controls log verbosity. Include `danube_iceberg=info` (or `danube_iceberg=debug` when troubleshooting). |

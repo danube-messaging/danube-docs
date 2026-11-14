@@ -88,7 +88,7 @@ When a consumer requests an offset that the WAL still has, on disk or in the in-
 Both the WAL and Valkey receive the same writes (double-write). But their retention policies differ:
 
 - The WAL retains files for **hours or days** (controlled by the deleter's time/size retention)
-- Valkey retains only the **last N closed segments** (controlled by `max_cached_closed_segments`)
+- Valkey retains only the **last N closed segments** (set via `--max-cached-segments` in `danube ctl cluster write-buffer enable`, persisted as `max_cached_closed_segments`)
 
 In normal operation, the WAL always has more data than Valkey:
 
@@ -110,7 +110,7 @@ The local WAL deleter only removes a rotated file if its entire offset range has
 
 ### Hot Only (WAL only)
 
-**Config:** No `write_buffer`, no `durable_storage`.
+**Config:** Default local mode (`danube ctl cluster storage local` with `danube ctl cluster write-buffer disable`).
 
 ```
 WAL: [---offsets 0 to 1000---]
@@ -120,7 +120,7 @@ All reads come from the local WAL. Once data is rotated off disk, it is gone. Be
 
 ### Hot + Cold (WAL + S3)
 
-**Config:** `durable_storage` configured, no `write_buffer`.
+**Config:** Durable cloud or shared storage configured (for example `danube ctl cluster storage object-store --backend s3 --root my-bucket/danube --option region=us-east-1`), with the write buffer disabled.
 
 ```
 S3:  [---offsets 0 to 800------]   (exported segments)
@@ -137,7 +137,7 @@ Historical reads are always available. No crash recovery safety net, if the brok
 
 ### Hot + Warm (WAL + Valkey)
 
-**Config:** `write_buffer` configured, no `durable_storage`.
+**Config:** Valkey write buffer enabled (`danube ctl cluster write-buffer enable --endpoints redis://valkey:6379 --profile dev`) while keeping cluster storage in `local` mode (`danube ctl cluster storage local`).
 
 ```
 WAL:    [---offsets 0 to 1000---]   (retaining 24h worth)
@@ -150,7 +150,7 @@ In **normal operation**, the WAL has more data than Valkey, so all reads go to t
 
 ### Hot + Warm + Cold (WAL + Valkey + S3)
 
-**Config:** Both `write_buffer` and `durable_storage` configured. **Full production deployment.**
+**Config:** Both cloud object storage (`danube ctl cluster storage object-store ...`) and the Valkey write buffer (`danube ctl cluster write-buffer enable --endpoints redis://valkey-0:6379,redis://valkey-1:6379 --profile ha`) enabled. **Full production deployment.**
 
 ```
 S3:     [---offsets 0 to 4000---------]   (all exported segments)

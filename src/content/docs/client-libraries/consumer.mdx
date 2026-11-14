@@ -210,10 +210,8 @@ while let Some(message) = stream.recv().await {
     let payload = String::from_utf8_lossy(&message.payload);
     println!("Payload: {}", payload);
 
-    if let Some(attributes) = &message.attributes {
-        for (key, value) in attributes {
-            println!("  {}: {}", key, value);
-        }
+    for (key, value) in &message.attributes {
+        println!("  {}: {}", key, value);
     }
 
     consumer.ack(&message).await?;
@@ -421,6 +419,53 @@ queue = await consumer.receive()
 - Client discovers all partitions automatically
 - Messages from all partitions are merged into a single stream
 - Ordering is preserved per-partition, not cross-partition
+
+---
+
+## Retry & DLQ Interaction with `--intent`
+
+When consuming from a reliable topic created with `--intent`, your subscription automatically inherits retry limits, backoff delays, and poison-message behavior from `/topics/{ns}/{topic}/intent` (stored under `/topics/{ns}/{topic}/subscriptions/{sub}/failure_policy`):
+
+- **`event_stream`** (`3` retries, `500 ms` base delay) and **`task_queue`** (`5` retries, `1000 ms` base delay): after exceeding retries via `nack()` or `ack_timeout_ms`, the broker moves the message to `<topic>-dlq` with diagnostic headers (`x-original-topic`, `x-original-subscription`, `x-failure-reason`, `x-delivery-attempt`) and advances past it.
+- **`audit_log`** (`10` retries, `500 ms` base delay): uses `poison_policy = block`, halting delivery at the unacknowledged slot rather than skipping or moving it to a DLQ.
+
+See [Stream Intents](/concepts/stream-intents/) and [Dispatch Strategies](/concepts/dispatch-strategies/) for inspecting, overriding, or replaying DLQs (`danube ctl topics replay-dlq`).
+
+---
+
+## Agent Lease, Checkpoints, Cancellation & Graceful Close
+
+Long-running workers and AI agent consumers in Rust (`danube-client`) can extend leases mid-flight, checkpoint incremental progress across retries, cancel subtask trees, and shut down cleanly:
+
+```rust title="Extend lease, checkpoint progress, cancel task tree, and close"
+// 1. Extend visibility timeout before ack_timeout_ms expires
+let lease = consumer.extend_lease(&message, 30_000).await?;
+println!("Lease extended={} deadline={}ms", lease.success, lease.new_deadline_ms);
+
+// 2. Save a checkpoint (<= 64 KiB) while extending the lease.
+//    If this delivery is nacked or times out, the redelivered message carries
+//    the checkpoint in message.checkpoint_b64() (attribute x-danube-checkpoint-b64).
+let checkpoint = br#"{"step":3,"cursor":"page-42"}"#.to_vec();
+let progress = consumer.report_progress(&message, checkpoint, 30_000).await?;
+assert!(progress.accepted);
+
+// 3. Abort correlated subtasks sharing x-danube-root-msg-id
+if let Some(root_id) = message.root_msg_id() {
+    let cancel = consumer
+        .cancel_task_tree(
+            "/agents/subtasks",
+            root_id,
+            Some("parent workflow cancelled".to_string()),
+        )
+        .await?;
+    println!("Cancelled descendants: {}", cancel.cancelled);
+}
+
+// 4. Gracefully stop background consumer streams on shutdown
+consumer.close().await;
+```
+
+See [Danube for AI Agents](/ai-agents/overview/) for full task-tree correlation and checkpoint recovery patterns.
 
 ---
 

@@ -3,7 +3,7 @@ title: Danube Messaging
 description: A lightweight, cloud-native messaging platform built in Rust.
 template: splash
 hero:
-  tagline: "Open-source pub/sub and streaming platform built in Rust for reliable messaging without the operational overhead. One self-contained binary with embedded consensus, runs standalone for dev, scale to a cluster, or deploy at the edge."
+  tagline: "AI-native pub/sub, task queuing, and event streaming platform built in Rust without operational overhead. One self-contained binary (`danube`) with zero-YAML startup, embedded Raft consensus, single-port multiplexing, and a 71-tool MCP control plane."
   image:
     dark: ../../assets/Danube_black_square.png
     light: ../../assets/Danube_white_square.png
@@ -11,6 +11,9 @@ hero:
     - text: Get Started
       link: /getting-started/quickstart/
       icon: right-arrow
+    - text: Danube for AI Agents
+      link: /ai-agents/overview/
+      variant: secondary
     - text: View on GitHub
       link: https://github.com/danube-messaging/danube
       icon: external
@@ -21,62 +24,65 @@ import { Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/comp
 
 ## Try Danube
 
-Download the latest binary from the [releases page](https://github.com/danube-messaging/danube/releases) or pull the [container image](https://github.com/danube-messaging/danube/pkgs/container/danube-broker).
+Download the latest `danube` binary from the [releases page](https://github.com/danube-messaging/danube/releases) or pull the [container image](https://github.com/danube-messaging/danube/pkgs/container/danube).
 
 <Tabs>
 	<TabItem label="Standalone">
-		Start a broker and test with the CLI:
+		Start a broker and test with `danube ctl`:
 
 		```bash
-		# Start the broker
-		danube-broker --mode standalone --data-dir ./danube-data
+		# Start the broker (Client gRPC, Schema Registry, and Admin gRPC share port 6650)
+		danube up --mode standalone --data-dir ./danube-data
 
 		# Produce messages
-		danube-cli produce -s http://127.0.0.1:6650 -t /default/demo -c 10 -m "Hello, Danube!"
+		danube ctl produce -s http://127.0.0.1:6650 -t /default/demo -c 10 -m "Hello, Danube!"
 
 		# Consume messages
-		danube-cli consume -s http://127.0.0.1:6650 -t /default/demo -m my_sub
+		danube ctl consume -s http://127.0.0.1:6650 -t /default/demo --subscription my_sub
 		```
 
 		Or run a single broker in a container:
 
 		```bash
-		docker run -p 6650:6650 -p 50051:50051 \
-		  ghcr.io/danube-messaging/danube-broker:latest \
-		  --mode standalone --data-dir /data \
-		  --broker-addr 0.0.0.0:6650 --admin-addr 0.0.0.0:50051
+		docker run -p 6650:6650 -p 9040:9040 \
+		  ghcr.io/danube-messaging/danube:latest \
+		  up --mode standalone --data-dir /data --broker-addr 0.0.0.0:6650
 		```
 	</TabItem>
 	<TabItem label="Cluster">
-		Run the following command on each of your 3 nodes to form a Raft consensus cluster:
+		Start a zero-YAML 3-node Raft consensus cluster directly with CLI flags:
 
 		```bash
-		danube-broker --config-file danube_broker.yml \
+		danube up --mode cluster \
 		  --broker-addr 0.0.0.0:6650 --raft-addr 0.0.0.0:7650 \
-		  --data-dir ./data/raft \
+		  --data-dir ./danube-data \
 		  --seed-nodes "node1:7650,node2:7650,node3:7650"
 		```
 
-		Or use Docker Compose to start a 3-node cluster with Prometheus monitoring:
+		Or launch a local 3-broker cluster using Docker Compose:
 
 		```bash
 		git clone https://github.com/danube-messaging/danube.git
-		cd danube/docker/quickstart
-		docker-compose up -d
+		cd danube/docker
+		docker compose up -d --build
 		```
 
-		Check cluster health:
+		Check cluster health (defaults to `http://127.0.0.1:6650`):
 
 		```bash
-		danube-admin brokers list
-		danube-admin brokers balance
+		danube ctl brokers list
+		danube ctl cluster status
 		```
 	</TabItem>
 	<TabItem label="Edge (IoT)">
-		MQTT gateway for IoT devices at the edge. Validates payloads against schemas, buffers into a local WAL that survives outages, and replicates to your central cluster over gRPC.
+		Zero-YAML MQTT gateway at the edge (`# -> /edge1/ingest` out of the box). Validates payloads, buffers into a local WAL during outages, and replicates to your central cluster over gRPC:
 
 		```bash
-		danube-broker --mode edge --data-dir ./edge-data --edge-config edge.yaml
+		danube up --mode edge \
+		  --edge-name edge1 \
+		  --cloud-endpoint http://cluster:6650 \
+		  --mqtt-addr 0.0.0.0:1883 \
+		  --data-dir ./edge-data
 		```
 	</TabItem>
 </Tabs>
@@ -86,23 +92,23 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 ## Why Danube?
 
 <CardGrid stagger>
-	<Card title="One Binary" icon="setting">
-		Run as **Standalone** for development, **Cluster** for production, or **Edge** for IoT ingestion, all from the same `danube-broker` binary with no external dependencies. [Learn more →](/getting-started/broker-modes/)
+	<Card title="One Binary, Zero YAML" icon="setting">
+		Run as **Standalone**, **Cluster**, **Edge**, or **Admin/MCP** all from the single `danube` binary (`danube up`, `danube ctl`, `danube mcp`) with single-port multiplexing on `6650` and no YAML files required. [Learn more →](/getting-started/broker-modes/)
 	</Card>
-	<Card title="Pub/Sub & Streaming" icon="rocket">
-		Publish to topics, consume via named subscriptions. Use best-effort dispatch for fire-and-forget real-time workloads, or persistent dispatch with WAL-backed at-least-once delivery, acknowledgments, and dead-letter queues. [Learn more →](/concepts/subscriptions/)
+	<Card title="Intent-Driven Pub/Sub & Queuing" icon="rocket">
+		Create topics with declarative workload intents (`realtime`, `event_stream`, `task_queue`, `audit_log`) or explicit `Reliable` / `NonReliable` dispatch, WAL sync, retries, and dead-letter queues. [Learn more →](/concepts/stream-intents/)
 	</Card>
-	<Card title="Resilient Clusters" icon="approve-check">
-		Embedded Raft consensus with automatic leader election, failover and topic reconciliation on restart. Intelligent load manager monitors broker health and rebalances topics to prevent hotspots. Scale horizontally with zero downtime. [Learn more →](/architecture/load-manager/)
+	<Card title="Resilient Raft Clusters" icon="approve-check">
+		Embedded Raft consensus stores cluster policies dynamically in `/cluster/config/*`, automates leader election and topic reconciliation, and balances hotspots with the load manager. [Learn more →](/getting-started/configuration-workflow/)
 	</Card>
-	<Card title="Cloud-Native Storage" icon="open-book">
-		Local WAL for fast writes with background export to S3, GCS, or Azure Blob. Tiered reads serve from cache when possible, falling back to durable segments. Topics move between brokers without data loss. [Learn more →](/durability/overview/)
+	<Card title="Cloud-Native Tiered Storage" icon="open-book">
+		Local WAL for fast writes with background export to S3, GCS, Azure Blob, or shared filesystems, plus zero-copy topic branching and time-travel seeks. [Learn more →](/durability/overview/)
 	</Card>
 	<Card title="Schema Registry" icon="document">
-		Built-in schema management with JSON Schema, Avro, and Protobuf. Version control with backward, forward, and full compatibility enforcement, no separate registry service to deploy. [Learn more →](/architecture/schema-registry/)
+		Built-in schema management with JSON Schema, Avro, and Protobuf, live schema inference (`topics infer-schema`), and backward, forward, and full compatibility enforcement. [Learn more →](/architecture/schema-registry/)
 	</Card>
-	<Card title="AI-Native Admin" icon="star">
-		Manage your cluster with natural language via the Model Context Protocol. 58 tools and 4 guided workflows covering health checks, schema evolution, security setup, and rebalancing through Claude Code, Antigravity, Cursor, or any MCP-compatible assistant. [Learn more →](/admin/mcp/)
+	<Card title="AI-Native Control Plane" icon="star">
+		Operate and debug clusters via `danube mcp`: **71 tools**, **4 guided workflows** (including `explain_consumer_stall`), declarative `apply_desired_state` with `dry_run` guardrails, and built-in 1-hour telemetry and log ring buffers—no Prometheus required. [Learn more →](/admin/mcp/)
 	</Card>
 </CardGrid>
 
@@ -112,22 +118,32 @@ Download the latest binary from the [releases page](https://github.com/danube-me
 
 <CardGrid>
 	<LinkCard
+		title="Danube for AI Agents"
+		description="Workload intents, agent runtime primitives (extend_lease, report_progress, cancel_task_tree, request_reply), zero-copy branching, and MCP operations."
+		href="/ai-agents/overview/"
+	/>
+	<LinkCard
+		title="Configuration Workflow"
+		description="Clean 4-layer configuration: local node flags, Raft cluster state, GitOps apply, intent-driven topics, and break-glass recovery."
+		href="/getting-started/configuration-workflow/"
+	/>
+	<LinkCard
 		title="Client Libraries"
-		description="Rust, Go, Java, and Python SDKs with producer, consumer, and schema registry examples."
+		description="Rust, Go, Java, and Python SDKs with producer, consumer, agentic primitives, and schema registry examples."
 		href="/client-libraries/overview/"
 	/>
 	<LinkCard
 		title="Security"
-		description="TLS/mTLS encryption, JWT authentication, and fine-grained RBAC with default-deny semantics."
+		description="Zero-trust auto-TLS, manual TLS/mTLS encryption, JWT authentication, and fine-grained RBAC with default-deny semantics."
 		href="/security/overview/"
 	/>
 	<LinkCard
 		title="Edge & IoT"
-		description="MQTT gateway with schema validation at the edge, WAL-buffered replication to the central cluster."
+		description="Zero-YAML MQTT gateway with schema validation at the edge and WAL-buffered replication to the central cluster."
 		href="/edge/overview/"
 	/>
 	<LinkCard
-		title="Danube Iceberg"
+		title="Lakehouse Export"
 		description="Continuously export streaming data to Apache Iceberg tables, queryable by Spark, Trino, DuckDB, and any Iceberg-compatible engine."
 		href="/lakehouse/overview/"
 	/>

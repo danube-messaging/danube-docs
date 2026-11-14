@@ -1,82 +1,148 @@
 ---
 title: Persistence & Storage
-description: High-level overview of how Danube persists messages using tiered storage across local WAL, Valkey, and cloud storage.
+description: High-level overview of how Danube persists messages using zero-YAML tiered storage across local WAL, Valkey, and cloud storage, plus Copy-on-Write topic branching.
 ---
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Reliable topics persist messages so consumers can replay history and topics can move between brokers without losing data. Non-reliable topics bypass storage entirely.
+Reliable topics persist messages so consumers can replay history, recover cleanly across crashes, and migrate between brokers without losing offsets. Non-reliable topics bypass storage entirely.
 
 ---
 
 ## Storage Architecture
 
-Danube's persistence is built on three independent storage tiers:
+Danube's persistence is built on three independent storage tiers configured cleanly without broker YAML files:
 
 <CardGrid>
   <Card title="Hot: Local WAL" icon="rocket">
-    Every message is appended to a local Write-Ahead Log (WAL) on the broker's disk and assigned a monotonic offset. This is the fast path for all writes and real-time reads.
+    Every reliable message is appended to a per-topic local Write-Ahead Log (WAL) and assigned a monotonic offset. Set the per-node staging path with `--wal-dir` at startup.
   </Card>
   <Card title="Warm: Valkey" icon="star">
-    Optional. Messages are double-written to Valkey Redis Streams for crash recovery. If the broker is lost, the new broker replays buffered messages from Valkey into a fresh WAL.
+    Optional. Messages are mirrored to Valkey Redis Streams for fast broker crash recovery. Managed dynamically via `danube ctl cluster write-buffer`.
   </Card>
   <Card title="Cold: Cloud Storage" icon="open-book">
-    Optional. A background exporter uploads sealed WAL segments to cloud object storage (S3, GCS, Azure Blob) as immutable segment objects for long-term archival and historical replay.
+    Optional. Background exporters upload sealed WAL segments to shared filesystems (`shared_fs`) or cloud object storage (`object_store`: S3, GCS, Azure Blob) for long-term archival and replay.
   </Card>
 </CardGrid>
 
-Each tier is independent and opt-in. You can run any combination depending on your durability and retention requirements.
+---
+
+## Zero-YAML Node & Cluster Storage Configuration
+
+Danube configures persistence without static broker config files, splitting **node-local disk placement** from **cluster-wide storage policy**:
+
+1. **Per-node local WAL directory (`--wal-dir`)**: Pass `--wal-dir /mnt/nvme-wal` to `danube up` when starting a broker to place WAL segments on dedicated NVMe/SSD storage separate from `--data-dir` Raft metadata.
+2. **Cluster-wide durable backend (`danube ctl cluster storage`)**: Stored in Raft and applied dynamically across brokers without restarts.
+3. **Cluster-wide WAL & retention defaults (`danube ctl cluster wal`)**: Tunes retention windows, segment rotation, in-memory cache capacity, and group-commit flush intervals live.
+4. **Warm write buffer (`danube ctl cluster write-buffer`)**: Enables or disables Valkey double-writing (`ha` or `dev` profile) across the cluster at runtime.
+
+```bash title="Start node with NVMe WAL and configure cluster storage live"
+# Start broker with dedicated local WAL directory
+danube up --mode cluster --data-dir /var/lib/danube/meta --wal-dir /mnt/nvme-wal
+
+# Configure shared durable storage backend live via Raft
+danube ctl cluster storage status
+danube ctl cluster storage shared-fs --root /mnt/danube-segments
+danube ctl cluster storage object-store \
+  --backend s3 \
+  --root s3://danube-archive/prod \
+  --option region=us-east-1
+
+# Switch back to local WAL-only mode when desired
+danube ctl cluster storage local
+
+# Tune WAL retention, segment rotation, cache, and group-commit batching
+danube ctl cluster wal \
+  --retention-time-minutes 1440 \
+  --retention-size-mb 10240 \
+  --rotate-max-bytes 67108864 \
+  --flush-interval-ms 5 \
+  --flush-max-batch-bytes 1048576
+
+# Configure optional Valkey warm write buffer
+danube ctl cluster write-buffer enable --endpoints valkey://valkey-1:6379 --profile ha
+```
 
 ---
 
-## Storage Modes
+## Cluster Modes & Per-Topic Storage Overrides
 
-The `storage.mode` setting controls where sealed WAL segments are exported:
+### Cluster Durable Storage Modes
 
-| Mode | Durable Storage | Use Case |
-|------|----------------|----------|
-| `local` | Local filesystem only | Single-node, development, edge |
-| `shared_fs` | Shared filesystem (NFS, EFS) | On-prem multi-broker clusters |
-| `object_store` | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native multi-broker deployments |
+| Mode | Durable Backend | Use Case |
+|------|-----------------|----------|
+| **`local`** | Local WAL filesystem only | Single-node, development, edge |
+| **`shared_fs`** | Shared POSIX filesystem (NFS, EFS) | On-prem multi-broker clusters |
+| **`object_store`** | Cloud object storage (`s3`, `gcs`, `azblob`, `filesystem`) | Cloud-native multi-broker deployments |
 
-In all modes, the local WAL handles recent writes. In `shared_fs` and `object_store` modes, a background exporter continuously publishes sealed segments to durable storage for historical replay and cross-broker availability.
+### Per-Topic Storage Mode (`topics storage-mode`)
+
+Individual topics can opt into or out of cloud segment tiering without changing cluster-wide defaults:
+
+```bash title="Override storage tiering for a specific topic"
+# Enable cloud segment tiering for a specific topic (requires shared_fs or object_store backend)
+danube ctl topics storage-mode /default/orders --mode cloud_tiered
+
+# Keep a high-churn topic on local WAL only (pass --force if downgrading an existing tiered topic)
+danube ctl topics storage-mode /default/scratch --mode local --force
+```
+
+### Per-Topic WAL Sync Modes
+
+Durable topics also honor a per-topic `WalSyncMode` set via `--intent` (see [Stream Intents & Workload Profiles](/concepts/stream-intents/)):
+
+- **`os_cache_flush`** (`event_stream`, default): Group-commit `BufWriter::flush()` to OS page cache before write acknowledgment; survives broker process crashes with sub-millisecond latency.
+- **`fsync_batch`** (`task_queue`, `audit_log`): Group-commit flush + batched `fdatasync` (`file.sync_data()`) before acknowledgment; survives host power loss.
+- **`async`**: Buffered periodic background flush (`realtime` selects `NonReliable` and bypasses the WAL completely).
 
 ---
 
-## Write Path
+## Write & Read Paths
 
-1. The broker appends the message to the local WAL and assigns the next topic offset
-2. If Valkey is configured, the message is simultaneously written to a Redis Stream with replica confirmation
-3. The message is published into the in-memory cache and live reader stream
-4. Asynchronously, sealed WAL files are exported to cloud storage (in `shared_fs` and `object_store` modes)
+### Write Path
+
+1. The broker appends the message to the local WAL according to its topic `WalSyncMode` and assigns the next monotonic `topic_offset`.
+2. If Valkey is enabled, the message is mirrored to a warm Redis Stream buffer.
+3. The message enters the WAL in-memory broadcast cache for zero-copy live delivery.
+4. In `shared_fs` or `object_store` modes, a background exporter uploads sealed WAL segments to durable storage asynchronously.
 
 :::note
-The offset is assigned before durable export and before reader delivery. This offset becomes the stable identity of the message for the rest of its lifetime.
+Offsets are assigned before durable export and before reader delivery, giving every message an immutable identity across its lifetime.
 :::
+
+### Read Path
+
+When consumers read from a reliable topic, the broker transparently stitches tiers covering non-overlapping offset ranges:
+
+- **Live tail consumers** read directly from the WAL broadcast stream.
+- **Historical / rewound consumers** stream seamlessly across **Cold (durable segments) → Warm (Valkey) → Hot (local WAL)** before joining the live tail.
 
 ---
 
-## Read Path
+## Topic Branching (Copy-on-Write)
 
-When a consumer reads from a topic, the broker serves data from the tier closest to the source:
+`danube ctl topics branch` creates an independent topic fork from a source topic up to a chosen offset or publish timestamp:
 
-- **Live tail consumers** read directly from the WAL's in-memory broadcast stream with zero overhead
-- **Historical consumers** receive a stitched stream: Cold (cloud storage) → Warm (Valkey) → Hot (WAL), with each tier covering a non-overlapping offset range
+```bash title="Branch a topic for replay, experiments, or debugging"
+# Branch up to a specific inclusive offset
+danube ctl topics branch /default/orders /default/orders-exp --at-offset 5000
 
-The local WAL always takes precedence for data it still holds. Valkey and cloud storage are only consulted for offsets that have been rotated out of the WAL.
+# Or branch up to a publish timestamp (nanoseconds since epoch)
+danube ctl topics branch /default/orders /default/orders-exp --at-timestamp-ns 1763150400000000000
+```
+
+Sealed cloud segments (`shared_fs` / `object_store`) are referenced **Copy-on-Write** via metadata descriptors rather than physically copied byte-for-byte, while recent tail messages still sitting only in local WAL are bounded and copied up to the resolved offset. Both the parent and branched topics can then diverge independently.
 
 ---
 
 ## Topic Moves
 
-When a topic moves between brokers (e.g., during rebalancing), offset continuity is preserved:
+When the Load Manager moves a topic between brokers, offset continuity is preserved cleanly:
 
-1. The old broker **seals** the topic and records the last committed offset
-2. The new broker **resumes** from `last_committed_offset + 1`
+1. The previous owner **seals** the topic and records the last committed offset.
+2. The new owner initializes local storage using the topic's persisted `/topics/{ns}/{topic}/intent` (`wal_sync_mode`) and `/topics/{ns}/{topic}/storage_mode`, and **resumes** writes at `last_committed_offset + 1`.
 
-In `shared_fs` and `object_store` modes, historical reads on the new broker are served from durable segments. In `local` mode, only the offset sequence is preserved, there is no shared durable backend.
-
-For the full protocol, see [Reliable Topic Move](/architecture/reliable-topic-move/).
+For the full handover protocol, see [Reliable Topic Move](/architecture/reliable-topic-move/).
 
 ---
 
@@ -85,22 +151,22 @@ For the full protocol, see [Reliable Topic Move](/architecture/reliable-topic-mo
 <CardGrid>
   <LinkCard
     title="Durability & Storage Overview"
-    description="Why Danube uses stateless brokers with external durability, and how it compares to other platforms."
+    description="Why Danube separates broker compute from external durability tiers."
     href="/durability/overview/"
   />
   <LinkCard
     title="Tiered Storage"
-    description="How the read and write paths work across Hot, Warm, and Cold tiers with invariants and examples."
+    description="How Hot WAL, Warm Valkey, and Cold segment tiers work together."
     href="/durability/tiered-storage/"
   />
   <LinkCard
-    title="Configuration Guide"
-    description="Practical YAML examples for storage modes, Valkey write buffer, and cloud backends."
-    href="/durability/configuration/"
+    title="Broker Configuration Reference"
+    description="Zero-YAML startup flags, runtime CLI controls, and Raft state paths."
+    href="/reference/broker-configuration/"
   />
   <LinkCard
     title="Crash Recovery"
-    description="What happens when a broker is lost and how each tier protects against data loss."
+    description="How each tier protects against broker crashes and restores topics."
     href="/durability/crash-recovery/"
   />
 </CardGrid>

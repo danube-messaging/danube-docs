@@ -1,104 +1,173 @@
 ---
 title: Administration Overview
-description: Three ways to manage your Danube cluster — CLI, AI-native MCP, and HTTP API.
+description: Manage your Danube cluster from a single unified binary — CLI, declarative manifests, AI-native MCP, and HTTP BFF for the Admin UI.
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-`danube-admin` is a single binary that provides three interfaces for managing your Danube cluster. All three share the same core functionality.
+Danube ships all broker, messaging, administration, and AI tooling inside **one unified binary**: `danube`. Instead of installing separate broker, messaging CLI, and admin binaries, every command shares the same gRPC client, security stack, and single-port protocol multiplexing.
+
+## Binary Entrypoints
+
+| Command | Purpose |
+| :--- | :--- |
+| `danube up` (or bare `danube`) | Start a Danube broker node (standalone or Raft cluster) |
+| `danube ctl` | Admin CLI, declarative `apply`, and data-plane `produce` / `consume` |
+| `danube mcp` | Start the MCP server in `stdio` mode for AI coding assistants |
+| `danube ctl serve --mode ui\|mcp\|all` | Run the HTTP BFF + `/mcp` Streamable HTTP server, `stdio` MCP, or both |
 
 ## Management Interfaces
 
 <CardGrid>
-	<Card title="CLI Mode" icon="seti:shell">
-		Command-line interface for scripts, automation, and quick operations.
+	<Card title="CLI: Cluster & Resources" icon="seti:shell">
+		Imperative operations and declarative GitOps-style `danube ctl apply` for cluster storage, WAL, load manager, brokers, namespaces, topics, schemas, and RBAC.
 
 		```bash
-		danube-admin brokers list
+		danube ctl brokers list
+		danube ctl cluster status
 		```
 
-		[CLI Reference →](/admin/cli-cluster/)
+		[Cluster CLI →](/admin/cli-cluster/) · [Resources CLI →](/admin/cli-resources/)
+	</Card>
+	<Card title="CLI: Produce & Consume" icon="rocket">
+		Publish and consume messages directly from the terminal with Key-Shared routing filters, schema registration/validation, and JSONL output.
+
+		```bash
+		danube ctl produce -t /default/events -m "hello"
+		danube ctl consume -t /default/events --subscription sub1
+		```
+
+		[Messaging CLI →](/admin/cli-messaging/)
 	</Card>
 	<Card title="AI Admin (MCP)" icon="seti:robot">
-		Natural language cluster management through Claude Code, Antigravity, Cursor, or VS Code.
-
-		[MCP Guide →](/admin/mcp/)
-	</Card>
-	<Card title="HTTP Server" icon="seti:json">
-		REST API for the Danube Admin UI and custom dashboards.
+		71 MCP tools, 4 guided prompts, and a Prometheus metrics resource for Claude Code, Antigravity, Cursor, and VS Code over `stdio` or Streamable HTTP.
 
 		```bash
-		danube-admin serve --mode http --port 8080
+		danube mcp --broker-endpoint http://127.0.0.1:6650
 		```
+
+		[MCP Guide →](/admin/mcp/) · [Danube for AI Agents →](/ai-agents/overview/)
+	</Card>
+	<Card title="HTTP BFF & Admin UI" icon="seti:json">
+		REST Backend-for-Frontend (`/ui/v1/...`) and Streamable HTTP `/mcp` server powering the Danube Admin UI and custom automation.
+
+		```bash
+		danube ctl serve --mode ui --listen-addr 0.0.0.0:8080 --broker-endpoint http://127.0.0.1:6650
+		```
+
+		[Admin Dashboard UI →](/admin/admin-ui/)
 	</Card>
 </CardGrid>
 
 ---
 
-## Installation
+## Single-Port gRPC Multiplexing
 
-```bash title="Linux"
-curl -L -o danube-admin https://github.com/danube-messaging/danube/releases/latest/download/danube-admin-linux
-chmod +x danube-admin
-sudo mv danube-admin /usr/local/bin/
-```
+By default, Danube brokers multiplex **client data-plane gRPC and admin control-plane gRPC on port `6650`**. You do not need to open or configure a separate admin port unless you intentionally pass `--admin-addr` to `danube up` to isolate admin traffic onto a dedicated listener.
 
-```bash title="macOS (Apple Silicon)"
-curl -L -o danube-admin https://github.com/danube-messaging/danube/releases/latest/download/danube-admin-macos
-chmod +x danube-admin
-sudo mv danube-admin /usr/local/bin/
-```
+When TLS is enabled (`--auth-mode tls` or `--auth-mode auto-tls`), admin gRPC automatically shares the broker TLS configuration on the multiplexed listener.
 
-```bash title="Docker"
-docker pull ghcr.io/danube-messaging/danube-admin:latest
-```
+---
 
-```bash title="Verify"
-danube-admin --version
+## Getting the `danube` Binary
+
+* **Pre-built releases**: Download the `danube` binary from the [Danube GitHub Releases](https://github.com/danube-messaging/danube/releases) page.
+* **Docker**: Every Danube image bundles `/usr/local/bin/danube`, so you can run `docker exec danube-broker1 danube ctl ...` without extra containers.
+* **From source**: `cargo build --release --bin danube` (add `--features danube-broker/lakehouse` if building with Iceberg lakehouse support).
+
+Verify your installation:
+
+```bash
+danube --version
+danube ctl --help
 ```
 
 ---
 
-## Configuration
+## Configuration & Authentication (`danube ctl`)
 
-```bash title="Environment variables"
-# Broker admin endpoint (required)
-export DANUBE_BROKER_ENDPOINT=http://localhost:50051
+Control-plane subcommands (`cluster`, `brokers`, `namespaces`, `topics`, `schemas`, `security`, `apply`) accept `--endpoint` and the `DANUBE_ADMIN_*` environment variables:
 
-# Optional defaults
-export DANUBE_NAMESPACE=default
-export DANUBE_OUTPUT_FORMAT=json
+| Environment Variable | Flag Equivalent | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `DANUBE_ADMIN_ENDPOINT` | `--endpoint` (or `--broker-endpoint` on `serve`/`mcp`) | `http://127.0.0.1:6650` | Broker admin gRPC URL |
+| `DANUBE_ADMIN_TLS` | `--grpc-enable-tls` (`serve`/`mcp`) | `false` | Enable TLS for admin gRPC connections |
+| `DANUBE_ADMIN_CA` | `--grpc-ca` (`serve`/`mcp`) | — | CA certificate PEM path |
+| `DANUBE_ADMIN_CERT` | `--grpc-cert` (`serve`/`mcp`) | — | Client certificate PEM path (for mTLS) |
+| `DANUBE_ADMIN_KEY` | `--grpc-key` (`serve`/`mcp`) | — | Client private key PEM path (for mTLS) |
+| `DANUBE_ADMIN_DOMAIN` | `--grpc-domain` (`serve`/`mcp`) | `localhost` | TLS SNI server name verification override |
+| `DANUBE_ADMIN_TOKEN` | — | — | JWT Bearer token for admin gRPC authentication |
+
+```bash title="Configure shell environment for a secured cluster"
+export DANUBE_ADMIN_ENDPOINT=https://127.0.0.1:6650
+export DANUBE_ADMIN_TLS=true
+export DANUBE_ADMIN_CA=./danube-data/tls/ca.pem
+export DANUBE_ADMIN_TOKEN="$(cat ./danube-data/bootstrap_admin.token)"
+
+danube ctl brokers list
+danube ctl cluster status
 ```
 
-```bash title="Command-line flags"
-# Override endpoint per command
-danube-admin --broker-endpoint http://broker1:50051 brokers list
-
-# JSON output for scripting
-danube-admin brokers list --output json
-```
+Data-plane commands (`danube ctl produce` and `danube ctl consume`) use `DANUBE_SERVICE_ADDR`, `DANUBE_TLS`, `DANUBE_CA`, `DANUBE_CERT`, `DANUBE_KEY`, and `DANUBE_TOKEN` — see [CLI: Produce & Consume](/admin/cli-messaging/).
 
 ---
 
-## HTTP Server Mode
+## HTTP BFF Server (`danube ctl serve`)
 
-The HTTP server mode exposes a REST API that powers the [Danube Admin UI](https://github.com/danube-messaging/danube-admin-ui).
+`danube ctl serve` runs an Axum HTTP server (`--mode ui` or `--mode all`) exposing both the Admin UI REST BFF under `/ui/v1/...` and the Streamable HTTP MCP transport at `/mcp`:
 
-```bash title="Start the HTTP server"
-danube-admin serve --mode http --port 8080 \
-  --broker-endpoint http://localhost:50051
+```bash title="Start the HTTP BFF server"
+danube ctl serve --mode ui \
+  --listen-addr 0.0.0.0:8080 \
+  --broker-endpoint http://127.0.0.1:6650 \
+  --prometheus-url http://127.0.0.1:9090
 ```
 
-```bash title="Example API usage"
-# List brokers
-curl http://localhost:8080/api/brokers
+### Common `serve` Flags
 
-# Create topic
-curl -X POST http://localhost:8080/api/topics \
-  -H "Content-Type: application/json" \
-  -d '{"name": "/default/events", "partitions": 4}'
+| Flag | Env Var | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--mode` | `DANUBE_ADMIN_MODE` | `ui` | Server mode: `ui` (HTTP BFF + `/mcp`), `mcp` (`stdio`), or `all` (both) |
+| `--listen-addr` | `DANUBE_ADMIN_LISTEN_ADDR` | `0.0.0.0:8080` | HTTP bind address (`ui` and `all` modes) |
+| `--broker-endpoint` | `DANUBE_ADMIN_ENDPOINT` | `http://127.0.0.1:6650` | Target broker gRPC endpoint |
+| `--prometheus-url` | — | `http://localhost:9090` | Optional Prometheus URL for metrics charts |
+| `--config` | `DANUBE_MCP_CONFIG` | — | Optional `mcp-config.yml` for Docker/Kubernetes log integration |
+| `--cors-allow-origin` | — | — | Allowed CORS origin(s) for browser dashboards |
+| `--request-timeout-ms` | — | `5000` | Upstream broker gRPC request timeout |
 
-# Get cluster balance
-curl http://localhost:8080/api/cluster/balance
+When `DANUBE_HTTP_TOKEN` (or `DANUBE_ADMIN_TOKEN`) is set, or `DANUBE_HTTP_REQUIRE_AUTH=true` is configured, all HTTP routes except `/ui/v1/health` require an `Authorization: Bearer <token>` header.
+
+### Implemented HTTP Routes
+
+| Endpoint | Method | Purpose |
+| :--- | :--- | :--- |
+| `/ui/v1/health` | `GET` | Health and readiness check (exempt from Bearer auth) |
+| `/ui/v1/cluster` | `GET` | Cluster summary, active brokers, and Raft state |
+| `/ui/v1/cluster/actions` | `POST` | Cluster/broker actions (`unload`, `activate`) |
+| `/ui/v1/cluster/balance` | `GET` | Cluster load-balance score and per-broker distribution |
+| `/ui/v1/cluster/rebalance` | `POST` | Trigger manual or dry-run topic rebalance |
+| `/ui/v1/cluster/raft` | `GET` | Raft cluster membership and leader status |
+| `/ui/v1/cluster/raft/actions` | `POST` | Raft node lifecycle (`add_node`, `promote_node`, `remove_node`) |
+| `/ui/v1/brokers/{broker_id}` | `GET` | Broker details and owned topics |
+| `/ui/v1/namespaces` | `GET` | Namespaces and namespace policies |
+| `/ui/v1/topics` | `GET` | Cluster topic list |
+| `/ui/v1/topics/{topic}` | `GET` | Topic metadata, subscriptions, producers, and consumers |
+| `/ui/v1/topics/{topic}/series` | `GET` | Topic metrics time series |
+| `/ui/v1/topics/actions` | `POST` | Topic operations (`create`, `delete`, `unload`, `unsubscribe`, schema config) |
+| `/ui/v1/schemas` | `GET` | List registered Schema Registry subjects |
+| `/ui/v1/schemas/{subject}` | `GET` | Schema subject details, versions, and compatibility |
+| `/ui/v1/schemas/actions` | `POST` | Schema Registry mutations (`register`, `set_compatibility`, `delete_version`) |
+| `/ui/v1/security/roles` | `GET` | List RBAC roles |
+| `/ui/v1/security/roles/actions` | `POST` | Create or delete RBAC roles |
+| `/ui/v1/security/bindings` | `GET` | List RBAC bindings |
+| `/ui/v1/security/bindings/actions` | `POST` | Create or delete RBAC bindings |
+| `/mcp` | `POST` | Streamable HTTP Model Context Protocol (MCP) endpoint |
+
+```bash title="Example BFF API requests"
+# Health check
+curl http://localhost:8080/ui/v1/health
+
+# Cluster summary & Raft state
+curl http://localhost:8080/ui/v1/cluster
+curl http://localhost:8080/ui/v1/cluster/balance
 ```
-

@@ -1,26 +1,33 @@
 ---
 title: AI Agent Testing
-description: Test Danube features using AI-powered coding assistants — zero manual setup, structured scenarios, fully automated infrastructure.
+description: Test and operate Danube using AI-powered coding assistants—either via danube-agent-skills workflows or Danube's built-in 71-tool MCP server.
 ---
 
-import { Steps, Card, CardGrid } from '@astrojs/starlight/components';
+import { Steps, Card, CardGrid, Aside } from '@astrojs/starlight/components';
 
-The [Danube Agent Skills](https://github.com/danube-messaging/danube-agent-skills) repository lets you test Danube using AI coding assistants. Describe what you want to test in plain English, and the AI sets up infrastructure, runs the test, and reports results, no manual configuration needed.
+Danube provides two complementary ways to test, explore, and operate clusters with AI coding assistants (Claude Code, Antigravity, Cursor, Codex, Windsurf):
 
-## How It Works
+1. **[Danube Agent Skills (`danube-agent-skills`)](https://github.com/danube-messaging/danube-agent-skills)**: Automated end-to-end test workflows driven from natural-language prompts.
+2. **Built-in AI Control Plane (`danube mcp`)**: A native Model Context Protocol server embedded directly in the `danube` binary with **71 tools**, **4 guided diagnostic workflows**, and zero-dependency telemetry/log ring buffers.
 
-Open the repository in an AI-powered IDE (Claude Code, Cursor, Windsurf, VS Code + Copilot, or any agent that reads `SKILL.md` files), type a prompt, and the AI handles everything:
+---
 
-- Downloads binaries from GitHub Releases
-- Generates broker configs from templates
-- Starts brokers, forms clusters, creates namespaces
-- Installs client libraries as needed
-- Runs the test scenario step by step
-- Reports pass/fail results
+## Automated Testing with `danube-agent-skills`
 
-Each test run creates an isolated directory with all configs, logs, and data. Nothing is shared between runs.
+The [Danube Agent Skills](https://github.com/danube-messaging/danube-agent-skills) repository lets an AI assistant bootstrap clusters, install SDK dependencies, run test scenarios, and verify pass/fail results automatically.
 
-## Quick Start
+### How It Works
+
+Open the repository in an AI assistant that supports `SKILL.md` workflows, describe what you want to test in plain English, and the assistant handles the lifecycle:
+
+- Installs or builds the single `danube` binary
+- Launches standalone, zero-YAML cluster (`danube up`), or zero-YAML edge (`danube up --mode edge`) topologies with single-port multiplexing on `6650`
+- Configures dynamic Raft policies (`danube ctl cluster ...` or `danube ctl apply`) and `--intent` topics (`realtime`, `event_stream`, `task_queue`, `audit_log`)
+- Runs client/SDK tests and inspects results, reporting pass/fail outcomes
+
+Each run uses an isolated workspace directory so nothing leaks between scenarios.
+
+### Quick Start
 
 <Steps>
 1. **Clone the repository**
@@ -32,93 +39,97 @@ Each test run creates an isolated directory with all configs, logs, and data. No
 
 2. **Open in your AI IDE**
 
-   Open the `danube-agent-skills` folder in your preferred AI-powered editor or terminal.
+   Open the `danube-agent-skills` folder in Claude Code, Antigravity, Cursor, Codex, or another `SKILL.md`-capable assistant.
 
 3. **Tell the AI what to test**
 
-   Type a prompt like:
+   Type a prompt such as:
 
-   > *"I want to test reliable delivery with NACK redelivery"*
+   > *"Test reliable task_queue delivery with NACK redelivery and dead-letter queue replay"*
 
-   The AI reads the skill files, asks a few clarifying questions (which aspect, which setup method), and then executes the scenario.
+   The assistant reads the relevant skill instructions, confirms your setup method, executes the scenario, and summarizes the results.
 </Steps>
 
-:::tip
-You don't need to download Danube binaries, write configs, or install client libraries manually. The setup scripts handle everything automatically based on the scenario you choose.
-:::
+---
+
+## Live Cluster Debugging & Diagnostics (`danube mcp`)
+
+Whenever you already have a running Danube cluster (`standalone`, `cluster`, or Docker Compose), connect your AI assistant directly to **`danube mcp`** (or the HTTP endpoint at `/mcp` via `danube ctl serve --mode all`):
+
+```bash
+# Start stdio MCP against your local cluster (port 6650)
+danube mcp --broker-endpoint http://127.0.0.1:6650
+```
+
+Because brokers maintain built-in **1-hour telemetry ring buffers** (`GetMetricsSnapshot`) and **5,000-entry structured log ring buffers** (`GetBrokerLogs`) directly in memory over gRPC, AI agents can run diagnostics—such as **`explain_consumer_stall`**, topic lag inspection, `topics peek`, zero-copy `topics branch`, `infer-schema`, and `apply_desired_state` (`dry_run` preview + `confirm_destructive` guardrails)—without deploying Prometheus or log-scraping containers.
+
+---
 
 ## Example Prompts
 
-Here are some prompts to get you started:
+- *"Start a standalone `danube` broker and test `task_queue` vs `realtime` intent behavior"*
+- *"Run the `explain_consumer_stall` MCP workflow on `/agents/tasks` and inspect recent broker logs"*
+- *"Set up a zero-YAML 3-node cluster with `--auth-mode auto-tls` and verify RBAC enforcement"*
+- *"Test agent runtime primitives: `extend_lease`, `report_progress` checkpoints, and `cancel_task_tree`"*
+- *"Branch `/agents/events` at offset 100 and replay historical events to an isolated consumer"*
+- *"Test zero-YAML edge MQTT ingestion (`--mode edge`) with store-and-forward replay"*
 
-- *"Set up a standalone Danube broker and run a quick produce/consume test"*
-- *"Test fan-out vs queue subscription patterns using Python"*
-- *"Set up a 3-node cluster and test broker scaling"*
-- *"I want to try schema validation with backward compatibility"*
-- *"Set up a secure cluster with TLS and test RBAC permissions"*
-- *"Test edge MQTT ingestion with store-and-forward"*
-- *"Just bring up a Danube cluster so I can play with it"*
+---
 
-## Available Scenarios
+## Available Test Scenarios
 
-Scenarios are structured test workflows. Each one has a clear objective, deterministic test aspects to choose from, step-by-step execution, and pass/fail criteria.
-
-### User Functionality
-
-For application developers building on Danube:
+### Application & Agent Workflows
 
 <CardGrid>
-  <Card title="Core Messaging" icon="rocket">
-    Basic produce and consume: pick your subscription type, reliability mode, partitions, and schema. The foundational test for Danube.
+  <Card title="Core Messaging & Intents" icon="rocket">
+    Produce and consume across `realtime`, `event_stream`, `task_queue`, and `audit_log` workload intents, partitions, and subscription types.
   </Card>
-  <Card title="Subscription Patterns" icon="puzzle">
-    Fan-out (broadcast to all consumers) vs Queue (round-robin work distribution) vs Consumer Churn (join/leave mid-traffic).
+  <Card title="Agent Runtime Primitives" icon="star">
+    Verify lease extensions (`extend_lease`), resumable progress checkpoints (`report_progress`), `cancel_task_tree`, and `request_reply` RPC.
   </Card>
-  <Card title="Reliable Delivery" icon="approve-check-circle">
-    At-least-once guarantees: NACK redelivery, ack timeout, failure policies (block/drop/dead-letter), and consumer reconnection.
+  <Card title="Reliable Delivery & DLQ Replay" icon="approve-check-circle">
+    NACK redelivery, exponential retry backoff, dead-letter queue routing, `topics replay-dlq`, and consumer reconnection.
   </Card>
-  <Card title="Schema Lifecycle" icon="document">
-    Schema registration, validation, compatibility modes (backward/forward/full/none), version pinning, and topic-level schema locking.
+  <Card title="Schema Lifecycle & Inference" icon="document">
+    JSON Schema, Avro, and Protobuf registration, compatibility checks (`backward`/`forward`/`full`), and live `topics infer-schema`.
   </Card>
-  <Card title="Key-Shared Advanced" icon="setting">
-    Glob-based key filtering, Key-Shared on partitioned topics, and poison message handling with failure policies.
+  <Card title="Time-Travel & Branching" icon="puzzle">
+    Zero-copy `topics branch` (by offset or nanosecond timestamp), `topics seek`, and non-destructive `topics peek`.
   </Card>
 </CardGrid>
 
-### Operational
-
-For platform teams and cluster administrators:
+### Cluster Operations & Edge
 
 <CardGrid>
-  <Card title="Broker Scaling" icon="up-caret">
-    Scale up (add a broker via Raft join), scale down (safely decommission), and reliable topic move with zero message loss.
+  <Card title="Zero-YAML Scaling & Raft" icon="up-caret">
+    Dynamic cluster scaling (`--join`, `cluster add-node`, `cluster promote-node`), leader failover, and load-manager rebalancing.
   </Card>
-  <Card title="Cluster Health" icon="heart">
-    Follower restart, leader restart with Raft re-election, and broker failover with automatic topic reassignment.
+  <Card title="GitOps Apply & Storage" icon="setting">
+    Dynamic `/cluster/config/*` updates via `danube ctl apply -f ... --dry-run`, WAL retention tuning, and tiered object storage.
   </Card>
-  <Card title="Security and RBAC" icon="open-book">
-    TLS certificate setup, JWT token management, RBAC roles and bindings, and PermissionDenied enforcement.
+  <Card title="Zero-Trust Security & RBAC" icon="open-book">
+    Zero-touch `--auth-mode auto-tls`, manual TLS/mTLS, JWT tokens, RBAC roles/bindings, and `PermissionDenied` validation.
   </Card>
-  <Card title="Edge MQTT" icon="external">
-    MQTT devices publish to the edge gateway with schema validation, attribute extraction, and store-and-forward during outages.
+  <Card title="Zero-YAML Edge MQTT" icon="external">
+    MQTT gateway (`danube up --mode edge`) buffering into local WAL and replicating `# -> /{edge_name}/ingest` to the central cluster.
   </Card>
 </CardGrid>
 
-### Infrastructure Only
-
-<CardGrid>
-  <Card title="Bring Up Cluster" icon="laptop">
-    Get a running Danube instance (standalone or cluster) for ad-hoc use, no automated test, just a working Danube you can interact with.
-  </Card>
-</CardGrid>
+---
 
 ## Setup Methods
 
-The AI will ask which setup method to use. Pick whichever fits your environment:
-
 | Method | Best For |
 |--------|---------|
-| **Local Binary** | Quickest start, downloads pre-built binaries, no dependencies beyond `curl` |
-| **Local Source** | Developers working on the Danube codebase, builds from source with `cargo` |
-| **Docker Compose** | Container-based setups, supports special infrastructure (MinIO, Valkey) |
-| **Kubernetes** | Production-like testing, deploys via Helm chart |
+| **Local Binary** | Quickest start—single `danube` binary, zero YAML files |
+| **Local Source** | Contributors working on Danube—builds with `cargo` |
+| **Docker Compose** | Consolidated 3-broker Raft cluster in `danube/docker/` |
+| **Kubernetes** | Production-like cluster testing via Helm charts |
+
+---
+
+## Next Steps
+
+- **[Danube for AI Agents](/ai-agents/overview/)**: Deep dive into intents, Rust agentic primitives, time-travel branching, and MCP diagnostics.
+- **[MCP Server Guide](/admin/mcp/)**: Client setup for Claude Code, Cursor, Antigravity, and complete 71-tool reference.
+- **[Configuration Workflow](/getting-started/configuration-workflow/)**: Understand the 4-layer configuration architecture.

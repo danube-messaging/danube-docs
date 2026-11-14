@@ -1,76 +1,129 @@
 ---
 title: Topics & Partitions
-description: How topics organize messages and how partitions enable horizontal scaling.
+description: How topics organize messages, how partitions scale horizontally, and how Danube manages topic creation, routing, and lifecycle.
 ---
 
-A topic is a named channel that organizes messages into a stream. Producers write to topics, consumers read from them.
+A topic is a named channel that organizes messages into an ordered stream. Producers publish messages to topics, and consumers subscribe to read from them.
+
+---
 
 ## Topic Naming
 
-Topics follow a namespace structure:
+Every topic belongs to a namespace and uses a leading-slash path:
 
 ```text
 /{namespace}/{topic_name}
 ```
 
-For example, `/default/markets` uses the `default` namespace and the topic name `markets`.
+Danube also supports **hierarchical multi-segment topic names** within a namespace (for example `/default/orders` or `/agents/team-a/planner/tasks`). Path segments may contain alphanumeric characters, `-`, `_`, and `.` (`TopicPath::parse` preserves dots and nested `/` segments while rejecting empty segments and reserved `-part-<N>` partition suffixes).
 
-## Non-Partitioned Topics
+---
 
-A non-partitioned topic is served by a single broker. All messages for the topic flow through that broker, which handles producer writes and consumer delivery.
+## Non-Partitioned vs. Partitioned Topics
 
-Best for: low-to-moderate throughput topics where simplicity is more important than parallelism.
+### Non-Partitioned Topics
 
-## Partitioned Topics
+A non-partitioned topic is served by a single broker. All producer writes and consumer deliveries for that topic flow through that broker.
 
-A partitioned topic splits into N internal topics (e.g., `my-topic-part-0`, `my-topic-part-1`, `my-topic-part-2`), each served by a different broker in the cluster. This distributes load and enables horizontal scaling.
+Best for: low-to-moderate throughput streams, single-sequence audit logs, or topics where strict global ordering across all messages matters more than broker parallelism.
 
-{/* TODO: Add partitioned topics diagram */}
+### Partitioned Topics
 
-Messages for the topic are routed to partitions by the producer's routing mode, and delivered to consumers based on the subscription type.
+A partitioned topic splits logically into `N` internal partition topics (`{topic}-part-0`, `{topic}-part-1`, ..., `{topic}-part-(N-1)`), each independently assigned by the Load Manager across brokers in the cluster. This distributes write throughput, WAL I/O, and consumer fan-out across multiple machines.
 
-### Benefits
+- **Scalability**: distribute partition ownership across multiple brokers
+- **Parallel processing**: consumers read partitions concurrently via a single parent-topic handle
+- **Per-key ordering**: combined with `send_with_key()` and [Key-Shared subscriptions](/concepts/subscriptions/#key-shared), messages sharing a key always hash to the same partition and preserve key order
 
-- **Scalability**: distribute load across multiple brokers for high-throughput workloads
-- **Parallel processing**: multiple consumers process different partitions concurrently
-- **Data locality**: combined with [Key-Shared subscriptions](/concepts/subscriptions/#key-shared), messages can be routed by key to specific consumers for per-key ordering
+### Automatic Partition Discovery
 
-### Creating Partitioned Topics
+Partition counts remain fixed for the lifetime of a topic. Clients do not need to hardcode partition counts to connect to an existing partitioned topic:
 
-Partitioned topics are created with a predefined number of partitions. This number remains fixed for the lifetime of the topic.
+- When a producer omits `.with_partitions(...)` and calls `producer.create().await?`, the client automatically queries the broker lookup service (`topic_partitions`) and attaches internal producers to all existing partitions (`-part-0` .. `-part-(N-1)`).
+- Consumers always subscribe using the parent topic name (e.g., `/default/high-throughput`) and merge messages from every partition automatically.
 
-```rust
+To **create** a new partitioned topic, either pre-create it with `danube ctl` (recommended) or pass `.with_partitions(N)` on the producer builder when relying on implicit auto-creation:
+
+```rust title="Pre-created partitioned topic (omit .with_partitions on client)"
+// Admin creates the topic once:
+//   danube ctl topics create /default/high-throughput --intent event_stream --partitions 3
+
 let mut producer = client
     .new_producer()
     .with_topic("/default/high-throughput")
     .with_name("partitioned-producer")
-    .with_partitions(3)
+    .with_reliable_dispatch() // matches event_stream's Reliable delivery
     .build()?;
 
+// Auto-discovers all 3 partitions from the cluster
 producer.create().await?;
 ```
 
 ---
 
-## Routing Modes
+## Explicit vs. Implicit Topic Creation
 
-When publishing to partitioned topics, the routing mode determines which partition receives each message.
+Danube supports both **explicit** provisioning (recommended for production and agent topologies) and **implicit** producer auto-creation:
 
-### RoundRobinPartition
+- **Explicit (`--intent` or `danube ctl apply`)**: Pre-create topics with `danube ctl topics create <topic> --intent <profile>` or declare them in a desired-state file with `danube ctl apply -f topology.yaml`. A Stream Intent expands zero-drift delivery, WAL sync mode (`async`, `os_cache_flush`, `fsync_batch`), retry, and poison-policy defaults directly into Raft metadata. See [Stream Intents & Workload Profiles](/concepts/stream-intents/) for the full profile reference.
+- **Explicit (`--dispatch-strategy`)**: You can also specify `--dispatch-strategy non_reliable|reliable` explicitly instead of `--intent`.
+- **Implicit (Auto-Create)**: When `producer.create().await?` targets a topic that does not yet exist, the broker auto-creates it using the producer's dispatch strategy (`NonReliable` by default, or `Reliable` if `.with_reliable_dispatch()` was called) and `.with_partitions(N)` if provided.
 
-Messages are distributed across all partitions in round-robin order for maximum throughput. If a routing key is set on the message, the producer hashes the key and assigns the message to a specific partition.
+```bash title="Explicit creation with danube ctl (port 6650)"
+# Provision a durable partitioned task queue via Stream Intent
+danube ctl topics create /default/agent-tasks \
+  --intent task_queue \
+  --partitions 4
 
-### SinglePartition
+# Inspect topic owner, delivery strategy, expanded intent, schema, and subscriptions
+danube ctl topics describe /default/agent-tasks
+```
 
-All messages go to a single randomly-selected partition. If a routing key is set, the producer hashes the key and assigns the message to the corresponding partition.
-
-| Mode | No key | With key |
-|------|--------|----------|
-| **RoundRobinPartition** | Round-robin across all partitions | Hash-based partition assignment |
-| **SinglePartition** | Random single partition | Hash-based partition assignment |
+:::note
+By default, `danube ctl` connects to `http://127.0.0.1:6650` (override with `--endpoint` or `DANUBE_ADMIN_ENDPOINT`).
+:::
 
 ---
 
-## Consumers
+## Message Routing Modes
 
-The **subscription type** determines how messages are distributed to consumers within a subscription. See the [Subscriptions](/concepts/subscriptions/) page for details on Exclusive, Shared, Failover, and Key-Shared patterns.
+When publishing to a partitioned topic, `MessageRouter` selects the target partition using one of two built-in routing modes:
+
+| Method | Strategy | Behavior |
+|--------|----------|----------|
+| **`producer.send(payload, attributes)`** | **Round-Robin** | Distributes messages cyclically (`(index + 1) % partitions`) across all partitions for even throughput distribution. |
+| **`producer.send_with_key(payload, attributes, key)`** | **Deterministic Key Hash (FNV-1a)** | Computes a 64-bit FNV-1a hash of `routing_key` modulo the partition count, ensuring all messages with the same key always land on the same partition in order. |
+
+---
+
+## Topic Inspection & Lifecycle Commands
+
+`danube ctl` exposes topic inspection, schema inference, zero-copy branching, and tiered-storage switching on running topics without broker restarts:
+
+```bash title="Operational topic lifecycle commands"
+# Read recent messages non-destructively without creating a subscription cursor
+danube ctl topics peek /default/agent-tasks --start-offset 0 --count 10
+
+# Infer a JSON Schema draft from sampled payloads on a topic
+danube ctl topics infer-schema /default/agent-tasks --sample-size 100
+
+# Zero-copy / Copy-on-Write branch a topic up to an offset or timestamp (ns)
+danube ctl topics branch /default/agent-tasks /default/agent-tasks-replay --at-offset 5000
+
+# Switch per-topic persistence mode between local WAL and cloud_tiered object storage
+danube ctl topics storage-mode /default/agent-tasks --mode cloud_tiered
+```
+
+- **`topics peek`**: Reads up to `--count` messages starting at `--start-offset` without advancing any consumer subscription cursor.
+- **`topics infer-schema`**: Samples payloads (default `100`) and infers a Draft-07 JSON Schema you can inspect or register in the Schema Registry.
+- **`topics branch`**: Creates an independent topic branched at a point in time (`--at-offset` or `--at-timestamp-ns`) using Copy-on-Write segment references for cloud segments and bounded local WAL replay. See [Persistence & Storage](/concepts/persistence/#topic-branching-copy-on-write).
+- **`topics storage-mode`**: Transitions a topic between `local` WAL-only retention and `cloud_tiered` (requiring a configured `shared_fs` or `object_store` backend, or `--force` when downgrading to `local`).
+
+---
+
+## Next Steps
+
+- **[Stream Intents & Workload Profiles](/concepts/stream-intents/)**: Canonical `--intent` profiles, WAL sync modes, and Raft expansion
+- **[Subscriptions](/concepts/subscriptions/)**: Exclusive, Shared, Failover, Key-Shared, cursor time-travel (`seek`), and DLQ replay
+- **[Dispatch Strategies](/concepts/dispatch-strategies/)**: Non-Reliable vs. Reliable delivery, retries, and poison handling
+- **[CLI: Messaging & Topics](/admin/cli-messaging/)**: Complete `danube ctl topics` command reference

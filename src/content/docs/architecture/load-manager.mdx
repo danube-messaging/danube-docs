@@ -149,11 +149,11 @@ Brokers are classified using the mean and standard deviation:
 
 Three preset levels control rebalancing behavior:
 
-| Level | CV Threshold | Check Interval | Max Moves/Hour | Use Case |
-|-------|-------------|----------------|----------------|----------|
-| Conservative | 40% | 10 min | 5 | Stable production, large topics |
-| Balanced | 30% | 5 min | 10 | General production |
-| Aggressive | 20% | 2 min | 20 | Fast-changing workloads, testing |
+| Level | CV Threshold | Check Interval | Max Moves/Hour | Cooldown | Use Case |
+|-------|-------------|----------------|----------------|----------|----------|
+| Conservative | 40% | 10 min (`600s`) | 5 | `120s` | Stable production, large topics |
+| Balanced | 30% | 4 min (`240s`) | 10 | `60s` | General production |
+| Aggressive | 20% | 2 min (`120s`) | 20 | `30s` | Fast-changing workloads, testing |
 
 ### Candidate Selection
 
@@ -207,10 +207,28 @@ Automated rebalancing includes multiple safeguards to prevent disruption:
 
 ## Configuration
 
-```yaml title="danube_broker.yml"
+Load Manager settings are persisted in Raft under `/cluster/config/load_manager` and hot-reloaded without restarting brokers. You can configure them live with `danube ctl cluster load-manager` or declaratively via `danube ctl apply`.
+
+### Live CLI Configuration
+
+```bash
+danube ctl cluster load-manager \
+  --assignment-strategy balanced \
+  --load-report-interval-seconds 30 \
+  --rebalance true \
+  --profile balanced \
+  --min-brokers 2 \
+  --min-topic-age-seconds 300 \
+  --blacklist-topics "/system/*,/default/critical-*" \
+  --replace-blacklist
+```
+
+### Declarative Manifest (`danube ctl apply`)
+
+```yaml title="desired_state.yaml"
 load_manager:
-  load_report_interval_seconds: 30
   assignment_strategy: balanced        # fair | balanced | weighted_load
+  load_report_interval_seconds: 30
 
   rebalancing:
     enabled: false                     # Start disabled, enable after testing
@@ -220,6 +238,8 @@ load_manager:
     cooldown_seconds: 60
     min_brokers_for_rebalance: 2
     min_topic_age_seconds: 300
+    min_topic_age_before_move_secs: 60
+    topic_move_cooldown_secs: 120
     blacklist_topics:
       - "/system/*"
       - "/default/critical-*"

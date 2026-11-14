@@ -118,8 +118,8 @@ await producer.send_with_key(b"Payment for #1002", None, "payment")
 </Tabs>
 
 - `send_with_key(payload, attributes, routing_key)` tags the message with a routing key
-- Messages with the same routing key always go to the same consumer
-- If you use `send()` instead, the producer name is used as the fallback routing key
+- **Deterministic cross-partition routing**: on partitioned topics, `MessageRouter` computes a 64-bit FNV-1a hash of the routing key modulo partition count so identical keys always land on the same partition (where Key-Shared consistent hashing routes them to the same consumer)
+- If you use `send()` instead, messages are distributed round-robin across partitions and the producer name is used as the fallback routing key
 - Routing keys can be any string: order IDs, user IDs, device IDs, event types
 
 ---

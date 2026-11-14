@@ -118,6 +118,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+For mutual TLS (mTLS), supply the client certificate chain and private key alongside the CA certificate:
+
+```rust title="Mutual TLS (mTLS)"
+let client = DanubeClient::builder()
+    .service_url("https://127.0.0.1:6650")
+    .with_mtls(
+        "./certs/ca-cert.pem",
+        "./certs/client-cert.pem",
+        "./certs/client-key.pem",
+    )?
+    .build()
+    .await?;
+```
+
 </TabItem>
 <TabItem label="Go">
 
@@ -205,27 +219,66 @@ client = await (
 
 ---
 
+## Auto-TLS Mode (`--auth-mode auto-tls`)
+
+For quick secure setups without managing your own PKI, start brokers with `--auth-mode auto-tls`:
+
+```bash title="Start broker with zero-config TLS and bootstrap admin token"
+danube up --mode cluster --data-dir ./danube-data --auth-mode auto-tls
+```
+
+On first boot, Danube automatically provisions:
+
+- **`{data_dir}/tls/ca.pem`**, **`cert.pem`**, and **`key.pem`** (syncing a shared Cluster CA across Raft under `/cluster/security/ca`).
+- **`{data_dir}/bootstrap_admin.token`** (mode `0600`), a signed super-admin JWT ready for `danube ctl` or application clients.
+
+Point clients directly at the generated CA and token:
+
+```rust title="Connect to an auto-tls broker"
+let token = std::fs::read_to_string("./danube-data/bootstrap_admin.token")?
+    .trim()
+    .to_string();
+
+let client = DanubeClient::builder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./danube-data/tls/ca.pem")?
+    .with_token(&token)
+    .build()
+    .await?;
+```
+
+---
+
 ## JWT Authentication
 
-When the broker runs with authentication enabled, all client requests must carry a valid JWT token. Tokens are created offline using `danube-admin`.
+When the broker runs with authentication enabled (`--auth-mode tls` or `--auth-mode auto-tls`), all client requests must carry a valid JWT token. Tokens can be generated offline or issued/revoked via `danube ctl`.
 
-### Creating a Token
+### Creating, Issuing, and Revoking Tokens
 
-```bash title="Generate JWT tokens"
-# Create a service account token (default: 1-year TTL)
-danube-admin security tokens create \
+```bash title="Manage JWT tokens with danube ctl"
+# Create a service account token offline (default: 8760h / 1-year TTL)
+danube ctl security tokens create \
   --subject my-app \
   --secret-key your-secret-key
 
-# Create a token with custom TTL and issuer
-danube-admin security tokens create \
+# Create an offline token with custom TTL and issuer
+danube ctl security tokens create \
   --subject my-app \
   --ttl 24h \
   --issuer danube-auth \
   --secret-key your-secret-key
+
+# Issue a token directly from a running cluster (requires ManageCluster)
+danube ctl security tokens issue \
+  --subject agent-worker \
+  --type service_account \
+  --ttl 24h
+
+# Revoke all tokens for a subject cluster-wide
+danube ctl security tokens revoke --subject agent-worker
 ```
 
-The `secret_key` must match the broker's `jwt.secret_key` configuration.
+For offline tokens (`create`), `--secret-key` must match the broker's `--jwt-secret` value (or the generated secret in `--auth-mode auto-tls`).
 
 ### Connecting with a Token
 
@@ -324,7 +377,7 @@ client = await (
 
 **How it works:**
 
-1. Token is created offline using `danube-admin security tokens create`
+1. Token is created offline with `danube ctl security tokens create` or issued online via `danube ctl security tokens issue`
 2. Client sends the token as `Authorization: Bearer <token>` on every gRPC request
 3. Broker validates the token signature and expiration, then checks RBAC policies
 

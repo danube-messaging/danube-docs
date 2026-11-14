@@ -1,88 +1,134 @@
 ---
 title: TLS & Certificates
-description: Encrypt all Danube traffic with TLS — server TLS for clients, mutual TLS for inter-broker communication.
+description: Enable TLS encryption for clients, admin control plane, and inter-broker mTLS using auto-tls or custom PKI certificates.
 ---
 
-TLS encrypts all network traffic to prevent eavesdropping and tampering. A single set of certificate files is used across all broker services.
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-## What Gets Encrypted
+Danube uses a unified certificate set to encrypt all cluster traffic:
 
-| Connection | TLS Mode | Default Port |
-|-----------|----------|-------------|
-| Client gRPC (producers/consumers) | Server TLS | 6650 |
-| Admin gRPC | Server TLS (opt-in) | 50051 |
-| Inter-broker replication | Mutual TLS (mTLS) | 6650 |
-| Raft consensus | Mutual TLS (mTLS) | 7650 |
+* **Client & Admin gRPC (port `6650`)**: Server-side TLS (both data-plane and admin control-plane protocols are multiplexed on port `6650`, and `admin_tls` is enabled automatically whenever TLS is active; if you specify a dedicated `--admin-addr`, that listener also uses the same TLS configuration).
+* **Raft Consensus (port `7650`) & Inter-Broker Replicator**: Mutual TLS (mTLS) where both peers verify client and server certificates against the cluster CA.
 
-- **Server TLS** (client-facing): the broker presents its certificate to clients. Clients verify it against the CA
-- **Mutual TLS** (inter-broker): both sides present certificates and verify each other. This is how brokers authenticate to each other for replication and Raft consensus
+You can enable TLS either automatically with `--auth-mode auto-tls` or with your own PKI certificates via `--auth-mode tls`.
 
 ---
 
-## Broker Configuration
+## Option 1: Zero-Config `--auth-mode auto-tls`
 
-```yaml title="danube_broker.yml"
-auth:
-  mode: tls
-  tls:
-    cert_file: "./cert/server-cert.pem"   # Server certificate
-    key_file: "./cert/server-key.pem"     # Server private key
-    ca_file: "./cert/ca-cert.pem"         # CA certificate (for verifying peers)
+For quick secure deployments without manually running OpenSSL scripts, boot brokers with `--auth-mode auto-tls`:
+
+```bash
+danube up --mode cluster \
+  --data-dir ./danube-data \
+  --broker-addr 0.0.0.0:6650 \
+  --raft-addr 0.0.0.0:7650 \
+  --auth-mode auto-tls
 ```
 
-All three files are required when `mode: tls` is set.
+### Provisioned Files
 
----
+When the seed/leader node boots with `--auth-mode auto-tls`, Danube creates the following files under `--data-dir` (default `./danube-data`):
 
-## Generating Certificates
+| Path | Details |
+| :--- | :--- |
+| `{data_dir}/tls/ca.pem` | Cluster Root CA certificate (ECDSA `prime256v1`, `/CN=danube-cluster-ca`, 3650-day validity) |
+| `{data_dir}/tls/ca-key.pem` | Cluster Root CA private key |
+| `{data_dir}/tls/cert.pem` | Broker server/client certificate (365-day validity; SANs include `localhost`, `127.0.0.1`, plus the node's advertised/connect/broker host and IP) |
+| `{data_dir}/tls/key.pem` | Broker private key (`0600` permissions) |
+| `{data_dir}/tls/jwt.secret` | 32-byte random base64 HMAC-SHA256 JWT secret (`0600` permissions) |
+| `{data_dir}/bootstrap_admin.token` | 1-year `bootstrap-admin` JWT (`user` principal, `0600` permissions; automatically enrolled in `super_admins`) |
 
-Danube ships with a convenience script that generates a CA, server certificate, and client certificate:
+### Multi-Node Cluster CA Synchronization
 
-```bash title="Generate certificates"
-cd cert/
-bash gen_certs.sh
+In a multi-broker cluster, every broker must share the same Cluster CA so inter-broker Raft/Replicator mTLS and client TLS verification succeed across nodes:
+
+1. The seed node encrypts the generated Cluster CA and JWT secret using AES-256-GCM (keyed from the SHA-256 digest of a cluster secret) and stores the encrypted bundle in Raft metadata at `/cluster/security/ca`.
+2. Joining brokers fetch and decrypt `/cluster/security/ca` and mint their own node certificate (`cert.pem` / `key.pem`) signed by that shared Cluster CA.
+3. Supply the cluster secret via the **`DANUBE_CLUSTER_SECRET`** environment variable on every node (recommended), or allow Danube to persist/read `{data_dir}/cluster_ca.secret`:
+
+```bash
+export DANUBE_CLUSTER_SECRET="replace-with-shared-cluster-secret"
 ```
 
-This produces:
-
-| File | Purpose |
-|------|---------|
-| `ca-cert.pem` / `ca-key.pem` | Certificate Authority (signs both server and client certs) |
-| `server-cert.pem` / `server-key.pem` | Broker TLS identity — used in `auth.tls` config |
-| `client-cert.pem` / `client-key.pem` | Client mTLS identity — used by inter-broker and mTLS clients |
-
-The generated server certificate includes Subject Alternative Names for `localhost`, `127.0.0.1`, and `0.0.0.0`, making it ready for local development.
-
-:::tip
-For production, use certificates from your organization's PKI or a certificate manager like cert-manager (Kubernetes). The convenience script is for development only.
-:::
-
 ---
 
-## Multi-Node Clusters
+## Option 2: Bring Your Own Certificates (`--auth-mode tls`)
 
-For multi-broker deployments:
+If you manage your own PKI (Vault, cert-manager, step-ca, or OpenSSL), pass the certificate paths and JWT secret directly to `danube up`:
 
-- All brokers must share the **same CA certificate** (`ca-cert.pem`)
-- Each broker can use the same or different server certificates, as long as they are signed by the shared CA
-- Server certificates should include SANs matching the broker's hostname or IP address
-
----
-
-## Admin API TLS
-
-By default, the admin API (port 50051) runs without TLS even when `auth.mode: tls` is set. This is convenient for local management but insecure for remote access.
-
-To enable TLS on the admin API:
-
-```yaml title="danube_broker.yml"
-admin_tls: true
+```bash
+danube up --mode cluster \
+  --data-dir ./danube-data \
+  --broker-addr 0.0.0.0:6650 \
+  --advertised-addr broker1.internal:6650 \
+  --raft-addr 0.0.0.0:7650 \
+  --auth-mode tls \
+  --tls-cert /etc/danube/tls/server-cert.pem \
+  --tls-key /etc/danube/tls/server-key.pem \
+  --ca-cert /etc/danube/tls/ca-cert.pem \
+  --jwt-secret "your-strong-hmac-secret" \
+  --super-admins "platform-admin"
 ```
 
-When enabled, the admin API uses the same certificate from `auth.tls`. This is recommended for any deployment where the admin API is accessed over untrusted networks.
+<Aside type="note">
+Because Raft and inter-broker replication perform mTLS with the same certificate, each broker's certificate must include both Server Authentication (`serverAuth`) and Client Authentication (`clientAuth`) Extended Key Usage (EKU), and its Subject Alternative Names (SANs) must match the node's advertised hostname/IP and Raft address.
+</Aside>
+
+### Generating Test Certificates Locally
+
+The Danube repository provides a convenience script at `cert/gen_certs.sh` for local testing, or you can generate ECDSA/RSA certs with OpenSSL including SANs:
+
+```bash title="Generate test CA and broker cert with OpenSSL"
+mkdir -p ./tls && cd ./tls
+
+# 1. Generate CA
+openssl req -x509 -newkey rsa:4096 -days 365 -nodes \
+  -keyout ca-key.pem -out ca-cert.pem \
+  -subj "/CN=danube-dev-ca"
+
+# 2. Generate broker CSR + SAN config
+cat > san.ext <<EOF
+subjectAltName = DNS:localhost,DNS:broker1,IP:127.0.0.1
+extendedKeyUsage = serverAuth,clientAuth
+EOF
+
+openssl req -newkey rsa:4096 -nodes \
+  -keyout server-key.pem -out server.csr \
+  -subj "/CN=broker1"
+
+openssl x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem \
+  -CAcreateserial -out server-cert.pem -days 365 -extfile san.ext
+```
 
 ---
 
-## Client Configuration
+## Configuring Clients & `danube ctl` for TLS
 
-For how to connect clients with TLS and mTLS, see the [Client Setup & Connection](/client-libraries/setup/) guide.
+<Tabs>
+  <TabItem label="danube ctl (Admin)">
+```bash
+export DANUBE_ADMIN_ENDPOINT=https://127.0.0.1:6650
+export DANUBE_ADMIN_TLS=true
+export DANUBE_ADMIN_CA=./danube-data/tls/ca.pem
+export DANUBE_ADMIN_DOMAIN=localhost
+export DANUBE_ADMIN_TOKEN="$(cat ./danube-data/bootstrap_admin.token)"
+
+danube ctl cluster status
+```
+  </TabItem>
+  <TabItem label="danube ctl produce / consume">
+```bash
+export DANUBE_SERVICE_ADDR=https://127.0.0.1:6650
+export DANUBE_TLS=true
+export DANUBE_CA=./danube-data/tls/ca.pem
+export DANUBE_TOKEN="$(cat ./danube-data/bootstrap_admin.token)"
+
+danube ctl produce --topic /default/test --message "encrypted hello"
+danube ctl consume --topic /default/test --subscription test-sub --limit 1
+```
+  </TabItem>
+  <TabItem label="Client SDKs">
+    Use `https://` service URLs and pass the CA certificate PEM (plus JWT token) in your client builder. Complete examples for **Rust, Go, Java, and Python** are documented in [Setup & Connection — TLS Configuration](/client-libraries/setup/#tls-configuration).
+  </TabItem>
+</Tabs>

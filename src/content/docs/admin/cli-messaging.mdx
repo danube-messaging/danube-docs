@@ -1,0 +1,194 @@
+---
+title: "CLI: Produce & Consume"
+description: Publish and consume messages from the command line using danube ctl produce and danube ctl consume.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Danube includes data-plane messaging commands directly inside the unified `danube` binary under `danube ctl`. You can publish test payloads, benchmark throughput, filter Key-Shared streams, validate schemas, and inspect messages in human-readable text or structured JSONL without installing a separate messaging CLI tool.
+
+<Aside type="note">
+For Schema Registry management (`register`, `get`, `versions`, `check`, `list-subjects`), use `danube ctl schemas` — see [CLI: Resources — Schemas](/admin/cli-resources/#schemas).
+</Aside>
+
+---
+
+## Global Data-Plane Connection & Security Options
+
+Both `danube ctl produce` and `danube ctl consume` connect to the broker data-plane gRPC endpoint (default `http://127.0.0.1:6650`) and share the same TLS and JWT authentication options (`DataAuthArgs`):
+
+| Flag | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-s`, `--service-addr <URL>` | `DANUBE_SERVICE_ADDR` | `http://127.0.0.1:6650` | Broker service gRPC URL |
+| `--tls` | `DANUBE_TLS` | `false` | Enable TLS transport |
+| `--ca <PATH>` | `DANUBE_CA` | — | Path to CA certificate PEM (required when `--tls` is enabled) |
+| `--cert <PATH>` | `DANUBE_CERT` | — | Path to client certificate PEM (for mTLS) |
+| `--tls-key <PATH>` | `DANUBE_KEY` | — | Path to client private key PEM (for mTLS) |
+| `--token <JWT>` | `DANUBE_TOKEN` | — | JWT Bearer token for authentication |
+
+You can export these variables once per shell session when working against a secured cluster:
+
+```bash
+export DANUBE_SERVICE_ADDR=https://broker1.example.com:6650
+export DANUBE_TLS=true
+export DANUBE_CA=./tls/ca.pem
+export DANUBE_TOKEN="$(cat bootstrap_admin.token)"
+```
+
+---
+
+## `danube ctl produce`
+
+Publish one or more messages to a Danube topic, optionally with routing keys, custom attributes, reliable dispatch, partitions, and Schema Registry integration.
+
+### Flags
+
+| Flag | Short | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--service-addr <URL>` | `-s` | `http://127.0.0.1:6650` | Broker service address (`DANUBE_SERVICE_ADDR`) |
+| `--producer-name <NAME>` | `-n` | `danube_producer` | Producer identifier |
+| `--topic <TOPIC>` | `-t` | `/default/test_topic` | Target topic (`/<namespace>/<topic>`) |
+| `--message <TEXT>` | `-m` | — | Message payload string |
+| `--file <PATH>` | `-f` | — | Read message payload from a local file |
+| `--count <N>` | `-c` | `1` | Number of messages to publish |
+| `--interval <MS>` | `-i` | `500` | Delay between messages in milliseconds (minimum: `10` ms) |
+| `--partitions <N>` | `-p` | — | Partition count when creating/using a partitioned topic |
+| `--attributes <K=V>` | `-a` | — | Message attributes (key-value pairs) |
+| `--key <KEY>` | `-k` | — | Routing key (used for `key-shared` delivery / key routing) |
+| `--reliable` | `-r` | `false` | Enable reliable dispatch strategy |
+| `--schema-subject <SUBJ>` | — | — | Existing Schema Registry subject to attach to the producer |
+| `--schema-version <N>` | — | — | Pin a specific schema version number |
+| `--schema-min-version <N>` | — | — | Require at least this minimum schema version |
+| `--schema-file <PATH>` | — | — | Auto-register a schema file (subject defaults to the topic path with `/` trimmed and replaced by `-`, e.g., `/default/events` → `default-events`) |
+| `--schema-type <TYPE>` | — | — | Schema type: `bytes`, `string`, `number` (alias `int64`), `json-schema`, `avro`, or `protobuf` |
+
+### Examples
+
+<Tabs>
+  <TabItem label="Basic & Batch">
+```bash
+# Send a single message
+danube ctl produce --topic /default/events --message "hello danube"
+
+# Stream 100 messages every 50 ms on a 4-partition topic using reliable dispatch
+danube ctl produce \
+  --topic /default/orders \
+  --partitions 4 \
+  --reliable \
+  --count 100 \
+  --interval 50 \
+  --message '{"order_id":"ord-100","total":42.50}'
+```
+  </TabItem>
+  <TabItem label="Keys & Attributes">
+```bash
+# Publish with a routing key and custom attributes
+danube ctl produce \
+  --topic /default/events \
+  --key "tenant-acme" \
+  --attributes source=billing,env=prod \
+  --file ./payload.json
+```
+  </TabItem>
+  <TabItem label="With Schema Registry">
+```bash
+# Auto-register a JSON Schema file (subject: default-orders) and publish
+danube ctl produce \
+  --topic /default/orders \
+  --schema-file ./order.schema.json \
+  --schema-type json-schema \
+  --message '{"order_id":"ord-101","amount":99.95}'
+
+# Attach an existing registered subject pinned to version 2
+danube ctl produce \
+  --topic /default/orders \
+  --schema-subject order-events \
+  --schema-version 2 \
+  --message '{"order_id":"ord-102","amount":19.00}'
+```
+  </TabItem>
+</Tabs>
+
+---
+
+## `danube ctl consume`
+
+Subscribe to a topic and stream incoming messages to `stdout`.
+
+When a received message carries a `schema_id`, `danube ctl consume` automatically queries the Schema Registry, caches the schema definition, validates `json_schema` payloads when applicable, and pretty-prints `json_schema` and `avro` payloads.
+
+### Flags
+
+| Flag | Short | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--service-addr <URL>` | `-s` | `http://127.0.0.1:6650` | Broker service address (`DANUBE_SERVICE_ADDR`) |
+| `--topic <TOPIC>` | `-t` | `/default/test_topic` | Topic to subscribe to (`/<namespace>/<topic>`) |
+| `--consumer-name <NAME>` | `-n` | `danube_consumer` | Consumer identifier |
+| `--subscription <NAME>` | — | `danube_sub` | Subscription name (note: no short flag) |
+| `--subscription-type <TYPE>` | — | `shared` | Subscription mode: `exclusive`, `shared`, `fail-over`, or `key-shared` |
+| `--key-filter <GLOB>` | — | — | Repeatable routing-key glob pattern (applies to `key-shared` subscriptions only) |
+| `--limit <N>` | `-l` | `0` | Stop after receiving `N` messages (`0` consumes continuously) |
+| `--output <FORMAT>` | `-o` | `text` | Output format: `text` or `jsonl` |
+
+### Examples
+
+<Tabs>
+  <TabItem label="Standard Consume">
+```bash
+# Consume continuously on a shared subscription
+danube ctl consume --topic /default/events --subscription cli-workers
+
+# Consume the next 10 messages on an exclusive subscription as JSON Lines
+danube ctl consume \
+  --topic /default/orders \
+  --subscription audit-reader \
+  --subscription-type exclusive \
+  --limit 10 \
+  --output jsonl
+```
+  </TabItem>
+  <TabItem label="Key-Shared Filtering">
+```bash
+# Receive only messages matching specific routing-key glob patterns
+danube ctl consume \
+  --topic /default/events \
+  --subscription shard-reader \
+  --subscription-type key-shared \
+  --key-filter "tenant-*" \
+  --key-filter "priority-high"
+```
+  </TabItem>
+  <TabItem label="Secured Cluster">
+```bash
+danube ctl consume \
+  --service-addr https://127.0.0.1:6650 \
+  --tls \
+  --ca ./danube-data/tls/ca.pem \
+  --token "$(cat ./danube-data/bootstrap_admin.token)" \
+  --topic /default/secure-events \
+  --subscription sec-reader \
+  --limit 5
+```
+  </TabItem>
+</Tabs>
+
+---
+
+## Using Inside Docker Compose
+
+Every Danube container already includes `danube`, so you can run `danube ctl produce` and `danube ctl consume` directly with `docker exec`:
+
+```bash
+# Terminal 1: consume messages
+docker exec -it danube-broker1 danube ctl consume \
+  --service-addr http://127.0.0.1:6650 \
+  --topic /default/test \
+  --subscription demo-sub
+
+# Terminal 2: publish 20 messages
+docker exec danube-broker1 danube ctl produce \
+  --service-addr http://127.0.0.1:6650 \
+  --topic /default/test \
+  --count 20 \
+  --message "Hello from danube ctl"
+```

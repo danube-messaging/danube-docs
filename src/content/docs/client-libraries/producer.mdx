@@ -273,7 +273,15 @@ await producer.create()
 </TabItem>
 </Tabs>
 
-The topic splits into N internal partitions (e.g., `-part-0`, `-part-1`, `-part-2`). Messages are routed round-robin across partitions by default.
+The topic splits into N internal partitions (e.g., `-part-0`, `-part-1`, `-part-2`). Messages without a routing key are distributed round-robin across partitions; `send_with_key()` uses deterministic FNV-1a hashing on the routing key.
+
+### Automatic Partition Discovery & `--intent` Topics
+
+You only need `.with_partitions(N)` when implicitly creating a brand-new partitioned topic from the producer. When connecting to an existing partitioned topic — such as one pre-created via `danube ctl topics create /default/high-throughput --intent event_stream --partitions 3` — **omit `.with_partitions(...)`**: calling `producer.create().await?` automatically queries the cluster lookup service (`topic_partitions`) and attaches internal producers for every partition.
+
+:::important
+When publishing to a topic pre-created with `--intent`, match its resolved dispatch strategy on the producer builder. `event_stream`, `task_queue`, and `audit_log` create **Reliable** topics, so producers must call `.with_reliable_dispatch()` — otherwise the broker rejects `producer.create()` with `FailedPrecondition` (`Producer requested dispatch strategy does not match topic strategy`). For `realtime` topics (`NonReliable`), omit `.with_reliable_dispatch()`.
+:::
 
 ---
 
@@ -415,14 +423,68 @@ For schema registration and versioning, see the [Schema Registry guide](/client-
 
 ## Topic Naming
 
-Topics follow a namespace structure:
+Topics follow a namespace structure (and optionally multi-segment paths within a namespace):
 
 ```text
-/namespace/topic-name
+/{namespace}/{topic-name}
 ```
 
 Examples:
 
 - `/default/orders`: orders in the default namespace
 - `/production/user-events`: user events in a production namespace
-- `/staging/logs`: logs in a staging namespace
+- `/agents/team-a/tasks`: hierarchical topic inside the `agents` namespace
+
+---
+
+## Retry Configuration (`ProducerOptions`)
+
+Configure automatic retry and exponential backoff behavior for transient `create()` and `send()` failures in Rust via `ProducerOptions`:
+
+```rust title="Configure producer retries and backoff"
+use danube_client::ProducerOptions;
+
+let options = ProducerOptions::new(
+    5,      // max_retries
+    200,    // base_backoff_ms
+    10_000, // max_backoff_ms
+);
+
+let mut producer = client
+    .new_producer()
+    .with_topic("/default/orders")
+    .with_name("resilient-producer")
+    .with_reliable_dispatch()
+    .with_options(options)
+    .build()?;
+
+producer.create().await?;
+```
+
+---
+
+## Correlated Request-Reply (`request_reply`)
+
+For synchronous RPC patterns (such as agent tool invocation), `DanubeClient::request_reply` publishes a request stamped with `x-danube-correlation-id` and `x-danube-reply-to`, subscribes to the reply topic, and waits up to `timeout` for the matching correlated reply:
+
+```rust title="Send a correlated request and await reply"
+use std::collections::HashMap;
+use std::time::Duration;
+
+let mut attrs = HashMap::new();
+attrs.insert("tool".to_string(), "sql_query".to_string());
+
+let reply = client
+    .request_reply(
+        "/agents/tool-requests",
+        "/agents/tool-replies",
+        br#"{"query":"SELECT count(*) FROM orders"}"#.to_vec(),
+        Some(attrs),
+        Duration::from_secs(10),
+    )
+    .await?;
+
+println!("Reply payload: {}", String::from_utf8_lossy(&reply.payload));
+```
+
+See [Danube for AI Agents](/ai-agents/overview/) for full responder/requester examples and system attributes.

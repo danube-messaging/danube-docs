@@ -15,7 +15,7 @@ Every message delivered to a consumer is a `StreamMessage` with the following fi
 |-------|------|-------------|
 | `request_id` | `u64` | Unique identifier for tracking the message request across the system |
 | `msg_id` | `MessageID` | Composite identifier containing routing and location information |
-| `payload` | `Vec<u8>` | The actual message content in binary format |
+| `payload` | `Bytes` (`bytes::Bytes`) | The actual message content in binary format (`Vec<u8>` input on `producer.send()`) |
 | `publish_time` | `u64` | Unix timestamp (milliseconds) when the message was published |
 | `producer_name` | `String` | Name of the producer that sent this message |
 | `subscription_name` | `Option<String>` | Name of the subscription (set by broker for consumer delivery) |
@@ -60,6 +60,37 @@ attributes.insert("priority".to_string(), "high".to_string());
 let message_id = producer
     .send(b"Important message".to_vec(), Some(attributes))
     .await?;
+```
+
+### Standard System Attributes (`x-danube-*` & DLQ Headers)
+
+Danube reserves `x-danube-*` and `x-*` metadata keys in `attributes` (`HashMap<String, String>`) for correlation, agent task trees, checkpoints, and dead-letter diagnostics:
+
+| Attribute Key | Constant / Origin | Purpose |
+|---------------|-------------------|---------|
+| `x-danube-correlation-id` | `ATTR_CORRELATION_ID` | Correlates replies with requests in `request_reply` flows |
+| `x-danube-reply-to` | `ATTR_REPLY_TO` | Target reply topic attached on request messages |
+| `x-danube-parent-msg-id` | `ATTR_PARENT_MSG_ID` | Immediate parent message ID for hierarchical subtasks |
+| `x-danube-root-msg-id` | `ATTR_ROOT_MSG_ID` | Root task identifier used by `cancel_task_tree` propagation |
+| `x-danube-deadline-ms` | `ATTR_DEADLINE_MS` | Absolute Unix timestamp deadline (milliseconds) for work execution |
+| `x-danube-compute-cost-units` | `ATTR_COMPUTE_COST_UNITS` | Optional compute/token cost accounting metadata |
+| `x-danube-checkpoint-b64` | `ATTR_CHECKPOINT_B64` | Base64-encoded progress checkpoint saved via `report_progress` |
+| `x-original-topic`, `x-original-subscription`, `x-original-topic-offset`, `x-original-producer-id`, `x-original-broker-addr` | DLQ poison handler | Source coordinates stamped when a message moves to `<topic>-dlq` |
+| `x-poison-policy`, `x-delivery-attempt`, `x-failure-reason` | DLQ poison handler | Applied poison policy, total delivery attempts, and last failure reason |
+| `x-danube-replayed-from-dlq`, `x-danube-replayed-subscription` | `danube ctl topics replay-dlq` | Added when replaying messages from a DLQ back to the source topic (strips the 8 `x-original-*` / `x-poison-policy` / `x-delivery-attempt` / `x-failure-reason` keys) |
+
+---
+
+## Inspecting Messages & Inferring Schemas
+
+Inspect stored payloads non-destructively or generate a JSON Schema directly from live topic traffic using `danube ctl`:
+
+```bash title="Peek payloads and infer JSON Schema"
+# Read up to 10 messages from offset 0 without moving any subscription cursor
+danube ctl topics peek /default/events --start-offset 0 --count 10
+
+# Sample JSON payloads and synthesize a Draft-07 schema
+danube ctl topics infer-schema /default/events --sample-size 100
 ```
 
 ---
@@ -136,5 +167,5 @@ Subject: "order-events" (compatibility: backward)
   └── /production/order-events → validation: enforce, payload validation on
 ```
 
-For configuring these settings, see the [Admin CLI: Resources](/admin/cli-resources/#schema-configuration-admin-only) reference. For the internal storage model, see [Schema Registry Architecture](/architecture/schema-registry/).
+For configuring these settings, see the [Admin CLI: Resources](/admin/cli-resources/#schema-configuration-admin-only) and [CLI: Messaging & Topics](/admin/cli-messaging/) references. For the internal storage model, see [Schema Registry Architecture](/architecture/schema-registry/).
 

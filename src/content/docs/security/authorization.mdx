@@ -1,171 +1,131 @@
 ---
 title: Authorization (RBAC)
-description: Role-Based Access Control — permissions, roles, bindings, scoped access, and step-by-step cluster security setup.
+description: Enforce default-deny Role-Based Access Control across clusters, namespaces, topics, and schema subjects.
 ---
 
-import { Steps } from '@astrojs/starlight/components';
+import { Aside } from '@astrojs/starlight/components';
 
-Authorization determines *what* an authenticated principal can do. Danube uses Role-Based Access Control (RBAC) with scoped bindings and **default-deny** semantics. If no policy explicitly grants access, the request is denied.
-
-## Model
-
-The authorization model has three building blocks:
-
-A **Binding** connects a **Principal** to a **Role** at a specific **Scope**. The Role bundles one or more **Permissions**, and the Scope determines where those permissions apply: across the entire cluster, within a single namespace, or on a specific topic.
-
-- **Permissions**: individual actions like `Produce`, `Consume`, or `ManageTopic`
-- **Roles**: named bundles of permissions (e.g., a `producer` role grants `Lookup` + `Produce`)
-- **Bindings**: attach a role to a principal at a specific scope
+When authentication is enabled (`--auth-mode tls` or `--auth-mode auto-tls`), Danube enforces **default-deny Role-Based Access Control (RBAC)** on every data-plane and control-plane RPC. If no binding grants the required permission on the target resource, the request fails with `PERMISSION_DENIED`.
 
 ---
 
-## Permissions
+## Evaluation Model
 
-Danube defines 9 permissions:
+A request passes authorization if **any** of the following holds:
 
-| Permission | Description | Typical Use |
-|-----------|-------------|-------------|
-| `Lookup` | Discover topic metadata and partitions | Required for producers and consumers |
-| `Produce` | Publish messages to a topic | Producers |
-| `Consume` | Subscribe and receive messages | Consumers |
-| `Replicate` | Replicate data between brokers | Reserved for future cross-cluster replication |
-| `ManageNamespace` | Create, delete, and configure namespaces | Namespace administrators |
-| `ManageTopic` | Create, delete, and configure topics | Topic administrators |
-| `ManageSchema` | Register and manage schemas | Schema administrators |
-| `ManageBroker` | Broker operations (unload topics, etc.) | Cluster operators |
-| `ManageCluster` | Cluster-wide operations (Raft, security policies) | Super administrators |
+1. **Unauthenticated dev mode (`--auth-mode none`)**: All checks are bypassed.
+2. **Internal broker (`Principal::BrokerInternal`)**: Inter-broker mTLS RPCs bypass user RBAC.
+3. **Super-admin (`--super-admins`)**: Any unrevoked JWT subject listed in `--super-admins` (including `bootstrap-admin` under `--auth-mode auto-tls`) bypasses RBAC.
+4. **Role Binding match**: The caller's `principal_type` and `principal_name` match a binding whose roles include the required `Permission`, evaluated at the target resource scope or inherited from an enclosing scope:
+   * `cluster` scope (`--scope cluster`) applies cluster-wide and satisfies checks on namespaces, topics, brokers, schemas, and the cluster itself.
+   * `namespace` scope (`--scope namespace --resource <ns>`) applies to the namespace and topics within it.
+   * `topic` scope (`--scope topic --resource /<ns>/<topic>`) applies only to that topic.
 
 ---
 
-## Scoped Bindings
+## Permissions & Resources
 
-Bindings can be attached at three scope levels:
+Danube defines **10 permissions** across **5 resource types** (`Cluster`, `Broker`, `Namespace`, `Topic`, `SchemaSubject`):
 
-| Scope | Applies to | Example |
-|-------|-----------|---------|
-| **Cluster** | All resources in the cluster | Global admin access |
-| **Namespace** | All topics within a namespace | `/payments/*` |
-| **Topic** | A specific topic only | `/payments/orders` |
+| Permission | Scope / Resources | Operations Authorized |
+| :--- | :--- | :--- |
+| `Lookup` | Topic / Cluster | Service discovery (`lookup_topic`, `topic_partitions`) |
+| `Produce` | Topic | Creating producers and publishing messages |
+| `Consume` | Topic / Cluster | Subscribing, receiving, acknowledging messages, reading consumer offsets, and fallback broker logs/metrics |
+| `Replicate` | Cluster / Topic | Replication permission for inter-broker / replicator operations |
+| `ReadPayload` | Topic | Reading raw stored message bytes via `topics peek`, `topics sample`, and `topics infer-schema` (and MCP `peek_messages` / `infer_topic_schema`) |
+| `ManageNamespace` | Namespace / Cluster | Creating/deleting namespaces, inspecting/setting policies, listing brokers' namespaces |
+| `ManageTopic` | Topic / Cluster | Creating, deleting, describing, branching, seeking, DLQ replay, failure policies, schema association, unloading topics |
+| `ManageSchema` | SchemaSubject / Cluster | Registering, reading, checking compatibility, setting compatibility mode, deleting schema versions |
+| `ManageBroker` | Broker / Cluster | Listing brokers, inspecting load balance, draining (`unload`), activating brokers, telemetry/log queries |
+| `ManageCluster` | Cluster | Raft membership (`add_node`, `promote_node`, `remove_node`), live cluster config (`storage`, `write-buffer`, `wal`, `load-manager`), `apply`, RBAC `roles`/`bindings` mutations, and online `tokens issue`/`revoke` |
 
-When evaluating a request, the authorizer checks bindings from the **most specific scope to the broadest**:
-
-1. Topic-level bindings (if the resource is a topic)
-2. Namespace-level bindings (for the topic's namespace)
-3. Cluster-level bindings
-
-If any matching binding grants the required permission, the request is **allowed**. If no binding matches, the request is **denied**.
+<Aside type="note">
+**Separation of control vs data payloads (`ReadPayload`)**: Granting `ManageTopic` lets an operator or agent inspect topic metadata, create topics, set failure policies, and diagnose consumer stalls without granting access to raw message payloads. Grant `ReadPayload` explicitly only to principals permitted to peek or sample topic payloads (`topics peek`, `topics infer-schema`).
+</Aside>
 
 ---
 
-## Managing Roles
+## Managing Roles (`danube ctl security roles`)
 
-Roles are named collections of permissions.
+Roles are named collections of permissions stored in Raft metadata (`/auth/roles/{name}`).
 
-```bash title="Create roles"
-# Producer role: can look up and publish to topics
-danube-admin security roles create producer-role \
-  --permissions Produce,Lookup
+```bash
+# Producer-only role
+danube ctl security roles create producer-role \
+  --permissions Lookup,Produce
 
-# Consumer role: can look up, subscribe, and receive messages
-danube-admin security roles create consumer-role \
-  --permissions Consume,Lookup
+# Consumer-only role
+danube ctl security roles create consumer-role \
+  --permissions Lookup,Consume
 
-# Namespace admin role
-danube-admin security roles create ns-admin-role \
-  --permissions ManageNamespace,ManageTopic,ManageSchema,Lookup
+# Topic + schema operator (cannot read raw message payloads)
+danube ctl security roles create topic-operator \
+  --permissions ManageTopic,ManageSchema
 
-# Full cluster admin role
-danube-admin security roles create cluster-admin-role \
-  --permissions ManageCluster,ManageBroker,ManageNamespace,ManageTopic,ManageSchema,Lookup,Produce,Consume
+# Auditor / schema-inference agent (metadata + payload inspection)
+danube ctl security roles create payload-auditor \
+  --permissions ManageTopic,ReadPayload
+
+# Cluster admin role
+danube ctl security roles create cluster-admin \
+  --permissions Lookup,Produce,Consume,Replicate,ReadPayload,ManageNamespace,ManageTopic,ManageSchema,ManageBroker,ManageCluster
 ```
 
-```bash title="Inspect and delete roles"
-# List all roles
-danube-admin security roles list
+Inspect, list, or delete roles:
 
-# Get details of a specific role
-danube-admin security roles get producer-role
-
-# JSON output (for scripting)
-danube-admin security roles list --output json
-
-# Delete a role
-danube-admin security roles delete producer-role
+```bash
+danube ctl security roles list --output json
+danube ctl security roles get producer-role --output json
+danube ctl security roles delete producer-role
 ```
 
 ---
 
-## Managing Bindings
+## Managing Bindings (`danube ctl security bindings`)
 
-Bindings connect principals to roles at a specific scope. Each binding has a unique ID.
+Bindings attach one or more roles to a `user` or `service_account` principal at a specific `--scope`:
 
-```bash title="Create bindings"
-# Cluster-scoped: grant producer-role to a service account
-danube-admin security bindings create b-payments-writer \
+```bash
+# 1. Topic-scoped binding: checkout-svc can only Lookup + Produce on /payments/orders
+danube ctl security bindings create checkout-orders-writer \
   --principal-type service_account \
-  --principal-name payments-writer \
-  --roles producer-role \
-  --scope cluster
-
-# Namespace-scoped: grant consumer-role on /analytics
-danube-admin security bindings create b-analytics-reader \
-  --principal-type service_account \
-  --principal-name analytics-reader \
-  --roles consumer-role \
-  --scope namespace \
-  --resource /analytics
-
-# Topic-scoped: grant producer-role on a specific topic
-danube-admin security bindings create b-orders-writer \
-  --principal-type service_account \
-  --principal-name orders-service \
+  --principal-name checkout-svc \
   --roles producer-role \
   --scope topic \
   --resource /payments/orders
 
-# Multiple roles in one binding
-danube-admin security bindings create b-platform-admin \
+# 2. Namespace-scoped binding: analytics team can Consume any topic in /analytics
+danube ctl security bindings create analytics-readers \
+  --principal-type service_account \
+  --principal-name spark-reader \
+  --roles consumer-role \
+  --scope namespace \
+  --resource analytics
+
+# 3. Cluster-scoped binding: platform-ops user gets full cluster-admin role
+danube ctl security bindings create platform-ops-admin \
   --principal-type user \
-  --principal-name admin-user \
-  --roles cluster-admin-role,ns-admin-role \
+  --principal-name ops-lead \
+  --roles cluster-admin \
   --scope cluster
 ```
 
-```bash title="Inspect and delete bindings"
-# List by scope
-danube-admin security bindings list --scope cluster
-danube-admin security bindings list --scope namespace --resource /payments
-danube-admin security bindings list --scope topic --resource /payments/orders
+List, inspect, or delete bindings:
 
-# Get a specific binding
-danube-admin security bindings get b-payments-writer --scope cluster
-
-# Delete
-danube-admin security bindings delete b-payments-writer --scope cluster
-danube-admin security bindings delete b-analytics-reader --scope namespace --resource /analytics
+```bash
+danube ctl security bindings list --scope topic --resource /payments/orders --output json
+danube ctl security bindings list --scope cluster --output json
+danube ctl security bindings get checkout-orders-writer --scope topic --resource /payments/orders --output json
+danube ctl security bindings delete checkout-orders-writer --scope topic --resource /payments/orders
 ```
 
 ---
 
-## Super-Admins
+## Last-Admin Lockout Protection
 
-For initial cluster bootstrap and emergency access, Danube supports **super-admins**, which are JWT subjects that bypass RBAC entirely. Super-admins are declared in the broker configuration, not through the RBAC system.
+To prevent an administrator from accidentally locking everyone out of a live cluster, Danube evaluates `would_remove_last_admin` on every destructive RBAC mutation and refuses the request if it would leave **zero active cluster admins** (counting unrevoked `super_admins` plus principals with a cluster-scoped binding granting `ManageCluster`):
 
-```yaml title="danube_broker.yml"
-auth:
-  super_admins:
-    - "admin"
-```
-
-A super-admin can perform any operation on any resource without needing roles or bindings.
-
-:::caution
-Super-admin access bypasses all authorization checks. Use it only for initial bootstrap and emergency scenarios. Once RBAC policies are configured, consider removing entries from `super_admins`.
-:::
-
----
-
-## Next Steps
-
-For a complete walkthrough from certificate generation to client connection, see the [Securing a Cluster](/security/securing-a-cluster/) guide.
-
+* `roles delete`: Refused if deleting the role would leave zero remaining active admins.
+* `bindings delete`: Refused if deleting the cluster-scoped admin binding would leave zero remaining active admins.
+* `tokens revoke`: Refused if revoking the subject would revoke the last active `super_admin` or cluster-admin principal.

@@ -1,0 +1,209 @@
+---
+title: Stream Intents & Workload Profiles
+description: Declare workload profiles once with --intent so Danube expands zero-drift delivery, WAL durability, retry, and poison-handling defaults into Raft metadata.
+---
+
+Danube lets you declare what a topic is *for* instead of wiring low-level dispatch, WAL sync, retry, and poison-handling flags by hand on every stream. Passing `--intent` when creating a topic expands a **Stream Intent** profile into concrete broker and subscription defaults and persists them in Raft consensus metadata.
+
+---
+
+## Explicit vs. Implicit Topic Creation
+
+Topics in Danube enter the cluster in one of two ways:
+
+| Aspect | Implicit (Producer Auto-Create) | Explicit (`--intent` via CLI / `apply` / MCP) |
+|--------|----------------------------------|-----------------------------------------------|
+| **Trigger** | First `producer.create().await?` on an unknown topic | `danube ctl topics create --intent ...`, `danube ctl apply`, or MCP `create_topic` |
+| **Delivery strategy** | `NonReliable` by default (unless `.with_reliable_dispatch()` is called) | Determined by the intent profile (`NonReliable` for `realtime`; `Reliable` for all durable intents) |
+| **WAL sync mode** | Cluster default (`os_cache_flush` when `--wal-dir` is enabled) | Explicit per-topic `WalSyncMode` stored in intent metadata (`async`, `os_cache_flush`, or `fsync_batch`) |
+| **Subscription failure defaults** | Broker fallback (`max_redelivery_count = 5`, `ack_timeout_ms = 30000`, `base = 1000ms`, `max = 60000ms`, `exponential`, `block`) | Inherited automatically from the expanded intent profile (with automatic `<topic>-dlq` routing for DLQ profiles) |
+| **Configuration drift risk** | Clients with different builder flags can diverge across environments | Zero drift: expanded settings live in Raft metadata and follow the topic across restarts and broker moves |
+
+### Zero-Drift Raft Expansion
+
+When an admin creates a topic with `--intent`, the broker resolves canonical names and aliases into an `ExpandedStreamSettings` JSON document and writes it to Raft metadata:
+
+- **`/topics/{ns}/{topic}/intent`** — holds `intent`, `delivery`, `wal_sync_mode`, `max_retries`, `backoff_ms`, `poison_policy`, `dlq_suffix`, and `persistence`.
+- **`/topics/{ns}/{topic}/delivery`** — stores the resolved dispatch strategy (`NonReliable` or `Reliable`).
+
+For partitioned topics (`--partitions N`), the broker creates `/topics/{ns}/{topic}-part-0` through `-part-(N-1)` with the same resolved settings. Whenever a broker loads or reloads a topic after a restart, unload, or Load Manager move, it reads `/topics/{ns}/{topic}/intent` directly from Raft and initializes the topic's WAL with the exact persisted `wal_sync_mode` — guaranteeing identical durability and failure semantics regardless of which broker hosts the topic.
+
+---
+
+## Canonical Intents & Aliases
+
+Danube defines **four canonical Stream Intents** along with ergonomic aliases (particularly suited for AI agent topologies and lakehouse pipelines). Aliases normalize to their canonical profile at topic creation time.
+
+| Canonical Intent | Aliases | Delivery | WAL Sync Mode | Max Retries | Base Backoff | Poison Policy | Auto DLQ | Primary Workload |
+|-----------------|---------|----------|---------------|-------------|--------------|---------------|----------|------------------|
+| **`realtime`** | `telemetry_firehose`, `firehose`, `telemetry`, `ephemeral` | `NonReliable` | `async` (in-memory, no WAL) | `0` | `0 ms` | `none` | None | Live metrics, heartbeats, ephemeral firehose |
+| **`event_stream`** | `agent_event_mesh`, `event_mesh`, `events`, `lakehouse_feed`, `lakehouse`, `custom` | `Reliable` | `os_cache_flush` | `3` | `500 ms` | `dead_letter` | `<topic>-dlq` | Pub/sub event bus, agent event mesh, CDC / lakehouse feed |
+| **`task_queue`** | `agent_task_queue`, `tasks`, `work_queue` | `Reliable` | `fsync_batch` | `5` | `1000 ms` | `dead_letter` | `<topic>-dlq` | Durable worker queues, agent task dispatch |
+| **`audit_log`** | `tool_invocation_log`, `tool_log`, `audit`, `state_log` | `Reliable` | `fsync_batch` | `10` | `500 ms` | `block` | None | Tool invocation ledgers, compliance & state logs |
+
+---
+
+## Deep Dive: WAL Durability Modes
+
+Durable intents select a per-topic `WalSyncMode` enforced by the topic's WAL writer task when `dispatch_strategy = Reliable`:
+
+### `os_cache_flush` (Process-Crash Safe, Sub-ms Latency)
+
+Used by `event_stream` (and the default when `--wal-dir` is enabled without an explicit override):
+
+- Writes are batched via group-commit and flushed from user-space buffers to the OS kernel page cache (`BufWriter::flush()`) before the broker acknowledges the publish.
+- **Survives**: broker process crashes, panics, or `SIGKILL` restarts because flushed pages remain in kernel memory and are asynchronously paged to disk by the OS.
+- **Trade-off**: avoids waiting on physical disk barrier latency per batch, delivering sub-millisecond tail latency for high-fan-out event streams.
+
+### `fsync_batch` (Power-Loss Safe, Batched `fdatasync`)
+
+Used by `task_queue` and `audit_log`:
+
+- Pairs group-commit `BufWriter::flush()` with `file.sync_data()` (`fdatasync`) before acknowledging pending writes.
+- Concurrent writes arriving within the batch window (`flush_interval_ms` / `flush_max_batch_bytes`) share a single `fdatasync` call, amortizing disk sync overhead while guaranteeing frames hit non-volatile storage before the producer receives an ack.
+- **Survives**: broker crashes **and** abrupt host power loss or kernel panics.
+
+### `async` (Buffered / In-Memory)
+
+Associated with `realtime`:
+
+- In `WalSyncMode::Async`, writes enqueue into the writer buffer and flush on the periodic ticker without per-write waiting.
+- For `realtime` topics, dispatch is `NonReliable`, bypassing WAL storage completely for pure in-memory fan-out.
+
+See [Persistence & Storage](/concepts/persistence/) and [Dispatch Strategies](/concepts/dispatch-strategies/) for how WAL tiers interact with Valkey and cloud object storage.
+
+---
+
+## Deep Dive: Poison Policies (`dead_letter` vs. `block`)
+
+When a reliable consumer explicitly calls `nack()` or misses `ack_timeout_ms`, the broker schedules redelivery with backoff. Once delivery attempts exceed `max_redelivery_count`, the poison policy determines what happens next:
+
+### `poison_policy = dead_letter` (`event_stream`, `task_queue`)
+
+- **Behavior**: the broker copies the failing message to `<topic>-dlq` (for example `/default/agent-jobs-dlq`), attaches diagnostic origin headers (`x-original-topic`, `x-original-subscription`, `x-original-topic-offset`, `x-original-producer-id`, `x-original-broker-addr`, `x-poison-policy`, `x-delivery-attempt`, `x-failure-reason`), and advances the subscription cursor past the poison slot.
+- **Why use it**: prevents one malformed payload or buggy tool call from stalling an entire queue of healthy tasks. Operators or automated workflows can inspect the DLQ with `danube ctl topics peek` and replay fixed messages later via `danube ctl topics replay-dlq`.
+
+### `poison_policy = block` (`audit_log`)
+
+- **Behavior**: delivery halts on the unacknowledged slot (or per routing key in `KeyShared` subscriptions) without skipping or diverting the message. The message remains pending until a consumer successfully acknowledges it, an admin updates the subscription's failure policy, or the cursor is explicitly moved via `danube ctl topics seek`.
+- **Why use it**: strict audit, billing, and tool-invocation ledgers cannot silently skip an entry out of sequence; halting forces human or supervisory resolution.
+
+---
+
+## How Topic Defaults Flow to Subscriptions
+
+Subscription failure policies follow a simple two-step lifecycle in Raft metadata:
+
+1. **Topic-level intent storage**: Creating a topic with `--intent` persists the expanded profile defaults (`max_retries`, `backoff_ms`, `poison_policy`, `dlq_suffix`) under `/topics/{ns}/{topic}/intent`.
+2. **Automatic subscription inheritance**: The first time a consumer attaches under a new subscription name `<sub>` (and no explicit override exists at `/topics/{ns}/{topic}/subscriptions/{sub}/failure_policy`), the broker derives a `SubscriptionFailurePolicy` from `/topics/{ns}/{topic}/intent` and persists it at `/topics/{ns}/{topic}/subscriptions/{sub}/failure_policy`:
+   - `max_redelivery_count` ← `intent.max_retries`
+   - `base_redelivery_delay_ms` ← `intent.backoff_ms`
+   - `ack_timeout_ms` ← `30000` (30 seconds)
+   - `max_redelivery_delay_ms` ← `60000` (60 seconds)
+   - `backoff_strategy` ← `exponential`
+   - `poison_policy` ← `dead_letter` (`dead_letter_topic = "<topic>-dlq"`) or `block`
+3. **Per-subscription overrides**: Operators can inspect or override any subscription independently using `danube ctl topics get-failure-policy` and `danube ctl topics set-failure-policy`. Existing subscription policies are preserved and are not overwritten when new consumers join that subscription.
+
+:::note
+You cannot set `--intent` and an explicit `--dispatch-strategy` simultaneously on `danube ctl topics create` — the intent already dictates the dispatch strategy.
+:::
+
+---
+
+## CLI, Declarative `apply`, and MCP Examples
+
+### CLI (`danube ctl`)
+
+Create topics with `--intent`, inspect the expanded Raft settings, and customize a specific subscription if needed:
+
+```bash title="Create and inspect an intent-backed topic"
+# Create a durable job queue with 3 partitions
+danube ctl topics create /default/agent-jobs \
+  --intent task_queue \
+  --partitions 3
+
+# Inspect topic delivery, intent summary, schema, and subscriptions
+danube ctl topics describe /default/agent-jobs
+
+# Inspect the inherited failure policy on a subscription (after a consumer subscribes)
+danube ctl topics get-failure-policy /default/agent-jobs -s worker-pool
+
+# Override failure policy for one specific subscription without altering other subscribers
+danube ctl topics set-failure-policy /default/agent-jobs \
+  -s worker-pool \
+  --max-redelivery-count 8 \
+  --ack-timeout-ms 45000 \
+  --base-redelivery-delay-ms 1000 \
+  --max-redelivery-delay-ms 60000 \
+  --backoff-strategy exponential \
+  --dead-letter-topic /default/agent-jobs-dlq \
+  --poison-policy dead_letter
+```
+
+Sample output from `danube ctl topics describe /default/agent-jobs`:
+
+```text
+Topic: /default/agent-jobs
+  Broker ID: 1
+  Delivery: Reliable
+  Intent: task_queue (delivery=reliable, wal_sync=fsync_batch, max_retries=5, backoff_ms=1000, poison_policy=dead_letter, dlq=/default/agent-jobs-dlq)
+```
+
+### Declarative State (`danube ctl apply`)
+
+Declare namespaces and intent-configured topics in a desired-state manifest and apply it idempotently across environments:
+
+```yaml title="cluster-topology.yaml"
+namespaces:
+  - agents
+topics:
+  - name: /agents/events
+    intent: agent_event_mesh
+    partitions: 3
+  - name: /agents/tasks
+    intent: task_queue
+    partitions: 6
+  - name: /agents/tool-audit
+    intent: tool_invocation_log
+```
+
+```bash title="Preview and apply topology"
+danube ctl apply -f cluster-topology.yaml --dry-run
+danube ctl apply -f cluster-topology.yaml
+```
+
+### MCP Server (`danube mcp`)
+
+AI agents and IDE assistants connected to the Danube MCP server can provision and inspect intent-backed topics directly using `create_topic` and `describe_topic`:
+
+```json title="MCP tool call: create_topic"
+{
+  "name": "/agents/tool-audit",
+  "intent": "audit_log",
+  "partitions": 1
+}
+```
+
+```json title="MCP tool call: set_subscription_failure_policy"
+{
+  "topic": "/agents/tasks",
+  "subscription": "planner-workers",
+  "max_redelivery_count": 5,
+  "ack_timeout_ms": 60000,
+  "base_redelivery_delay_ms": 1000,
+  "max_redelivery_delay_ms": 60000,
+  "backoff_strategy": "exponential",
+  "dead_letter_topic": "/agents/tasks-dlq",
+  "poison_policy": "dead_letter"
+}
+```
+
+---
+
+## Next Steps
+
+- **[Dispatch Strategies](/concepts/dispatch-strategies/)**: How Non-Reliable and Reliable delivery, WAL sync modes, and DLQs operate under the hood
+- **[Subscriptions](/concepts/subscriptions/)**: Subscription types, failure policy inheritance, time-travel `seek`, and DLQ replay
+- **[Configuration Workflow](/getting-started/configuration-workflow/)**: Zero-YAML startup flags, runtime CLI updates, and declarative `danube ctl apply`
+- **[AI Agents Overview](/ai-agents/overview/)**: Using stream intents with agentic primitives (`request_reply`, `extend_lease`, `report_progress`, `cancel_task_tree`)
+- **[CLI: Messaging & Topics](/admin/cli-messaging/)**: Full `danube ctl topics` reference

@@ -1,0 +1,235 @@
+---
+title: Cluster & Topic Configuration Workflow
+description: How Danube v2 separates per-node hardware flags, Raft-replicated cluster state, intent-driven topic settings, and break-glass recovery.
+---
+
+import { Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Danube v2 eliminates static broker YAML files (`danube_broker.yml` / `edge.yaml`) in favor of a clear **4-layer configuration model**. Each concern lives at its natural operational boundary—hardware stays local to each host, cluster policies replicate automatically over Raft, topics declare workload intents, and recovery exports provide an audited break-glass escape hatch.
+
+```
+Layer 1: Node Startup (`danube up`)        ─▶ Local ports, disks, TLS/auth, node role, seed nodes
+Layer 2: Cluster State (Raft)              ─▶ Shared storage, write buffer, WAL policy, load manager
+Layer 3: Topic Creation (`topics create`)  ─▶ Partitions, schema subject, storage mode & `--intent`
+Layer 4: Break-Glass Recovery              ─▶ `export-config` snapshots + `--recovery-config` override
+```
+
+---
+
+## Layer 1: Per-Node Hardware & Network (`danube up`)
+
+At boot time, a broker only needs to know its **local** identity, storage paths, bind addresses, security mode, and how to join the cluster. Every other operational setting lives inside the Raft cluster state.
+
+By default, **Client gRPC, Schema Registry, and Admin gRPC multiplex onto a single port (`6650`)**, so there is no separate admin port to configure unless you want firewall isolation via `--admin-addr`.
+
+<Tabs>
+  <TabItem label="Single Node (Standalone)">
+    ```bash
+    danube up \
+      --mode standalone \
+      --data-dir ./danube-data \
+      --broker-addr 127.0.0.1:6650
+    ```
+  </TabItem>
+  <TabItem label="Production Cluster Node">
+    ```bash
+    danube up \
+      --mode cluster \
+      --data-dir /var/lib/danube/data \
+      --wal-dir /mnt/nvme/danube-wal \
+      --broker-addr 0.0.0.0:6650 \
+      --advertised-addr broker1.danube.internal:6650 \
+      --raft-addr 0.0.0.0:7650 \
+      --seed-nodes 10.0.1.11:7650,10.0.1.12:7650,10.0.1.13:7650 \
+      --node-role all \
+      --auth-mode auto-tls
+    ```
+  </TabItem>
+</Tabs>
+
+Key per-node flags on `danube up`:
+
+- **Storage mounts**: `--data-dir` (Raft metadata and local segments, default `./danube-data`) and optional `--wal-dir` (isolates the write-ahead log onto a dedicated NVMe volume).
+- **Network & routing**: `--broker-addr` (default `127.0.0.1:6650`), optional `--admin-addr` (splits Admin gRPC onto a dedicated port; unset by default), `--advertised-addr` / `--connect-url`, `--raft-addr` (default port `7650`), `--prom-exporter`.
+- **Cluster membership & specialization**: `--seed-nodes`, `--join` (for adding nodes dynamically to an existing cluster), and `--node-role broker|lakehouse|all` (default `all`).
+- **Security**: `--auth-mode none|tls|auto-tls`, plus `--tls-cert`, `--tls-key`, `--ca-cert`, `--jwt-secret`, and `--super-admins`.
+
+<Aside type="tip">
+  See the complete flag catalog in the [Broker Configuration & CLI Reference](/reference/broker-configuration/).
+</Aside>
+
+---
+
+## Layer 2: Cluster-Wide Shared State in Raft
+
+Once the cluster forms Raft quorum, cluster-wide policies are stored under `/cluster/config/*` (`storage`, `write_buffer`, `wal`, `load_manager`, `bootstrap`, and `target_voter_count`) and replicated across every broker. Changes take effect without SSH-ing into nodes or managing per-host config files.
+
+You can manage Layer 2 either **imperatively** with `danube ctl cluster` or **declaratively** with GitOps manifests (`danube ctl apply`).
+
+### Imperative Management (`danube ctl cluster`)
+
+Because Admin gRPC multiplexes on `6650`, `danube ctl` defaults to `DANUBE_ADMIN_ENDPOINT=http://127.0.0.1:6650` (override with `--endpoint` if connecting remotely or using a dedicated `--admin-addr`).
+
+<Tabs>
+  <TabItem label="Tiered Storage">
+    ```bash
+    # Inspect active storage backend
+    danube ctl cluster storage status
+
+    # Configure S3 object store for tiered cold storage
+    danube ctl cluster storage object-store \
+      --backend s3 \
+      --root s3://danube-tiered-prod/segments \
+      --option region=us-east-1
+
+    # Or configure shared POSIX/NFS filesystem storage
+    danube ctl cluster storage shared-fs --root /mnt/shared-danube
+
+    # Switch back to node-local storage only
+    danube ctl cluster storage local --force
+    ```
+  </TabItem>
+  <TabItem label="Write Buffer">
+    ```bash
+    # Enable distributed write-buffer quorum across endpoints
+    danube ctl cluster write-buffer enable \
+      --endpoints http://10.0.1.11:6650,http://10.0.1.12:6650,http://10.0.1.13:6650 \
+      --profile ha \
+      --wait-replicas 2 \
+      --wait-timeout-ms 200 \
+      --on-wait-timeout fail
+
+    # Disable write buffer
+    danube ctl cluster write-buffer disable
+    ```
+  </TabItem>
+  <TabItem label="WAL Policies">
+    ```bash
+    danube ctl cluster wal \
+      --retention-time-minutes 1440 \
+      --retention-size-mb 10240 \
+      --rotate-max-bytes 268435456 \
+      --flush-interval-ms 5 \
+      --flush-max-batch-bytes 1048576
+    ```
+  </TabItem>
+  <TabItem label="Load Manager">
+    ```bash
+    danube ctl cluster load-manager \
+      --assignment-strategy weighted_load \
+      --rebalance true \
+      --profile balanced \
+      --max-moves-per-hour 10 \
+      --cooldown-seconds 300
+    ```
+  </TabItem>
+</Tabs>
+
+### Declarative GitOps (`danube ctl apply`)
+
+Check your desired cluster topology, storage settings, namespaces, and topics into Git and apply them idempotently:
+
+```yaml
+# desired_state.yaml
+namespaces:
+  - /agents
+  - /telemetry
+
+topics:
+  - name: /agents/tasks
+    intent: task_queue
+    partitions: 8
+    storage_mode: cloud_tiered
+
+  - name: /agents/tool-audit
+    intent: audit_log
+    partitions: 4
+    schema_subject: tool-invocation-v1
+    storage_mode: cloud_tiered
+
+  - name: /telemetry/tokens
+    intent: realtime
+    partitions: 4
+```
+
+Top-level manifest sections supported alongside `namespaces` and `topics` include `shared_fs`, `object_store`, `write_buffer`, and `load_manager`.
+
+Always preview changes with `--dry-run` before reconciling:
+
+```bash
+# Preview changes without mutating cluster state
+danube ctl apply -f desired_state.yaml --dry-run
+
+# Apply changes additively (safe default)
+danube ctl apply -f desired_state.yaml
+
+# Reconcile strictly by pruning unmanaged namespaces/topics
+danube ctl apply -f desired_state.yaml --prune --force
+```
+
+---
+
+## Layer 3: Topic Creation (Explicit Structure vs. Implicit `--intent`)
+
+At the topic layer, Danube separates **structural identity** (what the stream is) from **operational behavior** (how durable, fast, or fault-tolerant it must be):
+
+<Steps>
+1. **Specify structural metadata explicitly** when creating or updating a topic:
+   - Topic name (`/namespace/topic` or `--namespace <ns> <topic>`)
+   - Partition count (`--partitions N`, default `0` for non-partitioned)
+   - Optional schema contract (`--schema-subject <subject>`)
+   - Optional per-topic storage tier (`danube ctl topics storage-mode <topic> --mode local|cloud_tiered`)
+
+2. **Delegate durability and poison handling implicitly via `--intent`** (or override dispatch explicitly with `--dispatch-strategy non_reliable|reliable`):
+   - `realtime` — `NonReliable` in-memory delivery, zero disk I/O
+   - `event_stream` — `Reliable`, OS-cache flush WAL, 3 retries (500ms exponential backoff), routes poison messages to `<topic>-dlq`
+   - `task_queue` — `Reliable`, `fsync_batch` WAL, 5 retries (1000ms exponential backoff), routes poison messages to `<topic>-dlq`
+   - `audit_log` — `Reliable`, `fsync_batch` WAL, 10 retries (500ms exponential backoff), blocks on poison messages (no DLQ)
+</Steps>
+
+```bash
+# Explicit structure + implicit intent
+danube ctl topics create /orders/events \
+  --partitions 6 \
+  --schema-subject order-event-v2 \
+  --intent event_stream
+
+# Override per-topic tiered storage mode when object storage is configured
+danube ctl topics storage-mode /orders/events --mode cloud_tiered
+```
+
+---
+
+## Layer 4: Break-Glass Recovery
+
+For disaster recovery, cluster audits, or emergency troubleshooting when Raft quorum cannot yet be reached, export live configuration snapshots and apply node-local overrides with `--recovery-config`:
+
+```bash
+# Export live cluster & broker configuration as YAML or JSON
+danube ctl cluster export-config --format yaml --output cluster-backup.yaml
+
+# Target a specific broker ID if needed
+danube ctl cluster export-config --broker-id 1 --format json --output broker1-backup.json
+```
+
+If an emergency restart requires overriding broker/cluster settings prior to Raft re-convergence, boot the broker with `--recovery-config`:
+
+```bash
+danube up \
+  --mode cluster \
+  --data-dir /var/lib/danube/data \
+  --recovery-config ./emergency-recovery.yaml
+```
+
+<Aside type="caution">
+  Use `--recovery-config` strictly for break-glass incidents or custom offline edge overrides. Under normal operation, persist cluster changes in Raft via `danube ctl cluster` or `danube ctl apply` so every node stays in sync.
+</Aside>
+
+---
+
+## Next Steps
+
+- [Stream Intents](/concepts/stream-intents/) — Exact expansion settings and retry/DLQ semantics.
+- [Broker Modes](/getting-started/broker-modes/) — Comparing `standalone`, `cluster`, and zero-YAML `edge` deployments.
+- [Danube for AI Agents](/ai-agents/overview/) — Workload intents, SDK primitives, branching, and the `danube mcp` control plane.
+- [CLI Messaging & Operations](/admin/cli-messaging/) — Producing, consuming, seeking, peeking, and replaying DLQs with `danube ctl`.

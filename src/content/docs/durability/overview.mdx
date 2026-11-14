@@ -86,7 +86,7 @@ Each tier is independent. You can run any combination:
 
 ## Storage Modes
 
-The `storage.mode` setting controls where sealed WAL segments are exported for durable, cross-broker availability:
+Cluster storage modes are managed live via `danube ctl cluster storage` (persisted in Raft under `/cluster/config/storage` and reconciled across all brokers) or declaratively via `danube ctl apply`. The configured backend controls where sealed WAL segments are exported for durable, cross-broker availability:
 
 | Mode | Durable Storage | Use Case |
 |------|----------------|----------|
@@ -94,11 +94,11 @@ The `storage.mode` setting controls where sealed WAL segments are exported for d
 | `shared_fs` | Shared filesystem (NFS, EFS) | On-prem multi-broker clusters |
 | `object_store` | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native multi-broker deployments |
 
-In all modes, the local WAL handles recent writes and real-time reads. In `shared_fs` and `object_store` modes, a background exporter continuously publishes sealed segments to durable storage for historical replay and cross-broker availability.
+In all modes, the local WAL handles recent writes and real-time reads. In `shared_fs` and `object_store` modes, a background exporter continuously publishes sealed segments to durable storage for historical replay and cross-broker availability. Individual topics can also be promoted to cloud tiering on the fly using `danube ctl topics storage-mode /ns/topic --mode cloud_tiered` (or declared via `danube ctl apply`).
 
-When a topic moves between brokers (e.g., during rebalancing), the new broker reads historical data from the durable storage backend. In `local` mode, only the offset sequence is preserved, there is no shared durable backend. For the full move protocol, see [Reliable Topic Move](/architecture/reliable-topic-move/).
+When a topic moves between brokers (e.g., during rebalancing), the new broker reads historical data from the durable storage backend. In `local` mode, only the offset sequence is preserved; there is no shared durable backend. For the full move protocol, see [Reliable Topic Move](/architecture/reliable-topic-move/).
 
-See [Broker Configuration](/reference/broker-configuration/) for the full YAML reference.
+See [Configuration Workflow](/getting-started/configuration-workflow/) and [Configuration, CLI Flags & Manifest Reference](/reference/broker-configuration/) for live commands and declarative manifests.
 
 ---
 
@@ -129,7 +129,7 @@ See [Broker Configuration](/reference/broker-configuration/) for the full YAML r
   />
   <LinkCard
     title="Configuration Guide"
-    description="Practical YAML examples for enabling each tier."
+    description="Live CLI commands and declarative manifests for enabling each storage tier."
     href="/durability/configuration/"
   />
   <LinkCard

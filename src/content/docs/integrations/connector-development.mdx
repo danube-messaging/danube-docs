@@ -315,7 +315,11 @@ The runtime handles Danube connections, producer/consumer lifecycle, polling/bat
 <Steps>
 1. **Start Danube**:
    ```bash
-   docker-compose up -d
+   # Either run a local standalone broker
+   danube up --mode standalone
+
+   # Or start the 3-broker Docker Compose cluster from danube/docker/
+   docker compose up -d --build
    ```
 
 2. **Set config path**:
@@ -330,12 +334,12 @@ The runtime handles Danube connections, producer/consumer lifecycle, polling/bat
 
 4. **Verify** (source connectors):
    ```bash
-   danube-cli consume --topic /your/topic --subscription test-sub
+   danube ctl consume --topic /your/topic --subscription test-sub
    ```
 
 5. **Verify** (sink connectors):
    ```bash
-   danube-cli produce --topic /your/topic --message '{"test":"data"}'
+   danube ctl produce --topic /your/topic --message '{"test":"data"}'
    # Then check the target system
    ```
 </Steps>

@@ -198,11 +198,74 @@ Messages with the same key must be processed by the same consumer for ordering o
 
 ---
 
+## Failure Policy Inheritance & Overrides
+
+For reliable topics, each subscription tracks delivery attempts, acknowledgment timeouts, backoff delays, and poison-message actions via a `SubscriptionFailurePolicy`:
+
+- **Topics created with `--intent`**: when the first consumer attaches under a new subscription name, the broker reads the topic's persisted intent at `/topics/{ns}/{topic}/intent` and automatically initializes `/topics/{ns}/{topic}/subscriptions/{sub}/failure_policy`. For example, `task_queue` sets `5` retries (`1000 ms` base delay, `exponential` backoff) and `dead_letter` routing to `<topic>-dlq`, while `audit_log` sets `10` retries (`500 ms` base delay) and `block` poison handling. See [Stream Intents & Workload Profiles](/concepts/stream-intents/).
+- **Implicitly created topics**: subscriptions receive broker defaults (`max_redelivery_count = 5`, `ack_timeout_ms = 30000`, `base_redelivery_delay_ms = 1000`, `max_redelivery_delay_ms = 60000`, `exponential` backoff, `block` poison policy).
+- **Per-subscription overrides**: operators can inspect or override any subscription independently at runtime without touching sibling subscriptions:
+
+```bash title="Inspect and override a subscription failure policy"
+danube ctl topics get-failure-policy /default/orders -s payment-workers
+
+danube ctl topics set-failure-policy /default/orders \
+  -s payment-workers \
+  --max-redelivery-count 8 \
+  --ack-timeout-ms 45000 \
+  --base-redelivery-delay-ms 1000 \
+  --max-redelivery-delay-ms 60000 \
+  --backoff-strategy exponential \
+  --dead-letter-topic /default/orders-dlq \
+  --poison-policy dead_letter
+```
+
+---
+
+## Cursor Time-Travel & DLQ Replay
+
+Danube lets operators rewind or fast-forward a subscription cursor without recreating consumers, and replay messages captured in a Dead-Letter Queue:
+
+```bash title="Seek a subscription cursor by offset or timestamp"
+# Rewind subscription cursor to an exact topic offset
+danube ctl topics seek /default/orders \
+  --subscription payment-workers \
+  --to-offset 1200
+
+# Or seek to a publish timestamp (nanoseconds since Unix epoch)
+danube ctl topics seek /default/orders \
+  --subscription payment-workers \
+  --to-timestamp-ns 1763150400000000000
+```
+
+When failed deliveries land in `<topic>-dlq`, inspect them with `danube ctl topics peek` and republish them onto the primary topic after fixing the consumer:
+
+```bash title="Replay messages from a dead-letter topic"
+danube ctl topics replay-dlq /default/orders \
+  --subscription payment-workers \
+  --max-messages 100 \
+  --start-offset 0
+```
+
+---
+
+## Agent Lease & Task-Tree Primitives
+
+For long-running workflows and multi-step AI agent pipelines, reliable consumers have three built-in primitives beyond `ack` and `nack`:
+
+- **`extend_lease(&message, extension_ms)`**: extends the broker-side visibility/ack deadline for an in-flight message before `ack_timeout_ms` expires, preventing premature redelivery during slow LLM or tool calls.
+- **`report_progress(&message, checkpoint, extension_ms)`**: persists a base64-encoded checkpoint payload (up to 64 KiB, delivered as attribute `x-danube-checkpoint-b64` upon redelivery) while atomically extending the lease so a replacement worker can resume mid-task.
+- **`cancel_task_tree(topic, root_msg_id, reason)`**: signals cancellation across correlated subtasks carrying matching `x-danube-root-msg-id` ancestry metadata.
+
+See [AI Agents Overview](/ai-agents/overview/) and the [Consumer Guide](/client-libraries/consumer/) for end-to-end Rust examples.
+
+---
+
 ## Choosing a Dispatch Mode
 
 All subscription patterns work with either dispatch mode:
 
-- **Non-Reliable**: lowest latency, best-effort delivery, no persistence
-- **Reliable**: at-least-once delivery with WAL + cloud persistence and replay
+- **Non-Reliable**: lowest latency, best-effort delivery, no persistence (`--intent realtime`)
+- **Reliable**: at-least-once delivery with WAL + cloud persistence, retries, DLQs, and cursor replay (`--intent event_stream | task_queue | audit_log`)
 
-See [Dispatch Strategies](/concepts/dispatch-strategies/) for details.
+See [Dispatch Strategies](/concepts/dispatch-strategies/), [Stream Intents](/concepts/stream-intents/), and [CLI: Messaging & Topics](/admin/cli-messaging/) for details.
