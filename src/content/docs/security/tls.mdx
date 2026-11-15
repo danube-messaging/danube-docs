@@ -41,6 +41,8 @@ Use the bootstrap token for your first admin steps only. Create named admins wit
 
 All nodes must trust the same CA, because Raft between nodes uses mutual TLS from the first connection. Once Raft is up, the cluster keeps the CA (key encrypted with AES-256-GCM) and the JWT secret in Raft at `/cluster/security/ca`, so every node also ends up with the same JWT secret.
 
+`danube up cluster --auth auto-tls` with `--seed-nodes` or `--join` fails fast unless `ca.pem`, `ca-key.pem` and `jwt.secret` already exist in `<data-dir>/tls/`. Copying `jwt.secret` keeps every node's `bootstrap_admin.token` valid after the cluster JWT secret syncs.
+
 <Steps>
 
 1. **Share one cluster secret.** Set the same `DANUBE_CLUSTER_SECRET` on every node. It encrypts the CA key stored in Raft. Without it, each node generates its own `<data-dir>/cluster_ca.secret`.
@@ -49,25 +51,56 @@ All nodes must trust the same CA, because Raft between nodes uses mutual TLS fro
    export DANUBE_CLUSTER_SECRET="replace-with-a-long-random-secret"
    ```
 
-2. **Generate the CA once.** Start the first node with `--auth auto-tls`, or create a CA yourself, then copy `tls/ca.pem` and `tls/ca-key.pem` into `<data-dir>/tls/` on every other node before its first start. A node only generates a CA when none is present, and signs its own node certificate with the CA it finds.
-
-3. **Start every node with `--auth auto-tls`.**
+2. **Start the first node on its own.** It generates the CA, the JWT secret and the bootstrap token.
 
    ```bash
    danube up cluster \
      --data-dir /var/lib/danube \
      --listen 0.0.0.0:6650 \
      --advertised-addr broker1:6650 \
-     --seed-nodes broker1:7650,broker2:7650,broker3:7650 \
+     --single-node \
      --auth auto-tls
    ```
 
-4. **Use the first node's files** for clients: its `tls/ca.pem` and `bootstrap_admin.token`.
+3. **Copy the shared files to each new node.** Copy `ca.pem`, `ca-key.pem` and `jwt.secret` from `/var/lib/danube/tls/` on `broker1` into `<data-dir>/tls/` on every other node, before its first start. Keep them `0600`.
+
+   ```bash
+   # On broker2 and broker3
+   mkdir -p /var/lib/danube/tls
+   scp broker1:/var/lib/danube/tls/ca.pem broker1:/var/lib/danube/tls/ca-key.pem \
+       broker1:/var/lib/danube/tls/jwt.secret /var/lib/danube/tls/
+   chmod 600 /var/lib/danube/tls/*
+   ```
+
+   A node signs its own node certificate with the CA it finds.
+
+4. **Start the new nodes in join mode.** A joining node needs `--admin-listen`, because its shared `--listen` port only opens after it becomes a member.
+
+   ```bash
+   danube up cluster \
+     --data-dir /var/lib/danube \
+     --listen 0.0.0.0:6650 \
+     --advertised-addr broker2:6650 \
+     --admin-listen 0.0.0.0:50051 \
+     --join \
+     --auth auto-tls
+   ```
+
+5. **Add and promote the new nodes.** Use the first node's `tls/ca.pem` and `bootstrap_admin.token` for the CLI:
+
+   ```bash
+   danube cluster node add --node-addr https://broker2:50051
+   danube cluster node promote --node-id <NODE2_ID>
+   ```
+
+   `danube cluster status` shows each node id. See [Grow from one to three nodes](/getting-started/broker-modes/#grow-from-one-to-three-nodes).
 
 </Steps>
 
+Alternatively, copy `ca.pem`, `ca-key.pem` and `jwt.secret` from a first node into `<data-dir>/tls/` on all nodes before their first start, and start every node with `--seed-nodes`.
+
 <Aside type="tip">
-For production clusters, `--auth tls` with certificates from your own PKI is the more predictable choice: every node gets its certificate from the same place, and rotation follows your existing process.
+For production clusters, `--auth tls` with certificates from your own PKI is the recommended choice: every node gets its certificate from the same place, and rotation follows your existing process.
 </Aside>
 
 ## Option 2: bring your own certificates

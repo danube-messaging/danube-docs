@@ -30,6 +30,8 @@ danube topic create /orders/events --intent event_stream      # 4. create a topi
      --auth auto-tls
    ```
 
+   With `--auth auto-tls` and `--seed-nodes`, every node needs the same `ca.pem`, `ca-key.pem` and `jwt.secret` in `<data-dir>/tls/` before its first start, or `danube up` refuses to start. See [auto-tls on a multi-node cluster](/security/tls/#auto-tls-on-a-multi-node-cluster).
+
    See [Node Modes](/getting-started/broker-modes/) for every flag.
 
 2. **Change cluster-wide settings in Raft with `danube cluster`.**
@@ -46,7 +48,7 @@ danube topic create /orders/events --intent event_stream      # 4. create a topi
 
 5. **Keep a break-glass copy with `export-config` and `--recovery-config`.**
 
-   Export the live settings to a file. If Raft quorum is ever lost, start a node with that file as a local override.
+   Export the live settings with `--include-secrets` to a file. If Raft quorum is ever lost, start a node with that file as a local override.
 </Steps>
 
 ## Change cluster settings live
@@ -224,12 +226,14 @@ See [Stream Intents](/concepts/stream-intents/) for the full settings and aliase
 
 ## Keep a break-glass copy
 
-Export the live cluster settings regularly:
+Export the live cluster settings regularly. Secrets are redacted by default, and `--recovery-config` rejects a redacted file, so add `--include-secrets` for a break-glass copy:
 
 ```bash
-danube cluster export-config --output cluster-backup.yaml
-danube cluster export-config --format json --broker-id <BROKER_ID> --output broker1.json
+danube cluster export-config --include-secrets --output cluster-backup.yaml
+danube cluster export-config --include-secrets --format json --broker-id <BROKER_ID> --output broker1.json
 ```
+
+The files hold the JWT secret and storage credentials. They are written with `0600` permissions: keep them in a secrets manager.
 
 `--broker-id` also records that node's listen and admin addresses. If Raft quorum is lost and you must start a node with known settings, pass the file as a local override:
 

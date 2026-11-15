@@ -44,10 +44,10 @@ Run `danube` on its own at any time for an overview of every command. It never s
    danube consume /default/orders -s my-sub
    ```
 
-4. **Produce a few messages.** `event_stream` topics are reliable, so pass `-r`.
+4. **Produce a few messages.** `event_stream` topics are reliable, and the producer follows the topic's strategy.
 
    ```bash title="Terminal 3"
-   danube produce /default/orders -m "hello danube" -r --count 5
+   danube produce /default/orders -m "hello danube" --count 5
    ```
 
    The consumer prints each message as it arrives.

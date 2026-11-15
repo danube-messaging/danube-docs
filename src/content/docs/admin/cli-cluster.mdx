@@ -129,6 +129,7 @@ To let the cluster do this on its own, turn on automated rebalancing (see [tune 
 Cluster storage decides where sealed WAL segments go for durability and tiering. It is a live setting stored in Raft: one command switches every broker, no restart needed.
 
 ```bash
+# Print the storage section of the cluster config (credentials redacted)
 danube cluster storage show
 ```
 
@@ -205,7 +206,7 @@ danube cluster write-buffer disable
 
 ## Tune WAL retention
 
-Run `danube cluster wal` with no flags to print the current cluster config. Add flags to change it:
+Run `danube cluster wal` with no flags to print the current `storage.wal` and `storage.local_retention` settings. Add flags to change them:
 
 ```bash
 # Keep 2 days or 20 GiB of local WAL, whichever comes first
@@ -243,20 +244,24 @@ danube cluster load-manager --replace-blacklist                                 
 - **Strategies**: `fair`, `balanced`, `weighted_load`.
 - **Profiles**: `conservative`, `balanced`, `aggressive` set the check interval, moves per hour and cooldown together.
 
-Run it with no flags to print the current settings. The scoring is explained in [Load Manager](/architecture/load-manager/).
+Run it with no flags to print the current `load_manager` settings. The scoring is explained in [Load Manager](/architecture/load-manager/).
 
 ## Back up the cluster config
 
-`export-config` writes the live Raft config as a break-glass recovery file. Keep a copy somewhere safe.
+`export-config` writes the live Raft config as YAML or JSON. Secrets (JWT secret, object-store credentials, Valkey URL passwords) are replaced with `<redacted>` by default, so the output is safe to share.
 
 ```bash
-danube cluster export-config --format yaml --output recovery.yaml
+# Redacted copy, safe for tickets and reviews
+danube cluster export-config --format yaml --output cluster.yaml
+
+# Break-glass recovery file with real secrets (written with 0600 permissions)
+danube cluster export-config --include-secrets --format yaml --output recovery.yaml
 
 # Include one broker's bind and admin addresses
-danube cluster export-config --broker-id 12345678 --format json --output broker.json
+danube cluster export-config --include-secrets --broker-id 12345678 --format json --output broker.json
 ```
 
-If quorum is ever lost, start a node with `danube up cluster --data-dir /var/lib/danube --recovery-config recovery.yaml`. See [Crash Recovery](/durability/crash-recovery/) before you do.
+`--include-secrets` prints a warning to stderr. Keep that file somewhere safe. If quorum is ever lost, start a node with `danube up cluster --data-dir /var/lib/danube --recovery-config recovery.yaml`. A file that still contains `<redacted>` is rejected. See [Crash Recovery](/durability/crash-recovery/) before you do.
 
 ## Manage access
 

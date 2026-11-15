@@ -17,7 +17,7 @@ danube cluster storage object-store --backend s3 --root my-danube-bucket/prod --
 danube cluster storage show
 ```
 
-`danube cluster storage show` prints the effective cluster configuration as YAML: storage mode, WAL settings and write buffer. It is the same document as `danube cluster export-config`, so it can include credentials and the JWT secret: avoid pasting it into tickets or logs.
+`danube cluster storage show` prints only the `storage` section of the cluster config as YAML: storage mode, durable backend, WAL settings and write buffer. Object-store credentials and Valkey URL passwords are shown as `<redacted>`. For the whole config, use `danube cluster export-config`.
 
 ## Put the WAL on a fast disk (per node)
 
@@ -143,7 +143,7 @@ Setting `cloud_tiered` fails if the cluster has no durable store yet.
 
 ## Tune the WAL
 
-`danube cluster wal` updates rotation, flushing, cache and retention on every broker live. Flags you leave out keep their current value. Run it with no flags to print the current settings.
+`danube cluster wal` updates rotation, flushing, cache and retention on every broker live. Flags you leave out keep their current value. Run it with no flags to print the current `storage.wal` and `storage.local_retention` settings.
 
 ```bash
 danube cluster wal \

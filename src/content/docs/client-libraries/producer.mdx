@@ -116,7 +116,7 @@ Required:
 
 Optional:
 
-- **with_reliable_dispatch()**: ask for a reliable topic. Must match the topic's strategy.
+- **with_reliable_dispatch()**: make the topic reliable if this producer auto-creates it. On an existing topic the topic's strategy wins, and only a reliable request on a non-reliable topic is rejected.
 - **with_partitions(n)**: create the topic with `n` partitions if it does not exist yet. `0` is rejected.
 - **with_schema_subject(subject)**: use the latest version of a registered schema.
 - **with_schema_version(subject, v)**: pin to schema version `v`.
@@ -194,7 +194,7 @@ Stream intents pick delivery, durability and retry settings for you. Create the 
 danube topic create /default/orders --intent event_stream --partitions 3
 ```
 
-`event_stream`, `task_queue` and `audit_log` create **reliable** topics, so the producer must call `with_reliable_dispatch()`. Leave out `with_partitions()`: `create()` looks up the existing partitions and attaches to all of them.
+`event_stream`, `task_queue` and `audit_log` create **reliable** topics. The existing topic's strategy wins, so the producer attaches with reliable dispatch either way. Calling `with_reliable_dispatch()` is optional here. It documents intent, and makes the topic reliable if the producer ever auto-creates it. Leave out `with_partitions()`: `create()` looks up the existing partitions and attaches to all of them.
 
 <Tabs syncKey="client-lang">
 <TabItem label="Rust">
@@ -255,8 +255,8 @@ await producer.create()
 </TabItem>
 </Tabs>
 
-<Aside type="caution" title="Strategy mismatch">
-If the producer's dispatch strategy differs from the topic's, `create()` fails with `FailedPrecondition: Producer requested dispatch strategy does not match topic strategy`. For `realtime` topics, leave `with_reliable_dispatch()` out.
+<Aside type="caution" title="Reliable producer on a non-reliable topic">
+A producer without `with_reliable_dispatch()` can attach to a reliable topic. The reverse is rejected: a reliable producer on a non-reliable topic fails `create()` with `FailedPrecondition: Producer requested reliable dispatch, but topic '<topic>' is non-reliable`. For `realtime` topics, leave `with_reliable_dispatch()` out.
 </Aside>
 
 Check the topic end to end from two terminals. Start the consumer first: a new subscription on a reliable topic starts at the end.
@@ -265,8 +265,8 @@ Check the topic end to end from two terminals. Start the consumer first: a new s
 # terminal 1
 danube consume /default/orders -s smoke-test
 
-# terminal 2 (-r is required for reliable topics)
-danube produce /default/orders -m "order 1001" -r
+# terminal 2 (the topic is already reliable, so no -r is needed)
+danube produce /default/orders -m "order 1001"
 ```
 
 See [Stream Intents](/concepts/stream-intents/) for what each intent configures and [Dispatch Strategies](/concepts/dispatch-strategies/) for reliable versus non-reliable delivery.

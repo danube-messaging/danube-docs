@@ -178,7 +178,7 @@ danube topic subscription failure-policy set /default/jobs \
 </Tabs>
 
 <Aside type="note">
-Producing to a reliable topic from the CLI needs `-r/--reliable`: `danube produce /agents/tasks -m '{"job":1}' --reliable`.
+A producer follows the strategy of the topic it attaches to, so `danube produce /agents/tasks -m '{"job":1}'` works on a reliable topic without a flag. `-r/--reliable` only matters when the producer auto-creates the topic, and it is rejected on a non-reliable topic.
 </Aside>
 
 ## Next steps

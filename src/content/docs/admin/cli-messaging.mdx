@@ -21,7 +21,7 @@ Start the consumer first. A new subscription on a reliable topic begins at the e
 
 ## Send your first message to a reliable topic
 
-Topics created with an intent such as `event_stream` or `task_queue` use reliable dispatch. The CLI producer must match, so add `-r`:
+Topics created with an intent such as `event_stream` or `task_queue` use reliable dispatch. The producer follows the existing topic's strategy, so no extra flag is needed:
 
 <Steps>
 1. **Create the topic**:
@@ -36,11 +36,11 @@ Topics created with an intent such as `event_stream` or `task_queue` use reliabl
 
 3. **Produce** from another:
    ```bash
-   danube produce /default/orders -r -m '{"id":1,"total":42.5}'
+   danube produce /default/orders -m '{"id":1,"total":42.5}'
    ```
 </Steps>
 
-If the topic does not exist yet and auto-creation is on, `produce` creates it on first publish. `-r` makes that topic reliable and `-p 3` makes it partitioned. Prefer `danube topic create --intent` so the choice is explicit.
+If the topic does not exist yet and auto-creation is on, `produce` creates it on first publish. `-r` makes that topic reliable and `-p 3` makes it partitioned. On an existing topic `-r` changes nothing: the topic's strategy wins, and `-r` is only rejected on a non-reliable topic. Prefer `danube topic create --intent` so the choice is explicit.
 
 ## Generate a burst of traffic
 
@@ -58,7 +58,7 @@ danube produce /default/events -m '{"temp":21.3}' --count 100 --interval 50
 The file's raw bytes become the payload, so this works for JSON, Avro, Protobuf or binary data:
 
 ```bash
-danube produce /default/orders -r -f ./order.json
+danube produce /default/orders -f ./order.json
 ```
 
 ## Route by key and add attributes
@@ -66,7 +66,7 @@ danube produce /default/orders -r -f ./order.json
 Keys drive [Key-Shared](/client-libraries/key-shared/) routing: all messages with the same key go to the same consumer, in order.
 
 ```bash
-danube produce /default/orders -r -m '{"id":7}' --key customer-42 --attr source:cli,env:dev
+danube produce /default/orders -m '{"id":7}' --key customer-42 --attr source:cli,env:dev
 ```
 
 Then read only some keys:
@@ -109,17 +109,17 @@ Messages that reference a registered schema are validated by the broker, and `co
 <Tabs>
   <TabItem label="Existing subject">
     ```bash
-    danube produce /default/orders -r -f ./order.json --schema-subject orders-value
+    danube produce /default/orders -f ./order.json --schema-subject orders-value
 
     # Pin an exact version, or require a minimum one
-    danube produce /default/orders -r -f ./order.json --schema-subject orders-value --schema-version 2
-    danube produce /default/orders -r -f ./order.json --schema-subject orders-value --schema-min-version 2
+    danube produce /default/orders -f ./order.json --schema-subject orders-value --schema-version 2
+    danube produce /default/orders -f ./order.json --schema-subject orders-value --schema-min-version 2
     ```
   </TabItem>
   <TabItem label="Register on the fly">
     ```bash
     # Registers schema.json under the subject "default-orders", then publishes with it
-    danube produce /default/orders -r -m '{"id":1}' \
+    danube produce /default/orders -m '{"id":1}' \
       --schema-file ./schema.json --schema-type json-schema
     ```
     Schema types: `bytes`, `string`, `number`, `json-schema`, `avro`, `protobuf`. The subject name is the topic path with slashes turned into dashes.

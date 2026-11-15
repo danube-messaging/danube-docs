@@ -63,6 +63,8 @@ Both modes can run side by side in one cluster, and all four [subscription types
         .with_reliable_dispatch()
         .build()?;
     ```
+
+    The producer's choice only applies when it creates the topic. On an existing topic, the topic's strategy wins: a non-reliable producer can attach to a reliable topic, but a reliable producer on a non-reliable topic is rejected.
   </TabItem>
 </Tabs>
 

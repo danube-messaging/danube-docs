@@ -136,10 +136,10 @@ Run the `docker build` from the repository root. Released images are also publis
 
 Add flags to the `command` list of each service:
 
-- **TLS**: `--auth auto-tls`, or `--auth tls` with `--tls-cert`, `--tls-key` and `--ca-cert` (plus optional `--jwt-secret` and `--super-admin`).
+- **TLS**: `--auth tls` with `--tls-cert`, `--tls-key` and `--ca-cert` (plus optional `--jwt-secret` and `--super-admin`). `--auth auto-tls` with `--seed-nodes` also works, but only if `ca.pem`, `ca-key.pem` and `jwt.secret` are mounted into `<data-dir>/tls/` of every broker before first start. See [auto-tls on a multi-node cluster](/security/tls/#auto-tls-on-a-multi-node-cluster).
 - **Separate admin port**: `--admin-listen 0.0.0.0:50051` to firewall admin gRPC away from `6650`.
 - **Check before you start**: append `--dry-run` to print the resolved configuration.
-- **Break-glass recovery**: mount a file exported with `danube cluster export-config` and pass `--recovery-config /path/to/recovery.yaml`.
+- **Break-glass recovery**: mount a file exported with `danube cluster export-config --include-secrets` and pass `--recovery-config /path/to/recovery.yaml`. A redacted export is rejected.
 
 ## Troubleshoot and reset
 

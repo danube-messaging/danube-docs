@@ -102,7 +102,7 @@ danube cluster write-buffer disable
 ## Tune WAL retention and batching
 
 ```bash
-# Show the current cluster config
+# Show the current WAL and local retention settings
 danube cluster wal
 
 # Keep one day or 10 GiB, rotate segments at 64 MiB, batch writes every 5 ms

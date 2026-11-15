@@ -33,7 +33,7 @@ danube produce /default/orders -m 'order' --count 10 --interval 100
 Add a consumer with `-s audit` before producing and it receives all 10 messages as well, because it is a different subscription.
 
 <Aside type="note">
-A new subscription starts at the end of the topic, so start consumers before you produce. On reliable topics, add `--reliable` to `danube produce`.
+A new subscription starts at the end of the topic, so start consumers before you produce. `danube produce` follows the existing topic's dispatch strategy, so reliable topics need no extra flag.
 </Aside>
 
 ## Choose a subscription type

@@ -183,7 +183,7 @@ Each broker keeps advertising its pod address internally. Danube clients connect
 
 ## Production checklist
 
-- **Security**: add `--auth tls` with certificates mounted from a Secret (`--tls-cert`, `--tls-key`, `--ca-cert`), or `--auth auto-tls`. See [Securing a Cluster](/security/securing-a-cluster/).
+- **Security**: add `--auth tls` with certificates mounted from a Secret (`--tls-cert`, `--tls-key`, `--ca-cert`). `--auth auto-tls` with `--seed-nodes` needs the same `ca.pem`, `ca-key.pem` and `jwt.secret` mounted into `<data-dir>/tls/` on every pod before first start. See [Securing a Cluster](/security/securing-a-cluster/).
 - **Tiered storage**: run `danube cluster storage object-store` after the cluster is up so sealed segments move to S3, GCS or Azure.
 - **Fast disks**: mount a second volume and pass `--wal-dir` to keep the WAL on NVMe.
 - **Metrics**: scrape port `9040` on each pod with Prometheus.

@@ -33,7 +33,7 @@ danube topic create /default/events --intent event_stream
 
 # 3. Start a reader, then send from another terminal
 danube consume /default/events
-danube produce /default/events -m 'hello' -r
+danube produce /default/events -m 'hello'
 ```
 
 That's the whole setup. No config files, no ZooKeeper, no separate schema registry.

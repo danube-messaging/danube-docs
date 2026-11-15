@@ -94,13 +94,13 @@ Cluster settings live in Raft. If a cluster loses quorum and you need to restart
 
 <Steps>
 
-1. **Export the config while the cluster is healthy.** Do this ahead of time and keep the file somewhere safe:
+1. **Export the config while the cluster is healthy.** Do this ahead of time and keep the file somewhere safe. A recovery file needs real secrets, so add `--include-secrets`:
 
    ```bash
-   danube cluster export-config --broker-id 1 --output recovery.yaml
+   danube cluster export-config --include-secrets --broker-id 1 --output recovery.yaml
    ```
 
-   `--broker-id` adds that node's listen and admin addresses. Use `--format json` for JSON.
+   `--broker-id` adds that node's listen and admin addresses. Use `--format json` for JSON. Without `--include-secrets`, secrets are written as `<redacted>` and `--recovery-config` rejects the file.
 
 2. **Edit what has to change**, for example `seed_nodes` to point at the surviving members.
 
@@ -117,7 +117,7 @@ Cluster settings live in Raft. If a cluster loses quorum and you need to restart
 A recovery file can set `seed_nodes`, `super_admins`, `auto_create_topics`, `policies`, `storage`, `load_manager`, `auth`, `broker_addr` and `admin_addr`. Fields you leave out keep their normal values. An edge node started with `--recovery-config` does not need `--cloud-endpoint`.
 
 <Aside type="danger">
-The exported file contains the cluster's auth settings, including the JWT signing secret, and any object storage credentials you passed as options. Treat it like a private key: restrict its permissions and store it in a secrets manager.
+By default `export-config` replaces the JWT secret, object-store credentials and Valkey URL passwords with `<redacted>`. With `--include-secrets` the file holds the real JWT signing secret and storage credentials: it is written with `0600` permissions and a warning is printed. Treat it like a private key and store it in a secrets manager.
 </Aside>
 
 ## Next steps

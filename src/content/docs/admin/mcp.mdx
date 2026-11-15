@@ -189,6 +189,8 @@ Destructive tools refuse to run unless the call includes `confirm_destructive: t
 - **Topics and subscriptions**: `delete_topic`, `unsubscribe`, `unload_topic`, `seek_subscription`, `replay_dlq`.
 - **Schemas and security**: `delete_schema_version`, `delete_role`, `delete_binding`.
 
+`cluster_export_config` never returns secrets: the JWT secret, object-store credentials and Valkey passwords are always `<redacted>`.
+
 <Aside type="tip">
 `trigger_rebalance`, `unload_broker` and `apply_desired_state` accept `dry_run: true`, so the assistant can show you the exact plan before asking for confirmation.
 </Aside>
@@ -205,7 +207,7 @@ Destructive tools refuse to run unless the call includes `confirm_destructive: t
 - `add_cluster_node`, `promote_cluster_node`, `remove_cluster_node`: Raft membership.
 - `cluster_configure_storage`, `configure_object_store`: switch durable storage.
 - `cluster_configure_write_buffer`, `cluster_configure_wal`, `cluster_configure_load_manager`: live cluster settings.
-- `cluster_export_config`: export the break-glass recovery config.
+- `cluster_export_config`: export the cluster config with secrets always redacted. For a break-glass recovery file, run `danube cluster export-config --include-secrets` yourself.
 - `apply_desired_state`: reconcile a YAML or JSON manifest (`dry_run`, `prune`, `force`).
 
 ### Topics and subscriptions (18)
