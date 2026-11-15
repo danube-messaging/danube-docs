@@ -95,7 +95,7 @@ The producer picks the partition for each message:
 
 ```bash
 # Same key, same partition, ordered
-danube produce /default/clicks -m '{"page":"/home"}' --key user-42 --reliable
+danube produce /default/clicks -m '{"page":"/home"}' --key user-42
 ```
 
 ```rust title="Rust client: keyed send"
@@ -117,7 +117,7 @@ Pair keyed sends with a [Key-Shared subscription](/concepts/subscriptions/#key-s
     Or declare it in a file and run `danube apply -f desired_state.yaml`.
   </TabItem>
   <TabItem label="Implicit (auto-create)">
-    If a producer connects to a topic that does not exist, the broker creates it. It uses the producer's dispatch mode (non-reliable unless the client asks for reliable) and its partition count.
+    If a producer connects to a topic that does not exist, the broker creates it. It uses the producer's dispatch mode (non-reliable unless the client asks for reliable) and its partition count. On a topic that already exists, the topic's own strategy wins.
 
     ```bash
     # Auto-creates a reliable topic with 2 partitions

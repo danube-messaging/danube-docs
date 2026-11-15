@@ -227,7 +227,7 @@ client = await (
 
 2. Find the generated files in the data directory:
 
-   - **./danube-data/tls/ca.pem**: the cluster CA, shared by all nodes through Raft.
+   - **./danube-data/tls/ca.pem**: the cluster CA. Nodes that join later get a copy of it, together with `ca-key.pem` and `jwt.secret`. See [auto-tls on a multi-node cluster](/security/tls/#auto-tls-on-a-multi-node-cluster).
    - **./danube-data/bootstrap_admin.token**: a super-admin JWT, file mode `0600`.
 
 3. Point the client at them. The node certificate covers `localhost` and `127.0.0.1` plus the advertised address.

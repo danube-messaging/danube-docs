@@ -354,7 +354,7 @@ async fn main() -> ConnectorResult<()> {
    danube consume /your/topic -s test-sub
    ```
 
-5. **Verify a sink**: publish a test message (`-r` because the topic is reliable), then check the target system.
+5. **Verify a sink**: publish a test message, then check the target system. `-r` makes the topic reliable if this command creates it. On an existing topic, the topic's strategy wins.
 
    ```bash
    danube produce /your/topic -r -m '{"test":"data"}'

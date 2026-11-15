@@ -15,7 +15,7 @@ It is built for two kinds of users: developers wiring services together, and tea
 danube up standalone                                    # one node, ready on :6650
 danube topic create /default/tasks --intent task_queue  # durable queue with retries and a DLQ
 danube consume /default/tasks -s workers                # start a worker
-danube produce /default/tasks -m 'resize image 42' -r   # hand it a job (second terminal)
+danube produce /default/tasks -m 'resize image 42'      # hand it a job (second terminal)
 ```
 
 Producers publish to **topics**. Consumers read through named **subscriptions**. The **intent** tells Danube how careful to be with each topic.

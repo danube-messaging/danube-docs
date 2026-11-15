@@ -60,10 +60,10 @@ Five minutes from nothing to a working broker, a durable topic and your first me
 5. **Produce messages**
 
    ```bash title="Terminal 2"
-   danube produce /default/orders -m 'order #1' -c 5 -r
+   danube produce /default/orders -m 'order #1' -c 5
    ```
 
-   `-c 5` sends five messages and they show up in Terminal 3. `-r` asks for reliable delivery, which durable topics need from the CLI. Press Ctrl-C in Terminal 3 when done.
+   `-c 5` sends five messages and they show up in Terminal 3. The producer uses the topic's reliable delivery, so no extra flag is needed. Press Ctrl-C in Terminal 3 when done.
 
 6. **Inspect the topic**
 

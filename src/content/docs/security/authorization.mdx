@@ -76,7 +76,7 @@ Scopes nest like this:
 </Aside>
 
 <Aside type="caution">
-Today the receive, ack and nack calls check `Consume` at **cluster** scope, and fetching a schema by ID checks `ManageSchema` at cluster scope. A consumer bound only at namespace or topic scope can subscribe but will be denied when it starts receiving. Until this is narrowed, bind consumer roles at cluster scope.
+Schema reads are checked as `ManageSchema`, not `Consume`. Fetching a schema by ID checks `ManageSchema` at **cluster** scope. Reading the latest schema or listing versions checks `ManageSchema` on the subject. A client that resolves schemas, for example a consumer that decodes typed messages, needs a matching `ManageSchema` binding as well as its `Consume` binding.
 </Aside>
 
 ## Manage roles

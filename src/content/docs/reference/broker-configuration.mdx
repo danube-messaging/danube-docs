@@ -62,7 +62,7 @@ One port, `6650`, serves client gRPC, the schema registry and admin gRPC togethe
 
 ### Security
 
-- **`--auth <MODE>`**: `none` (plaintext, default), `tls` (your own certificates) or `auto-tls` (generates a cluster CA, node certificate and bootstrap admin token in the data directory). Env: `DANUBE_AUTH`.
+- **`--auth <MODE>`**: `none` (plaintext, default), `tls` (your own certificates) or `auto-tls` (generates a cluster CA, node certificate and bootstrap admin token in the data directory). With `--seed-nodes` or `--join`, `auto-tls` requires `ca.pem`, `ca-key.pem` and `jwt.secret` in `<data-dir>/tls/` before start. Env: `DANUBE_AUTH`.
 - **`--tls-cert <FILE>`**: server certificate (PEM). Required with `--auth tls`.
 - **`--tls-key <FILE>`**: server private key (PEM). Required with `--auth tls`.
 - **`--ca-cert <FILE>`**: CA certificate (PEM) used to verify peers and clients. Required with `--auth tls`.
@@ -106,7 +106,7 @@ Every data directory records the mode that created it in `danube-node.json`. Sta
   - danube-node.json (mode marker)
   - raft/ (Raft log, snapshots and node id)
   - wal/ (local WAL, unless --wal-dir is set)
-  - tls/ (auto-tls only: ca.pem, cert.pem, key.pem, jwt.secret)
+  - tls/ (auto-tls only: ca.pem, ca-key.pem, cert.pem, key.pem, jwt.secret)
   - bootstrap_admin.token (auto-tls only: first super-admin JWT)
   - cluster_ca.secret (auto-tls only, when DANUBE_CLUSTER_SECRET is unset)
 </FileTree>
@@ -202,7 +202,7 @@ These are not startup flags. They live in Raft, apply to every broker, and chang
 
 ### Storage: danube cluster storage
 
-- **`show`**: print the effective storage configuration.
+- **`show`**: print the `storage` section of the cluster config. Credentials are redacted.
 - **`local [--force]`**: local WAL only.
 - **`shared-fs --root <ROOT> [--force]`**: shared filesystem (NFS, EFS) for durable segments.
 - **`object-store --backend <BACKEND> --root <ROOT> [--option KEY=VALUE]... [--force]`**: object storage.
@@ -225,7 +225,7 @@ These are not startup flags. They live in Raft, apply to every broker, and chang
 
 ### WAL and retention: danube cluster wal
 
-Run with no flags to print the current cluster config.
+Run with no flags to print the current `storage.wal` and `storage.local_retention` settings.
 
 - `--retention-time-minutes <N>`: retention window.
 - `--retention-size-mb <N>`: retention size cap in MiB.
@@ -239,7 +239,7 @@ Run with no flags to print the current cluster config.
 
 ### Load manager: danube cluster load-manager
 
-Run with no flags to print the current settings.
+Run with no flags to print the current `load_manager` settings.
 
 - `--assignment-strategy <fair|balanced|weighted_load>`: placement of new topics.
 - `--load-report-interval-seconds <N>`: how often brokers report load.
@@ -256,6 +256,9 @@ Run with no flags to print the current settings.
 - `--format <yaml|json>`: default `yaml`.
 - `--output <FILE>`: write to a file instead of stdout.
 - `--broker-id <ID>`: include that broker's bind and admin addresses.
+- `--include-secrets`: write real secrets instead of `<redacted>`. Prints a warning to stderr. With `--output`, the file is created with `0600` permissions.
+
+By default the JWT secret, object-store credentials (`access_key`, `secret_key`, `session_token`, `credentials_json`, `account_key`) and Valkey URL passwords are replaced with `<redacted>`. A redacted file is safe to share, but `--recovery-config` rejects it.
 
 Task-style examples for all of these are in [CLI: Cluster, Brokers & Access](/admin/cli-cluster/).
 
@@ -321,12 +324,14 @@ Apply is additive. `--prune` also deletes topics missing from the manifest (only
 `--recovery-config` is for emergencies: lost quorum, admin lockout, a broken storage setting. On a healthy cluster always use `danube cluster ...` or `danube apply`.
 </Aside>
 
-Export one while things are healthy, and use it only to start a node in trouble:
+Export one while things are healthy, and use it only to start a node in trouble. The file needs real secrets, so export it with `--include-secrets`:
 
 ```bash
-danube cluster export-config --format yaml --output recovery.yaml
+danube cluster export-config --include-secrets --format yaml --output recovery.yaml
 danube up cluster --data-dir /var/lib/danube --recovery-config recovery.yaml
 ```
+
+`--recovery-config` rejects a file that still contains `<redacted>`. Store the file like a private key.
 
 Every field is optional; only fields present in the file override the node:
 

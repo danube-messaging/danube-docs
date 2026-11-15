@@ -28,9 +28,9 @@ Use it when events for one entity (an order, a user, a device) must be processed
 3. Publish a few keyed messages from a third terminal:
 
    ```bash
-   danube produce /default/orders -m "Payment for #1001" -k payment -r
-   danube produce /default/orders -m "Order #1001 shipped" -k shipping -r
-   danube produce /default/orders -m "Payment for #1002" -k payment -r
+   danube produce /default/orders -m "Payment for #1001" -k payment
+   danube produce /default/orders -m "Order #1001 shipped" -k shipping
+   danube produce /default/orders -m "Payment for #1002" -k payment
    ```
 
    Both `payment` messages land on the same consumer, in order.

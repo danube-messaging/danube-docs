@@ -104,17 +104,14 @@ In about ten minutes you will have an encrypted, authenticated Danube node where
      --scope topic \
      --resource /payments/orders
 
-   # ledger-svc may read
+   # ledger-svc may only read /payments/orders
    danube auth binding create ledger-reader \
      --principal-type service_account \
      --principal-name ledger-svc \
      --roles order-reader \
-     --scope cluster
+     --scope topic \
+     --resource /payments/orders
    ```
-
-   <Aside type="caution">
-   The reader is bound at cluster scope because receiving messages currently checks `Consume` at cluster scope. See [Authorization](/security/authorization/#permissions).
-   </Aside>
 
 6. ## Issue tokens for the services
 
@@ -137,7 +134,7 @@ In about ten minutes you will have an encrypted, authenticated Danube node where
 
    ```bash
    # Terminal 2, allowed: checkout-svc writes
-   danube produce /payments/orders -r -m '{"order_id":"ord-1","amount":125.00}' \
+   danube produce /payments/orders -m '{"order_id":"ord-1","amount":125.00}' \
      --endpoint https://127.0.0.1:6650 --tls-ca ./danube-data/tls/ca.pem --token "$CHECKOUT_TOKEN"
 
    # Denied with PERMISSION_DENIED: checkout-svc has no Consume
@@ -162,7 +159,7 @@ In about ten minutes you will have an encrypted, authenticated Danube node where
 - **Guard the secrets**: keep `DANUBE_CLUSTER_SECRET`, `DANUBE_JWT_SECRET`, `ca-key.pem` and `key.pem` in a secrets manager or `0600` files.
 - **Retire the bootstrap token**: create named admins with a `cluster-admin` role, then store `bootstrap_admin.token` offline. Lockout protection keeps at least one admin alive.
 - **Protect the console**: run `danube console` with `--require-auth` and `--http-token`, or behind an authenticating proxy. See [Security overview](/security/overview/#protect-the-web-console).
-- **Keep recovery files safe**: `danube cluster export-config` output includes the JWT secret. See [Crash recovery](/durability/crash-recovery/#break-glass-recover-a-broken-cluster).
+- **Keep recovery files safe**: `danube cluster export-config` redacts secrets by default. A break-glass file needs `--include-secrets`, which writes the JWT secret and storage credentials, so store it with `0600` permissions. See [Crash recovery](/durability/crash-recovery/#break-glass-recover-a-broken-cluster).
 
 ## Next steps
 
