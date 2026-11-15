@@ -1,134 +1,169 @@
 ---
-title: TLS & Certificates
-description: Enable TLS encryption for clients, admin control plane, and inter-broker mTLS using auto-tls or custom PKI certificates.
+title: TLS and Certificates
+description: Encrypt client, admin and broker-to-broker traffic with auto-generated certificates or your own PKI.
 ---
 
-import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Danube uses a unified certificate set to encrypt all cluster traffic:
+One certificate set encrypts everything a Danube node talks over. Let Danube generate it with `--auth auto-tls`, or hand it your own files with `--auth tls`. Either way, clients also need a JWT: TLS and authentication are switched on together.
 
-* **Client & Admin gRPC (port `6650`)**: Server-side TLS (both data-plane and admin control-plane protocols are multiplexed on port `6650`, and `admin_tls` is enabled automatically whenever TLS is active; if you specify a dedicated `--admin-addr`, that listener also uses the same TLS configuration).
-* **Raft Consensus (port `7650`) & Inter-Broker Replicator**: Mutual TLS (mTLS) where both peers verify client and server certificates against the cluster CA.
+## What gets encrypted
 
-You can enable TLS either automatically with `--auth-mode auto-tls` or with your own PKI certificates via `--auth-mode tls`.
+- **Client and admin gRPC (port 6650)**: server TLS. Clients verify the broker against the CA; they do not need a client certificate.
+- **Separate admin listener** (`--admin-listen`): same certificate, same TLS.
+- **Raft (port 7650) and inter-broker replication**: mutual TLS. Both sides present a certificate signed by the cluster CA.
 
----
+## Option 1: auto-tls
 
-## Option 1: Zero-Config `--auth-mode auto-tls`
-
-For quick secure deployments without manually running OpenSSL scripts, boot brokers with `--auth-mode auto-tls`:
+The fastest way to a secure node. Danube needs the `openssl` binary on the host to generate the files.
 
 ```bash
-danube up --mode cluster \
-  --data-dir ./danube-data \
-  --broker-addr 0.0.0.0:6650 \
-  --raft-addr 0.0.0.0:7650 \
-  --auth-mode auto-tls
+danube up standalone --data-dir ./danube-data --auth auto-tls
 ```
 
-### Provisioned Files
+On first start it writes these files, all private ones with `0600` permissions:
 
-When the seed/leader node boots with `--auth-mode auto-tls`, Danube creates the following files under `--data-dir` (default `./danube-data`):
+- **`<data-dir>/tls/ca.pem`**: cluster CA certificate (ECDSA P-256, `CN=danube-cluster-ca`, valid 10 years).
+- **`<data-dir>/tls/ca-key.pem`**: cluster CA private key.
+- **`<data-dir>/tls/cert.pem`** and **`key.pem`**: the node certificate and key, valid 1 year, usable for server and client auth.
+- **`<data-dir>/tls/jwt.secret`**: random HMAC secret used to sign and check JWTs.
+- **`<data-dir>/bootstrap_admin.token`**: a 1-year JWT for the `bootstrap-admin` user, who is automatically a super-admin.
 
-| Path | Details |
-| :--- | :--- |
-| `{data_dir}/tls/ca.pem` | Cluster Root CA certificate (ECDSA `prime256v1`, `/CN=danube-cluster-ca`, 3650-day validity) |
-| `{data_dir}/tls/ca-key.pem` | Cluster Root CA private key |
-| `{data_dir}/tls/cert.pem` | Broker server/client certificate (365-day validity; SANs include `localhost`, `127.0.0.1`, plus the node's advertised/connect/broker host and IP) |
-| `{data_dir}/tls/key.pem` | Broker private key (`0600` permissions) |
-| `{data_dir}/tls/jwt.secret` | 32-byte random base64 HMAC-SHA256 JWT secret (`0600` permissions) |
-| `{data_dir}/bootstrap_admin.token` | 1-year `bootstrap-admin` JWT (`user` principal, `0600` permissions; automatically enrolled in `super_admins`) |
+The node certificate covers `localhost`, `127.0.0.1`, the listen IP and the hosts from `--advertised-addr` and `--connect-url`. Set `--advertised-addr` to the name clients use, so the certificate matches it.
 
-### Multi-Node Cluster CA Synchronization
+Restarts reuse the existing files, so the CA and tokens stay stable.
 
-In a multi-broker cluster, every broker must share the same Cluster CA so inter-broker Raft/Replicator mTLS and client TLS verification succeed across nodes:
+<Aside type="tip">
+Use the bootstrap token for your first admin steps only. Create named admins with [roles and bindings](/security/authorization/), then keep the token offline for emergencies.
+</Aside>
 
-1. The seed node encrypts the generated Cluster CA and JWT secret using AES-256-GCM (keyed from the SHA-256 digest of a cluster secret) and stores the encrypted bundle in Raft metadata at `/cluster/security/ca`.
-2. Joining brokers fetch and decrypt `/cluster/security/ca` and mint their own node certificate (`cert.pem` / `key.pem`) signed by that shared Cluster CA.
-3. Supply the cluster secret via the **`DANUBE_CLUSTER_SECRET`** environment variable on every node (recommended), or allow Danube to persist/read `{data_dir}/cluster_ca.secret`:
+### auto-tls on a multi-node cluster
+
+All nodes must trust the same CA, because Raft between nodes uses mutual TLS from the first connection. Once Raft is up, the cluster keeps the CA (key encrypted with AES-256-GCM) and the JWT secret in Raft at `/cluster/security/ca`, so every node also ends up with the same JWT secret.
+
+<Steps>
+
+1. **Share one cluster secret.** Set the same `DANUBE_CLUSTER_SECRET` on every node. It encrypts the CA key stored in Raft. Without it, each node generates its own `<data-dir>/cluster_ca.secret`.
+
+   ```bash
+   export DANUBE_CLUSTER_SECRET="replace-with-a-long-random-secret"
+   ```
+
+2. **Generate the CA once.** Start the first node with `--auth auto-tls`, or create a CA yourself, then copy `tls/ca.pem` and `tls/ca-key.pem` into `<data-dir>/tls/` on every other node before its first start. A node only generates a CA when none is present, and signs its own node certificate with the CA it finds.
+
+3. **Start every node with `--auth auto-tls`.**
+
+   ```bash
+   danube up cluster \
+     --data-dir /var/lib/danube \
+     --listen 0.0.0.0:6650 \
+     --advertised-addr broker1:6650 \
+     --seed-nodes broker1:7650,broker2:7650,broker3:7650 \
+     --auth auto-tls
+   ```
+
+4. **Use the first node's files** for clients: its `tls/ca.pem` and `bootstrap_admin.token`.
+
+</Steps>
+
+<Aside type="tip">
+For production clusters, `--auth tls` with certificates from your own PKI is the more predictable choice: every node gets its certificate from the same place, and rotation follows your existing process.
+</Aside>
+
+## Option 2: bring your own certificates
+
+If you run your own PKI (Vault, cert-manager, step-ca, OpenSSL), pass the files and a JWT secret:
 
 ```bash
-export DANUBE_CLUSTER_SECRET="replace-with-shared-cluster-secret"
-```
-
----
-
-## Option 2: Bring Your Own Certificates (`--auth-mode tls`)
-
-If you manage your own PKI (Vault, cert-manager, step-ca, or OpenSSL), pass the certificate paths and JWT secret directly to `danube up`:
-
-```bash
-danube up --mode cluster \
-  --data-dir ./danube-data \
-  --broker-addr 0.0.0.0:6650 \
+danube up cluster \
+  --data-dir /var/lib/danube \
+  --listen 0.0.0.0:6650 \
   --advertised-addr broker1.internal:6650 \
-  --raft-addr 0.0.0.0:7650 \
-  --auth-mode tls \
+  --seed-nodes broker1.internal:7650,broker2.internal:7650,broker3.internal:7650 \
+  --auth tls \
   --tls-cert /etc/danube/tls/server-cert.pem \
   --tls-key /etc/danube/tls/server-key.pem \
   --ca-cert /etc/danube/tls/ca-cert.pem \
-  --jwt-secret "your-strong-hmac-secret" \
-  --super-admins "platform-admin"
+  --jwt-secret "$DANUBE_JWT_SECRET" \
+  --super-admin platform-admin
 ```
 
+- **`--tls-cert`**, **`--tls-key`**: the node's certificate and private key (PEM). Required with `--auth tls`.
+- **`--ca-cert`**: CA used to verify peers. Required with `--auth tls`.
+- **`--jwt-secret`**: HMAC secret for client tokens. Also read from `DANUBE_JWT_SECRET`. Without it, clients cannot authenticate.
+- **`--super-admin`**: JWT subject that bypasses RBAC. Repeat the flag or pass a comma-separated list.
+
 <Aside type="note">
-Because Raft and inter-broker replication perform mTLS with the same certificate, each broker's certificate must include both Server Authentication (`serverAuth`) and Client Authentication (`clientAuth`) Extended Key Usage (EKU), and its Subject Alternative Names (SANs) must match the node's advertised hostname/IP and Raft address.
+Brokers use the same certificate for server and client roles in mutual TLS. It needs both `serverAuth` and `clientAuth` extended key usage, and its SANs must cover the node's advertised host.
 </Aside>
 
-### Generating Test Certificates Locally
+### Make test certificates
 
-The Danube repository provides a convenience script at `cert/gen_certs.sh` for local testing, or you can generate ECDSA/RSA certs with OpenSSL including SANs:
-
-```bash title="Generate test CA and broker cert with OpenSSL"
+```bash title="Test CA and broker certificate"
 mkdir -p ./tls && cd ./tls
 
-# 1. Generate CA
+# 1. CA
 openssl req -x509 -newkey rsa:4096 -days 365 -nodes \
-  -keyout ca-key.pem -out ca-cert.pem \
-  -subj "/CN=danube-dev-ca"
+  -keyout ca-key.pem -out ca-cert.pem -subj "/CN=danube-dev-ca"
 
-# 2. Generate broker CSR + SAN config
+# 2. Broker key and CSR
+openssl req -newkey rsa:4096 -nodes \
+  -keyout server-key.pem -out server.csr -subj "/CN=broker1"
+
+# 3. Sign with SANs and both key usages
 cat > san.ext <<EOF
 subjectAltName = DNS:localhost,DNS:broker1,IP:127.0.0.1
 extendedKeyUsage = serverAuth,clientAuth
 EOF
-
-openssl req -newkey rsa:4096 -nodes \
-  -keyout server-key.pem -out server.csr \
-  -subj "/CN=broker1"
-
 openssl x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem \
   -CAcreateserial -out server-cert.pem -days 365 -extfile san.ext
 ```
 
----
-
-## Configuring Clients & `danube ctl` for TLS
+## Connect clients over TLS
 
 <Tabs>
-  <TabItem label="danube ctl (Admin)">
-```bash
-export DANUBE_ADMIN_ENDPOINT=https://127.0.0.1:6650
-export DANUBE_ADMIN_TLS=true
-export DANUBE_ADMIN_CA=./danube-data/tls/ca.pem
-export DANUBE_ADMIN_DOMAIN=localhost
-export DANUBE_ADMIN_TOKEN="$(cat ./danube-data/bootstrap_admin.token)"
+<TabItem label="danube CLI">
 
-danube ctl cluster status
-```
-  </TabItem>
-  <TabItem label="danube ctl produce / consume">
 ```bash
-export DANUBE_SERVICE_ADDR=https://127.0.0.1:6650
-export DANUBE_TLS=true
-export DANUBE_CA=./danube-data/tls/ca.pem
+# One-off: flags
+danube topic list --namespace default \
+  --endpoint https://127.0.0.1:6650 \
+  --tls-ca ./danube-data/tls/ca.pem \
+  --token "$(cat ./danube-data/bootstrap_admin.token)"
+
+# Every time: save a context
+danube context add local-secure \
+  --endpoint https://127.0.0.1:6650 \
+  --tls-ca ./danube-data/tls/ca.pem \
+  --token "$(cat ./danube-data/bootstrap_admin.token)" \
+  --use
+danube topic list --namespace default
+```
+
+An `https://` endpoint turns TLS on. The CLI checks the certificate for `localhost` by default: add `--tls-domain broker1` when you connect by another name.
+
+</TabItem>
+<TabItem label="Environment">
+
+```bash
+export DANUBE_ENDPOINT=https://127.0.0.1:6650
+export DANUBE_TLS_CA=./danube-data/tls/ca.pem
 export DANUBE_TOKEN="$(cat ./danube-data/bootstrap_admin.token)"
 
-danube ctl produce --topic /default/test --message "encrypted hello"
-danube ctl consume --topic /default/test --subscription test-sub --limit 1
+danube cluster status
 ```
-  </TabItem>
-  <TabItem label="Client SDKs">
-    Use `https://` service URLs and pass the CA certificate PEM (plus JWT token) in your client builder. Complete examples for **Rust, Go, Java, and Python** are documented in [Setup & Connection — TLS Configuration](/client-libraries/setup/#tls-configuration).
-  </TabItem>
+
+</TabItem>
+<TabItem label="Client libraries">
+
+Use an `https://` service URL and pass the CA certificate and JWT in the client builder. Examples for every language are in [Client setup](/client-libraries/setup/).
+
+</TabItem>
 </Tabs>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Authentication" href="/security/authentication/" description="Create, issue and revoke JWTs." />
+  <LinkCard title="Securing a cluster" href="/security/securing-a-cluster/" description="From first boot to least-privilege access." />
+</CardGrid>

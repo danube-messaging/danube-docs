@@ -1,210 +1,151 @@
 ---
 title: Dispatch Strategies
-description: Non-Reliable (fire-and-forget) vs. Reliable (at-least-once) message delivery, WAL sync modes, and poison-message handling.
+description: Non-reliable (fast, in memory) vs reliable (stored, acknowledged, retried) delivery, and how to pick one per topic.
 ---
 
-Danube offers two dispatch strategies that control how messages move from producers to consumers. You can run both strategies side by side in the same cluster — each topic chooses its own strategy directly or through a [Stream Intent](/concepts/stream-intents/).
+import { Card, CardGrid, LinkCard, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
----
+Every topic picks one of two delivery modes. Non-reliable is a live broadcast: fast and light, but listeners who miss it miss it. Reliable is registered mail: stored first, delivered, and tracked until the consumer confirms.
 
-## Non-Reliable Dispatch
+## Compare the two modes
 
-Prioritizes minimal latency and zero disk overhead. Messages stream from producers to active consumers purely in memory using a fire-and-forget model.
+<CardGrid>
+  <Card title="Non-reliable" icon="rocket">
+    Messages go from producer to connected consumers in memory.
 
-### Writer Path (Producer)
+    - At most once. No disk, no acks needed, no retries.
+    - Lowest latency and overhead.
+    - Lost if no consumer is connected or a consumer crashes.
+    - Use it for metrics, heartbeats, live token streams.
+    - Intent: `realtime`.
+  </Card>
+  <Card title="Reliable" icon="approve-check">
+    Messages are written to the topic's write-ahead log (WAL) first, then delivered and tracked per subscription.
 
-1. The producer sends a message to the topic's owner broker.
-2. The broker validates schema rules (if configured) and forwards the message to the topic's dispatcher.
-3. The dispatcher selects target consumer(s) according to each subscription's type (`Exclusive`, `Shared`, `Failover`, or `KeyShared`).
-4. The message is pushed directly into consumer channels without touching the WAL.
+    - At least once. Survives broker crashes and restarts.
+    - Retries, failure policies, dead-letter topics, seek, replay.
+    - Consumers can read history and catch up.
+    - Use it for events, jobs, audit trails.
+    - Intents: `event_stream`, `task_queue`, `audit_log`.
+  </Card>
+</CardGrid>
 
-:::note
-Non-Reliable topics perform no on-disk persistence and no acknowledgment gating. If a consumer is disconnected or crashes mid-flight, unconsumed messages are lost.
-:::
+Both modes can run side by side in one cluster, and all four [subscription types](/concepts/subscriptions/) work with either.
 
-### Reader Path (Consumer)
+## Pick a mode for a topic
 
-1. A consumer subscribes to the topic under a subscription name.
-2. The broker attaches a live delivery stream.
-3. The dispatcher pushes messages as they arrive; acknowledgments are optional and do not trigger redelivery.
+<Tabs>
+  <TabItem label="With an intent (recommended)">
+    ```bash
+    danube topic create /default/metrics --intent realtime      # non-reliable
+    danube topic create /default/orders  --intent event_stream  # reliable
+    ```
 
-**Best for**: real-time telemetry, metrics, heartbeats, or any stream created with `--intent realtime`.
+    The intent also sets disk sync and retry rules. See [Stream intents](/concepts/stream-intents/).
+  </TabItem>
+  <TabItem label="Explicit strategy">
+    ```bash
+    danube topic create /default/metrics --dispatch-strategy non_reliable
+    danube topic create /default/orders  --dispatch-strategy reliable
+    ```
 
----
+    Without `--intent` or `--dispatch-strategy`, a topic is non-reliable.
+  </TabItem>
+  <TabItem label="Client auto-create">
+    ```bash
+    danube produce /default/orders -m 'hi' --reliable
+    ```
 
-## Reliable Dispatch
+    ```rust
+    client.new_producer()
+        .with_topic("/default/orders")
+        .with_name("orders-producer")
+        .with_reliable_dispatch()
+        .build()?;
+    ```
+  </TabItem>
+</Tabs>
 
-Guarantees **at-least-once delivery** using a per-topic Write-Ahead Log (WAL) plus optional warm/cold tiers ([Valkey write buffer](/concepts/persistence/) and shared filesystem / object storage). Messages are durably appended before delivery and tracked per subscription.
+## How non-reliable delivery works
 
-### Writer Path (Producer)
+1. The producer sends to the broker that owns the topic.
+2. The broker checks the schema rules, if any.
+3. Each subscription picks a consumer by its type and the message is pushed straight to it.
+4. Nothing is written to disk. Acks are accepted but never cause redelivery.
 
-1. The producer sends a message to the owning broker for a reliable topic.
-2. The message is appended to the topic's local WAL according to its configured `WalSyncMode` (`os_cache_flush`, `fsync_batch`, or `async`) and assigned a monotonic `topic_offset`.
-3. If the cluster write buffer (Valkey) is enabled, writes are mirrored to warm buffer streams for fast cross-node crash recovery.
-4. Once appended, the message enters the live broadcast path and becomes eligible for subscription dispatch.
-5. In `shared_fs` or `object_store` clusters, sealed WAL segments are asynchronously exported to durable segment storage without blocking producers.
+## How reliable delivery works
 
-### Reader Path (Consumer)
+**Write path**
 
-1. A consumer subscribes; the broker loads (or initializes) the subscription cursor and its `SubscriptionFailurePolicy`.
-2. The dispatcher tracks pending deliveries, respects `max_unacked_messages` pipelining windows, and enforces `KeyShared` per-key serialization where requested.
-3. Consumers acknowledge (`ack`) or explicitly reject (`nack`) each message. The cursor advances strictly past contiguously acknowledged offsets — out-of-order acks are buffered safely without skipping gaps.
-4. Reconnecting or rewound consumers replay missed offsets seamlessly from cloud segments → Valkey → local WAL → live WAL tail.
+1. The producer sends to the owning broker.
+2. The broker appends the message to the topic's WAL, using the topic's sync mode, and gives it the next offset.
+3. If the cluster write buffer (Valkey) is on, the write is mirrored there for fast recovery on another node.
+4. The producer gets its ack and the message becomes available to subscriptions.
+5. With shared-fs or object-store storage, finished WAL segments are uploaded in the background.
 
-**Best for**: event meshes, job/task queues, financial events, lakehouse CDC, and audit logs (`event_stream`, `task_queue`, `audit_log`).
+**Read path**
 
----
+1. A consumer subscribes. The broker loads the subscription's cursor and failure policy.
+2. The broker sends messages up to the in-flight window and waits for acks.
+3. The cursor only moves past offsets that are acked without gaps, so an out-of-order ack never skips a message.
+4. A consumer that reconnects or seeks back reads older data from cloud segments, Valkey, or the local WAL, then joins the live tail.
 
-## Connecting `--intent` to Dispatch & Failure Policies
+## Disk sync modes
 
-Instead of setting dispatch strategy, WAL flush behavior, and retry rules piecemeal, `--intent` configures them together in Raft metadata (`/topics/{ns}/{topic}/intent`):
+Reliable topics choose how hard to push each batch to disk before acking the producer:
 
-| `--intent` | Dispatch Strategy | WAL Sync Mode | Retries & Backoff | Poison Policy |
-|-----------|-------------------|---------------|-------------------|---------------|
-| `realtime` | `NonReliable` | `async` (bypassed) | None | None |
-| `event_stream` | `Reliable` | `os_cache_flush` | 3 retries, 500 ms base | `dead_letter` (`<topic>-dlq`) |
-| `task_queue` | `Reliable` | `fsync_batch` | 5 retries, 1000 ms base | `dead_letter` (`<topic>-dlq`) |
-| `audit_log` | `Reliable` | `fsync_batch` | 10 retries, 500 ms base | `block` |
+- **`os_cache_flush`**: flushed to the OS page cache. Survives a broker crash. Used by `event_stream`.
+- **`fsync_batch`**: flushed and synced to disk (`fdatasync`), one sync per batch. Survives power loss. Used by `task_queue` and `audit_log`.
+- **`async`**: buffered and flushed on a timer. Fastest, with a small window of unflushed data on crash.
 
-Every new subscription on an intent-configured topic automatically inherits that topic's retry and poison defaults unless overridden per subscription. See [Stream Intents & Workload Profiles](/concepts/stream-intents/) for alias names and full details.
+Batch size and timing are cluster-wide WAL settings, changed live:
 
----
+```bash
+# Show current WAL settings
+danube cluster wal
 
-## WAL Sync Modes & Cluster Storage Controls
-
-Reliable topics control write durability through `WalSyncMode`:
-
-| Mode | Guarantee | Performance Profile | Default For |
-|------|-----------|---------------------|-------------|
-| **`os_cache_flush`** | Group-commit flush (`BufWriter::flush()`) to OS page cache before write ack. Survives broker process crashes. | Sub-millisecond latency | `event_stream` & default WAL config |
-| **`fsync_batch`** | Group-commit flush + `file.sync_data()` (`fdatasync`) before write ack. Survives host power loss. | Batched disk-sync latency | `task_queue`, `audit_log` |
-| **`async`** | Buffers writes and flushes on the periodic writer tick without blocking each append. | Highest throughput, window of unflushed data on crash | Explicit async WAL use (`realtime` uses `NonReliable` with no WAL) |
-
-Danube manages cluster-wide storage, WAL batch/retention parameters, and the warm write buffer dynamically at runtime through `danube ctl` (with zero static YAML config files):
-
-```bash title="Configure WAL retention, durable storage, and write buffer live"
-# Inspect or update cluster-wide WAL batching, cache, rotation, and retention
-danube ctl cluster wal \
-  --retention-time-minutes 1440 \
-  --retention-size-mb 10240 \
-  --flush-interval-ms 5 \
-  --flush-max-batch-bytes 1048576
-
-# Inspect or switch durable segment storage backend
-danube ctl cluster storage status
-danube ctl cluster storage shared-fs --root /mnt/danube-segments
-danube ctl cluster storage object-store \
-  --backend s3 \
-  --root s3://danube-archive/prod \
-  --option region=us-east-1
-
-# Enable or disable the Valkey warm write buffer
-danube ctl cluster write-buffer enable --endpoints valkey://valkey-1:6379 --profile ha
+# Tune group commit and retention
+danube cluster wal --flush-interval-ms 5 --flush-max-batch-bytes 1048576 \
+  --retention-time-minutes 1440 --retention-size-mb 10240
 ```
 
----
+## In-flight window
 
-## Pipelining (`max_unacked_messages`)
+A reliable subscription keeps up to `max_unacked_messages` messages in flight (default 10), so consumers stay busy while earlier messages are still being processed.
 
-Reliable dispatch pipelines multiple in-flight messages per subscription so consumers stay busy while earlier messages are still processing.
+- **Small window (1 to 5)**: tight backpressure, few redeliveries after a crash.
+- **Default (10)**: a balanced choice for most workloads.
+- **Large window (100 to 10,000)**: maximum throughput for batch workers.
 
-| In-Flight Window (`max_unacked_messages`) | Behavior |
-|------------------------------------------|----------|
-| **Low (e.g., 1–5)** | Tight backpressure; minimal redelivery scope on consumer restart |
-| **Default (`10`)** | Balanced throughput and bounded memory/redelivery window |
-| **High (e.g., 100–10,000)** | Maximum consumer pipelining for high-throughput batch workers |
+The window can be tuned per subscription (1 to 10,000) through the admin gRPC API (`SetSubscriptionDispatchConfig`). Key-Shared adds one rule on top: one message per key in flight at a time.
 
-The broker defaults to `10` in-flight unacknowledged messages per subscription. Administrators can tune `max_unacked_messages` per subscription (`1` to `10,000`) via the Broker Admin gRPC API (`SetSubscriptionDispatchConfig` / `GetSubscriptionDispatchConfig`).
+## Retries and poison messages
 
----
+Two things trigger a redelivery:
 
-## Failure Handling, Poison Policies & DLQ
+- **`nack`**: the consumer rejects the message, optionally with a delay and a reason.
+- **Ack timeout**: no `ack`, `extend_lease`, or `report_progress` arrived within `ack_timeout_ms`.
 
-When a reliable consumer fails to process a message, two paths trigger scheduled redelivery:
-
-- **Explicit NACK**: calling `consumer.nack(&message, delay_ms, reason).await?` schedules redelivery according to the backoff policy (and optional delay hint).
-- **Ack Timeout**: if the broker does not receive an `ack` (or `extend_lease` / `report_progress` extension) within `ack_timeout_ms`, it automatically re-queues the delivery attempt.
-
-### Subscription Failure Policy Parameters
-
-Inspect or override any subscription's failure policy at runtime with `danube ctl`:
-
-```bash title="Inspect and configure subscription failure policy"
-danube ctl topics get-failure-policy /default/orders -s payment-workers
-
-danube ctl topics set-failure-policy /default/orders \
-  -s payment-workers \
-  --max-redelivery-count 5 \
-  --ack-timeout-ms 30000 \
-  --base-redelivery-delay-ms 1000 \
-  --max-redelivery-delay-ms 60000 \
-  --backoff-strategy exponential \
-  --dead-letter-topic /default/orders-dlq \
-  --poison-policy dead_letter
+```rust title="Rust client: nack with a reason"
+consumer.nack(&message, Some(2_000), Some("db timeout".into())).await?;
 ```
 
-| Parameter | Description |
-|-----------|-------------|
-| `max_redelivery_count` | Maximum redelivery attempts after initial failure before applying `poison_policy` |
-| `ack_timeout_ms` | Milliseconds before an unacked delivery times out and triggers retry |
-| `base_redelivery_delay_ms` | Initial retry delay in milliseconds |
-| `max_redelivery_delay_ms` | Maximum backoff delay cap in milliseconds |
-| `backoff_strategy` | `fixed` (constant `base_redelivery_delay_ms`) or `exponential` (doubling backoff capped at `max_redelivery_delay_ms`) |
-| `dead_letter_topic` | Destination topic when `poison_policy` is `dead_letter` (defaults to `<topic>-dlq` for intent-backed topics) |
-| `poison_policy` | Action when retries exhaust: `dead_letter`, `block`, or `drop` |
+After `max_redelivery_count` attempts, the subscription's poison policy applies: `dead_letter`, `block`, or `drop`. Inspect and change it per subscription:
 
-### Poison Policies & DLQ Origin Attributes
-
-When `max_redelivery_count` is exhausted:
-
-- **`dead_letter`**: Republishes the payload to `dead_letter_topic` and advances the subscription cursor past the failed message. The DLQ copy preserves original message attributes and adds diagnostic headers:
-  - `x-original-topic`: source topic path
-  - `x-original-subscription`: subscription name that dead-lettered the message
-  - `x-original-topic-offset`: original offset in the source topic
-  - `x-original-producer-id`: original producer ID
-  - `x-original-broker-addr`: broker address from the failed message ID
-  - `x-poison-policy`: applied poison policy label (`dead_letter`)
-  - `x-delivery-attempt`: total delivery attempts before DLQ routing
-  - `x-failure-reason`: last `nack` or timeout reason (when present)
-- **`block`**: Leaves the message in place and halts dispatch for that subscription (or that routing key in `KeyShared` mode) until acknowledged, reconfigured, or skipped with `danube ctl topics seek`.
-- **`drop`**: Skips the message for this subscription and advances its cursor (other subscriptions on the topic are unaffected).
-
-### Replaying Dead-Lettered Messages
-
-Once the root cause is fixed, inspect DLQ entries or replay them back onto the source topic:
-
-```bash title="Peek and replay dead-lettered messages"
-danube ctl topics peek /default/orders-dlq --start-offset 0 --count 10
-
-danube ctl topics replay-dlq /default/orders \
-  --subscription payment-workers \
-  --max-messages 100 \
-  --start-offset 0
+```bash
+danube topic subscription failure-policy get /default/orders -s payment-workers
 ```
 
-`replay-dlq` strips the eight `x-original-*` / `x-poison-policy` / `x-delivery-attempt` / `x-failure-reason` diagnostic attributes and stamps `x-danube-replayed-from-dlq` and `x-danube-replayed-subscription` on each republished message.
+Full details, DLQ headers, and replay: [Subscriptions: handle failing messages](/concepts/subscriptions/#handle-failing-messages).
 
----
+<Aside type="tip">
+Not sure which mode you need? If losing a message would cost money, trust, or a retry by hand, use reliable.
+</Aside>
 
-## Summary Comparison
+## Next steps
 
-| Capability | Non-Reliable | Reliable |
-|------------|:------------:|:--------:|
-| **Storage Path** | In-memory only | Local WAL + optional Valkey + shared FS / object store |
-| **Delivery Guarantee** | Best-effort (fire-and-forget) | At-least-once |
-| **WAL Sync Control** | N/A | Per-topic `os_cache_flush`, `fsync_batch`, or `async` |
-| **In-Flight Flow Control** | Direct push | `max_unacked_messages` pipelining window (default `10`) |
-| **Automatic Retries & Backoff** | Not supported | Implemented (`nack` + `ack_timeout_ms`, `fixed` or `exponential` backoff) |
-| **Dead-Letter Queue (DLQ) & Poison Policy** | Not supported | Implemented (`dead_letter`, `block`, `drop` + `replay-dlq`) |
-| **Lease Extension & Progress Checkpoints** | Not applicable | Implemented (`extend_lease`, `report_progress`) |
-| **Cursor Time-Travel & Replay** | Not supported | Implemented (`topics seek` by offset or timestamp) |
-| **Matching `--intent` Profile** | `realtime` | `event_stream`, `task_queue`, `audit_log` |
-
----
-
-## Next Steps
-
-- **[Stream Intents & Workload Profiles](/concepts/stream-intents/)**: Choose between `realtime`, `event_stream`, `task_queue`, and `audit_log`
-- **[Persistence & Storage](/concepts/persistence/)**: WAL tiers, Valkey write buffer, cloud storage, and CoW branching
-- **[Subscriptions](/concepts/subscriptions/)**: Subscription types, cursor seek, and agent lease primitives
-- **[CLI: Messaging & Topics](/admin/cli-messaging/)**: Full `danube ctl` operational commands
+<CardGrid>
+  <LinkCard title="Stream intents" href="/concepts/stream-intents/" description="Pick delivery, sync, and retries with one flag." />
+  <LinkCard title="Persistence" href="/concepts/persistence/" description="Where reliable messages are stored and how they are read back." />
+  <LinkCard title="Subscriptions" href="/concepts/subscriptions/" description="Subscription types, failure policies, and DLQ." />
+</CardGrid>

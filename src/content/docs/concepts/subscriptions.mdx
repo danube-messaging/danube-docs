@@ -1,271 +1,250 @@
 ---
 title: Subscriptions
-description: How subscriptions control message delivery patterns — Exclusive, Shared, Failover, and Key-Shared.
+description: How subscriptions decide which consumer gets which message (exclusive, shared, fail-over, key-shared) and what happens when a message keeps failing.
 ---
-import { Card, CardGrid } from '@astrojs/starlight/components';
 
-A subscription is a named rule that determines how messages from a topic are delivered to consumers. Danube supports multiple producers and subscribers on the same topic, and subscription types can be combined to build queuing or fan-out messaging patterns.
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
 
-## At a Glance
+A subscription is a named reader on a topic. It remembers how far it has read and decides how messages are split between the consumers attached to it. Pick the right type and you get queues, fan-out, or per-key ordering from the same topic.
+
+## The idea in plain words
+
+Picture a mail room. The topic is the stream of letters. Each subscription is a department with its own copy of every letter, and its own rule for handing letters to the people (consumers) in that department.
+
+```text
+                      ┌─► subscription "billing"   (exclusive)  ─► 1 consumer gets all
+  /default/orders  ───┼─► subscription "workers"   (shared)     ─► letters split between 3 consumers
+                      └─► subscription "per-user"  (key-shared) ─► same customer always to same consumer
+```
+
+- **Different subscription names**: each one gets every message (fan-out).
+- **Same subscription name**: the consumers share that subscription's messages, using its type.
+
+## Try it in two terminals
+
+```bash
+# Terminal 1 and 2: two workers in the same shared subscription
+danube consume /default/orders -s workers -t shared
+
+# Terminal 3: send 10 messages, watch them split between the workers
+danube produce /default/orders -m 'order' --count 10 --interval 100
+```
+
+Add a consumer with `-s audit` before producing and it receives all 10 messages as well, because it is a different subscription.
+
+<Aside type="note">
+A new subscription starts at the end of the topic, so start consumers before you produce. On reliable topics, add `--reliable` to `danube produce`.
+</Aside>
+
+## Choose a subscription type
 
 <CardGrid>
-	<Card title="Exclusive" icon="seti:lock">
-		One consumer per subscription. Guarantees strict message ordering.
+  <Card title="Exclusive" icon="document">
+    One consumer only. A second consumer with the same subscription name is rejected.
 
-		- Ordered delivery
-		- No horizontal scaling
-		- **Use case**: sequential workflows
-	</Card>
-	<Card title="Shared" icon="random">
-		Multiple consumers, round-robin delivery. Scales horizontally.
+    - Strict order.
+    - Use it for sequential workflows and single readers.
+    - CLI: `-t exclusive`
+  </Card>
+  <Card title="Shared" icon="random">
+    Many consumers, round-robin. Each message goes to exactly one of them.
 
-		- Load-balanced across consumers
-		- No ordering guarantee
-		- **Use case**: parallel processing
-	</Card>
-	<Card title="Failover" icon="approve-check">
-		One active consumer with standby. Automatic failover preserves ordering.
+    - Scales out, no ordering guarantee.
+    - Use it for worker pools and task queues.
+    - CLI: `-t shared` (the CLI default)
+  </Card>
+  <Card title="Fail-over" icon="approve-check">
+    Many consumers, one active. If it disconnects, the next one takes over.
 
-		- Ordered delivery + HA
-		- Automatic failover
-		- **Use case**: critical services
-	</Card>
-	<Card title="Key-Shared" icon="seti:key">
-		Multiple consumers, routed by key. Per-key ordering with horizontal scaling.
+    - Strict order plus a hot standby.
+    - Use it for critical single-reader services.
+    - CLI: `-t fail-over`
+  </Card>
+  <Card title="Key-Shared" icon="puzzle">
+    Many consumers, routed by message key. The same key always goes to the same consumer.
 
-		- Per-key ordering guaranteed
-		- Consistent hashing + glob filters
-		- **Use case**: per-entity processing
-	</Card>
+    - Order per key, parallel across keys.
+    - Use it for per-order, per-user, or per-device processing.
+    - CLI: `-t key-shared`
+  </Card>
 </CardGrid>
 
-{/* TODO: Add producers/consumers overview diagram */}
+On a partitioned topic, every partition has its own copy of the subscription. A fail-over subscription therefore has one active consumer per partition, and partitions fail over independently.
 
----
-
-## Exclusive
-
-Only **one consumer** can attach to the subscription. If a second consumer tries to subscribe with the same name, it receives an error. The single consumer receives all messages in order.
-
-### Non-Partitioned Topic
-
-One consumer handles all messages from the topic.
-
-{/* TODO: Add exclusive non-partitioned diagram */}
-
-### Partitioned Topic
-
-One consumer handles messages from **all partitions** of the topic.
-
-{/* TODO: Add exclusive partitioned diagram */}
-
----
-
-## Shared
-
-**Multiple consumers** attach to the same subscription. Messages are delivered round-robin across consumers, and each message goes to exactly one consumer.
-
-### Non-Partitioned Topic
-
-Messages are distributed among all consumers in round-robin fashion.
-
-{/* TODO: Add shared non-partitioned diagram */}
-
-### Partitioned Topic
-
-Messages from all partitions are distributed round-robin across all consumers. Each message from any partition goes to exactly one consumer.
-
-{/* TODO: Add shared partitioned diagram */}
-
----
-
-## Failover
-
-**Multiple consumers** attach, but only one is active at a time. If the active consumer disconnects, another consumer takes over automatically. This preserves ordering while providing high availability.
-
-### Non-Partitioned Topic
-
-One active consumer processes all messages. Additional consumers are on standby.
-
-{/* TODO: Add failover non-partitioned diagram */}
-
-### Partitioned Topic
-
-One active consumer per partition. Other consumers remain on standby for each partition. Failover occurs independently per partition.
-
-{/* TODO: Add failover partitioned diagram */}
-
----
+```rust title="Rust client: pick the type"
+let mut consumer = client
+    .new_consumer()
+    .with_topic("/default/orders")
+    .with_consumer_name("worker-1")
+    .with_subscription("workers")
+    .with_subscription_type(SubType::Shared) // Exclusive, Shared, FailOver, KeyShared
+    .build()?;
+```
 
 ## Key-Shared
 
-**Multiple consumers** attach to the same subscription, where each message is routed based on its **routing key**. All messages with the same key go to the same consumer, in order.
+Key-Shared gives you the parallelism of Shared with per-key ordering.
 
-This combines the parallelism of Shared subscriptions with per-key ordering guarantees.
+- **Routing**: consumers sit on a hash ring. The message's routing key decides which consumer owns it.
+- **Ordering**: at most one message per key is in flight. The next message for that key waits until the current one is acked. Other keys keep flowing.
+- **Elasticity**: when a consumer joins or leaves, only about 1/N of the keys move.
+- **No key**: messages sent without a key use the producer name as their key.
 
-### How It Works
+```bash
+# Terminal 1: key-shared consumer, optionally only some keys
+danube consume /default/orders -s per-customer -t key-shared --key-filter 'customer-*'
 
-- **Key routing**: messages are assigned to consumers using consistent hashing. Each consumer gets virtual nodes on a hash ring, and the routing key determines which consumer owns it
-- **Per-key ordering**: at most one message per routing key is in-flight at any time. Additional messages for the same key are queued until the in-flight message is acknowledged
-- **Consumer elasticity**: when consumers join or leave, only approximately 1/N of existing key assignments are remapped. The rest remain stable
-
-### Key Filtering
-
-Consumers can declare **key filter patterns** to receive only specific subsets of messages. Filters use glob syntax:
-
-| Pattern | Matches |
-|---------|---------|
-| `"payment"` | Exact match only |
-| `"ship*"` | `"shipping"`, `"shipment"`, etc. |
-| `"eu-west-?"` | `"eu-west-1"`, `"eu-west-2"`, etc. |
-| `"*"` | Everything (same as no filter) |
-
-If a consumer has no filters, it accepts all keys. If a message's routing key matches no consumer's filters, the message is skipped by that subscription.
-
-### Producer Usage
-
-Producers tag messages with a routing key using `send_with_key()`:
-
-```rust title="Sending with routing keys"
-// All "payment" messages go to the same consumer
-producer.send_with_key(data, None, "payment").await?;
-producer.send_with_key(data, None, "shipping").await?;
+# Terminal 2: tag messages with a key
+danube produce /default/orders -m '{"item":"book"}' --key customer-42
 ```
 
-If a message is sent without a routing key (using `send()`), the producer name is used as the fallback key.
+### Filter keys
 
-### Consumer Usage
+A consumer can ask for only some keys with glob patterns (repeat the flag for several):
 
-```rust title="Key-Shared consumer"
-// Automatic key distribution — no filters
+- **`payment`**: exactly `payment`.
+- **`ship*`**: `shipping`, `shipment`, and so on.
+- **`eu-west-?`**: `eu-west-1`, `eu-west-2`, and so on.
+- **`*`** or no filter: every key.
+
+If a message's key matches no consumer's filters, that subscription skips it.
+
+```rust title="Rust client: key filters"
 let mut consumer = client
     .new_consumer()
     .with_topic("/default/orders")
-    .with_consumer_name("worker_1")
-    .with_subscription("orders_sub")
-    .with_subscription_type(SubType::KeyShared)
-    .build()?;
-
-// Explicit key filtering — only receive matching keys
-let mut consumer = client
-    .new_consumer()
-    .with_topic("/default/orders")
-    .with_consumer_name("payments_worker")
-    .with_subscription("orders_sub")
+    .with_consumer_name("payments-worker")
+    .with_subscription("orders-sub")
     .with_subscription_type(SubType::KeyShared)
     .with_key_filter("payment")
     .with_key_filter("invoice")
     .build()?;
 ```
 
-### Use Cases
+See [Key-Shared in the client guide](/client-libraries/key-shared/) for a full example.
 
-- **Order processing**: route all events for the same order ID to one consumer for consistent state management
-- **Per-user event streams**: group user activity events by user ID across consumers
-- **Multi-tenant workloads**: route tenant data to dedicated consumer instances
-- **IoT device routing**: route device telemetry by device ID
+## Build common patterns
 
----
+- **Work queue**: one Shared subscription, many consumers with the same subscription name. Each job is processed once.
+- **Fan-out**: one subscription per downstream service (`billing`, `analytics`, `monitoring`). Each service sees every event.
+- **Per-entity processing**: one Key-Shared subscription keyed by order id, user id, or device id.
 
-## Messaging Patterns
+## Handle failing messages
 
-Subscription types map directly to common messaging patterns.
+On reliable topics, a consumer must `ack` each message. If it calls `nack`, or does not ack within the ack timeout, the broker redelivers with a growing delay. After too many attempts the message is "poison", and the subscription's poison policy decides what happens.
 
-### Queuing (Point-to-Point)
+```text
+deliver ─► nack / timeout ─► wait (backoff) ─► redeliver ... ─► max retries reached ─► poison policy
+```
 
-One message is delivered to exactly one consumer in a group. Use a **Shared** subscription with the same name across all workers:
+### Failure policy fields
 
-- **Topic**: `/default/orders`
-- **Subscription**: `orders-workers` (type `Shared`)
-- Run N consumers with the same subscription name. Messages are load-balanced round-robin across them.
+Every subscription on a reliable topic has its own failure policy:
 
-### Fan-Out (Broadcast)
+- **`max_redelivery_count`**: redeliveries before the poison policy applies.
+- **`ack_timeout_ms`**: how long a consumer may hold a message before it is redelivered.
+- **`base_redelivery_delay_ms`**: first retry delay.
+- **`max_redelivery_delay_ms`**: cap on the retry delay.
+- **`backoff_strategy`**: `fixed` (always the base delay) or `exponential` (doubles up to the cap).
+- **`dead_letter_topic`**: where `dead_letter` sends messages.
+- **`poison_policy`**: `dead_letter`, `block`, or `drop`.
 
-Every downstream service receives every message. Create a **separate subscription** per service:
+### Pick a poison policy
 
-- **Topic**: `/default/events`
-- **Subscriptions**: `billing` (Exclusive), `analytics` (Exclusive), `monitoring` (Failover)
-- Each subscription receives the full event stream independently.
+<CardGrid>
+  <Card title="dead_letter" icon="warning">
+    Copy the message to the dead-letter topic, then move on.
 
-### Key-Affinity Processing
+    - The queue keeps flowing.
+    - Default for `event_stream` and `task_queue` (`<topic>-dlq`).
+  </Card>
+  <Card title="block" icon="setting">
+    Stop on this message (or this key, in Key-Shared) until it is acked, the policy changes, or the cursor is moved.
 
-Messages with the same key must be processed by the same consumer for ordering or state consistency. Use a **Key-Shared** subscription:
+    - Nothing is ever skipped.
+    - Default for `audit_log` and for topics without an intent.
+  </Card>
+  <Card title="drop" icon="information">
+    Skip the message for this subscription and move on. Other subscriptions are not affected.
 
-- **Topic**: `/default/orders`
-- **Subscription**: `order-processors` (type `KeyShared`)
-- Run N consumers with the same subscription name. Messages are distributed by routing key.
-- Optionally use key filters to assign specific key patterns to specific consumers.
+    - For data where losing a bad message is fine.
+  </Card>
+</CardGrid>
 
----
+### Where defaults come from
 
-## Failure Policy Inheritance & Overrides
+- **Topic created with an intent**: the first time a subscription name is used, the broker copies the intent's retries, backoff, and poison policy into it. See [how intent settings reach subscriptions](/concepts/stream-intents/#how-intent-settings-reach-subscriptions).
+- **Topic without an intent**: 5 retries, 30000 ms ack timeout, 1000 ms to 60000 ms exponential backoff, `block`.
+- **After that**: the stored policy belongs to the subscription and you change it per subscription.
 
-For reliable topics, each subscription tracks delivery attempts, acknowledgment timeouts, backoff delays, and poison-message actions via a `SubscriptionFailurePolicy`:
+```bash
+# Inspect
+danube topic subscription failure-policy get /default/orders -s payment-workers
 
-- **Topics created with `--intent`**: when the first consumer attaches under a new subscription name, the broker reads the topic's persisted intent at `/topics/{ns}/{topic}/intent` and automatically initializes `/topics/{ns}/{topic}/subscriptions/{sub}/failure_policy`. For example, `task_queue` sets `5` retries (`1000 ms` base delay, `exponential` backoff) and `dead_letter` routing to `<topic>-dlq`, while `audit_log` sets `10` retries (`500 ms` base delay) and `block` poison handling. See [Stream Intents & Workload Profiles](/concepts/stream-intents/).
-- **Implicitly created topics**: subscriptions receive broker defaults (`max_redelivery_count = 5`, `ack_timeout_ms = 30000`, `base_redelivery_delay_ms = 1000`, `max_redelivery_delay_ms = 60000`, `exponential` backoff, `block` poison policy).
-- **Per-subscription overrides**: operators can inspect or override any subscription independently at runtime without touching sibling subscriptions:
-
-```bash title="Inspect and override a subscription failure policy"
-danube ctl topics get-failure-policy /default/orders -s payment-workers
-
-danube ctl topics set-failure-policy /default/orders \
+# Override this subscription only
+danube topic subscription failure-policy set /default/orders \
   -s payment-workers \
   --max-redelivery-count 8 \
   --ack-timeout-ms 45000 \
   --base-redelivery-delay-ms 1000 \
   --max-redelivery-delay-ms 60000 \
   --backoff-strategy exponential \
-  --dead-letter-topic /default/orders-dlq \
-  --poison-policy dead_letter
+  --poison-policy dead_letter \
+  --dead-letter-topic /default/orders-dlq
 ```
 
----
+### Read and replay the dead-letter topic
 
-## Cursor Time-Travel & DLQ Replay
+Each dead-lettered copy keeps its original attributes and gains diagnostic headers:
 
-Danube lets operators rewind or fast-forward a subscription cursor without recreating consumers, and replay messages captured in a Dead-Letter Queue:
+- **`x-original-topic`**, **`x-original-subscription`**, **`x-original-topic-offset`**: where it came from.
+- **`x-original-producer-id`**, **`x-original-broker-addr`**: who sent it and which broker held it.
+- **`x-poison-policy`**, **`x-delivery-attempt`**, **`x-failure-reason`**: what happened (the reason is the last `nack` reason, when given).
 
-```bash title="Seek a subscription cursor by offset or timestamp"
-# Rewind subscription cursor to an exact topic offset
-danube ctl topics seek /default/orders \
-  --subscription payment-workers \
-  --to-offset 1200
+```bash
+# Look at what failed
+danube topic peek /default/orders-dlq --start-offset 0 --count 10
 
-# Or seek to a publish timestamp (nanoseconds since Unix epoch)
-danube ctl topics seek /default/orders \
-  --subscription payment-workers \
-  --to-timestamp-ns 1763150400000000000
+# After fixing the consumer, republish up to 100 messages to the source topic
+danube topic dlq replay /default/orders --subscription payment-workers --max-messages 100
 ```
 
-When failed deliveries land in `<topic>-dlq`, inspect them with `danube ctl topics peek` and republish them onto the primary topic after fixing the consumer:
+Replay strips the diagnostic headers and adds `x-danube-replayed-from-dlq` and `x-danube-replayed-subscription`. Use `--dlq-topic` to read from a specific DLQ instead of the subscription's configured one.
 
-```bash title="Replay messages from a dead-letter topic"
-danube ctl topics replay-dlq /default/orders \
-  --subscription payment-workers \
-  --max-messages 100 \
-  --start-offset 0
+## Rewind or skip ahead
+
+Move a subscription's cursor without restarting consumers. This also unblocks a `block` subscription.
+
+```bash
+# Resume from an exact offset
+danube topic subscription seek /default/orders --subscription payment-workers --to-offset 1200
+
+# Or from a publish time (nanoseconds since the Unix epoch)
+danube topic subscription seek /default/orders --subscription payment-workers --to-timestamp-ns 1763150400000000000
+
+# See all subscriptions, or remove one
+danube topic subscription list /default/orders
+danube topic subscription delete /default/orders --subscription old-sub
 ```
 
----
+## Long-running work
 
-## Agent Lease & Task-Tree Primitives
+For slow jobs such as LLM or tool calls, the Rust consumer can do more than `ack` and `nack`:
 
-For long-running workflows and multi-step AI agent pipelines, reliable consumers have three built-in primitives beyond `ack` and `nack`:
+- **`extend_lease`**: push back the ack deadline so the message is not redelivered while you are still working.
+- **`report_progress`**: save a checkpoint (up to 64 KiB) and extend the lease. If the worker dies, the next one receives the checkpoint in `x-danube-checkpoint-b64` and can resume.
+- **`cancel_task_tree`**: cancel a root task and its subtasks (linked by `x-danube-root-msg-id`).
 
-- **`extend_lease(&message, extension_ms)`**: extends the broker-side visibility/ack deadline for an in-flight message before `ack_timeout_ms` expires, preventing premature redelivery during slow LLM or tool calls.
-- **`report_progress(&message, checkpoint, extension_ms)`**: persists a base64-encoded checkpoint payload (up to 64 KiB, delivered as attribute `x-danube-checkpoint-b64` upon redelivery) while atomically extending the lease so a replacement worker can resume mid-task.
-- **`cancel_task_tree(topic, root_msg_id, reason)`**: signals cancellation across correlated subtasks carrying matching `x-danube-root-msg-id` ancestry metadata.
+See [AI Agents](/ai-agents/overview/) and the [consumer guide](/client-libraries/consumer/).
 
-See [AI Agents Overview](/ai-agents/overview/) and the [Consumer Guide](/client-libraries/consumer/) for end-to-end Rust examples.
+<Aside type="note">
+All four subscription types work with both delivery modes. Retries, failure policies, DLQ, and seek apply to reliable topics only. See [Dispatch strategies](/concepts/dispatch-strategies/).
+</Aside>
 
----
+## Next steps
 
-## Choosing a Dispatch Mode
-
-All subscription patterns work with either dispatch mode:
-
-- **Non-Reliable**: lowest latency, best-effort delivery, no persistence (`--intent realtime`)
-- **Reliable**: at-least-once delivery with WAL + cloud persistence, retries, DLQs, and cursor replay (`--intent event_stream | task_queue | audit_log`)
-
-See [Dispatch Strategies](/concepts/dispatch-strategies/), [Stream Intents](/concepts/stream-intents/), and [CLI: Messaging & Topics](/admin/cli-messaging/) for details.
+<CardGrid>
+  <LinkCard title="Dispatch strategies" href="/concepts/dispatch-strategies/" description="Reliable vs non-reliable delivery and in-flight windows." />
+  <LinkCard title="Stream intents" href="/concepts/stream-intents/" description="Get sensible failure policies with one flag." />
+  <LinkCard title="Consumer guide" href="/client-libraries/consumer/" description="Ack, nack, leases, and checkpoints in code." />
+</CardGrid>

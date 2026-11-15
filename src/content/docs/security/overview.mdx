@@ -1,75 +1,89 @@
 ---
 title: Security Overview
-description: Transport encryption (TLS/mTLS), JWT authentication, and default-deny RBAC authorization in Danube.
+description: Encrypt traffic with TLS, authenticate with JWT and authorize with default-deny RBAC, all from danube up flags and danube auth commands.
 ---
 
-import { Card, CardGrid, Aside } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
 
-Danube enforces security across every data-plane, admin control-plane, and inter-broker communication channel without requiring external YAML security configuration files. Everything is configured directly through `danube up` startup flags and managed online via `danube ctl`.
+Danube secures client traffic, admin calls and broker-to-broker links with one switch on `danube up`. There is no security config file: you pick an `--auth` mode at startup and manage tokens, roles and bindings live with `danube auth`.
 
-## Security Modes
+## Secure a node in one command
 
-Start a broker with `--auth-mode` to choose the security posture:
+```bash
+# Generates a CA, a node certificate, a JWT secret and an admin token in the data dir
+danube up standalone --data-dir ./danube-data --auth auto-tls
 
-| Mode | Client & Admin (`6650`) | Inter-Broker (`7650` & Replicator) | Certificates & JWT Secret |
-| :--- | :--- | :--- | :--- |
-| `none` (default) | Plain HTTP/gRPC, anonymous access | Plain TCP | None (local development only) |
-| `auto-tls` | TLS + JWT Bearer auth | Mutual TLS (mTLS) | Auto-generated Cluster CA, node certs, `jwt.secret`, and `bootstrap_admin.token`; synced across Raft via `DANUBE_CLUSTER_SECRET` |
-| `tls` | TLS + JWT Bearer auth | Mutual TLS (mTLS) | Operator-supplied `--tls-cert`, `--tls-key`, `--ca-cert`, and `--jwt-secret` |
+# Talk to it with the generated CA and admin token
+danube cluster status \
+  --endpoint https://127.0.0.1:6650 \
+  --tls-ca ./danube-data/tls/ca.pem \
+  --token "$(cat ./danube-data/bootstrap_admin.token)"
+```
 
-<Aside type="tip">
-When `--auth-mode tls` or `--auth-mode auto-tls` is enabled, **admin gRPC automatically inherits TLS (`admin_tls`)** on the single-port multiplexed `6650` listener — no separate admin port or secondary TLS toggle is needed.
-</Aside>
+## Pick an auth mode
 
----
+<CardGrid>
+  <Card title="none" icon="laptop">
+    Default. Plaintext gRPC, every caller is anonymous and allowed everything. Local development only.
+  </Card>
+  <Card title="auto-tls" icon="rocket">
+    Danube creates the cluster CA, node certificate, JWT secret and a `bootstrap-admin` token for you. Clients use TLS + JWT, brokers use mutual TLS.
+  </Card>
+  <Card title="tls" icon="setting">
+    Bring your own PKI with `--tls-cert`, `--tls-key` and `--ca-cert`, plus a `--jwt-secret`. Same protection as `auto-tls`.
+  </Card>
+</CardGrid>
 
-## Defense-in-Depth Architecture
+With `tls` or `auto-tls`, the admin API is encrypted too. It shares port 6650 by default, and a separate `--admin-listen` address uses the same certificate.
+
+## Three layers on every request
 
 ```text
-Clients / danube ctl / MCP / BFF
-   │
-   │  gRPC over TLS (port 6650 multiplexed)
-   │  Authorization: Bearer <HS256 JWT>
-   ▼
-┌─────────────────────────────────────────┐
-│  1. TLS Termination                     │  Server TLS for clients; mTLS for brokers
-├─────────────────────────────────────────┤
-│  2. JWT Validation & Revocation Check   │  30s cache + instant revoked-subject check
-├─────────────────────────────────────────┤
-│  3. Default-Deny RBAC Engine            │  10 permissions × 5 resources (Cluster/NS/Topic)
-└─────────────────────────────────────────┘
-   │
-   │  Mutual TLS (port 7650 Raft & Replicator)
-   │  x-danube-internal-broker identity
-   ▼
-Other Cluster Brokers
+Clients, danube CLI, MCP, console
+   |  gRPC over TLS (port 6650)
+   |  authorization: Bearer <HS256 JWT>
+   v
+ 1. TLS             server TLS for clients, mutual TLS between brokers
+ 2. JWT             signature and expiry checked, revoked subjects rejected
+ 3. RBAC            default deny: a binding must grant the permission
+   |
+   |  mutual TLS (Raft on 7650, inter-broker replication)
+   v
+ Other brokers
 ```
 
 <CardGrid>
-	<Card title="TLS & Certificates" icon="approve-check">
-		Configure zero-config `auto-tls` with Raft CA synchronization or bring your own PKI certificates with `--auth-mode tls`.
-
-		[TLS Guide →](/security/tls/)
-	</Card>
-	<Card title="Authentication (JWT)" icon="seti:lock">
-		Issue, validate, and revoke HS256 JWT tokens online or offline for `user` and `service_account` principals.
-
-		[Authentication Guide →](/security/authentication/)
-	</Card>
-	<Card title="Authorization (RBAC)" icon="setting">
-		Default-deny policies across 10 granular permissions (`Lookup`, `Produce`, `Consume`, `Replicate`, `ReadPayload`, `Manage*`) with last-admin lockout protection.
-
-		[Authorization Guide →](/security/authorization/)
-	</Card>
-	<Card title="Securing a Cluster" icon="rocket">
-		End-to-end production hardening walkthrough from cluster bootstrap to least-privilege bindings and token revocation.
-
-		[Hardening Walkthrough →](/security/securing-a-cluster/)
-	</Card>
+  <Card title="TLS and certificates" icon="approve-check">
+    Zero-config `auto-tls` or your own certificates with `--auth tls`. [Set up TLS](/security/tls/)
+  </Card>
+  <Card title="Authentication (JWT)" icon="information">
+    Create, issue, validate and revoke tokens for users and service accounts. [Manage tokens](/security/authentication/)
+  </Card>
+  <Card title="Authorization (RBAC)" icon="list-format">
+    Ten permissions, roles, and bindings at cluster, namespace or topic scope, with lockout protection. [Grant access](/security/authorization/)
+  </Card>
+  <Card title="Securing a cluster" icon="star">
+    One walkthrough from first boot to least-privilege service accounts. [Follow the guide](/security/securing-a-cluster/)
+  </Card>
 </CardGrid>
 
----
+## Protect the web console
 
-## Securing HTTP Gateways (`danube ctl serve`)
+`danube console` serves the console REST API (`/ui/v1/...`) and MCP over HTTP (`/mcp`). Require a bearer token on every route except `/ui/v1/health`:
 
-When exposing the Admin UI REST BFF (`/ui/v1/...`) and Streamable HTTP MCP endpoint (`/mcp`) with `danube ctl serve --mode ui` (or `--mode all`), set `DANUBE_HTTP_TOKEN` (or `DANUBE_ADMIN_TOKEN`) and `DANUBE_HTTP_REQUIRE_AUTH=true` to require `Authorization: Bearer <token>` on all HTTP endpoints other than `/ui/v1/health`.
+```bash
+danube console --require-auth --http-token "$CONSOLE_TOKEN" --endpoint https://broker1:6650 --tls-ca ./ca.pem --tls-domain broker1 --token "$ADMIN_JWT"
+```
+
+Clients send `Authorization: Bearer <token>` (or `x-api-key`). The same settings can come from `DANUBE_HTTP_REQUIRE_AUTH` and `DANUBE_HTTP_TOKEN`.
+
+<Aside type="caution">
+`--http-token` is a shared secret for the HTTP layer only. The console then calls the broker with its own `--token`, so give that JWT only the permissions the console should have.
+</Aside>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="TLS and certificates" href="/security/tls/" description="Turn on encryption with auto-tls or your own PKI." />
+  <LinkCard title="Securing a cluster" href="/security/securing-a-cluster/" description="End-to-end walkthrough with roles and service accounts." />
+</CardGrid>

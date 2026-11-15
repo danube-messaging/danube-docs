@@ -18,59 +18,73 @@ export default defineConfig({
             social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/danube-messaging/danube' }],
             sidebar: [
                 {
-                    label: 'Introduction',
+                    label: 'Start Here',
                     items: [
                         { label: 'What is Danube?', slug: 'introduction/what-is-danube' },
-                        { label: 'Key Concepts', slug: 'introduction/key-concepts' },
+                        { label: 'Quickstart', slug: 'getting-started/quickstart' },
                         { label: 'Danube for AI Agents', slug: 'ai-agents/overview' },
+                        { label: 'Key Concepts', slug: 'introduction/key-concepts' },
                     ],
                 },
                 {
-                    label: 'Getting Started',
+                    label: 'Run Danube',
                     items: [
-                        { label: 'Quickstart', slug: 'getting-started/quickstart' },
-                        { label: 'Broker Modes', slug: 'getting-started/broker-modes' },
-                        { label: 'Cluster & Topic Configuration', slug: 'getting-started/configuration-workflow' },
+                        { label: 'The danube CLI', slug: 'getting-started/the-danube-cli' },
+                        { label: 'Node Modes', slug: 'getting-started/broker-modes' },
+                        { label: 'Configure Cluster & Topics', slug: 'getting-started/configuration-workflow' },
                         { label: 'Run Locally', slug: 'getting-started/local' },
                         { label: 'Docker Compose', slug: 'getting-started/docker-compose' },
                         { label: 'Kubernetes', slug: 'getting-started/kubernetes' },
-                        { label: 'AI Agent Testing', slug: 'getting-started/ai-agent-testing' },
+                        { label: 'Test with an AI Agent', slug: 'getting-started/ai-agent-testing' },
                     ],
                 },
                 {
-                    label: 'Concepts',
+                    label: 'Core Concepts',
                     items: [
                         { label: 'Topics & Partitions', slug: 'concepts/topics' },
-                        { label: 'Stream Intents & Profiles', slug: 'concepts/stream-intents' },
-                        { label: 'Subscriptions & Failure Policies', slug: 'concepts/subscriptions' },
+                        { label: 'Stream Intents', slug: 'concepts/stream-intents' },
+                        { label: 'Subscriptions & Failures', slug: 'concepts/subscriptions' },
                         { label: 'Dispatch Strategies', slug: 'concepts/dispatch-strategies' },
                         { label: 'Messages & Schemas', slug: 'concepts/messages' },
-                        { label: 'Persistence & Storage', slug: 'concepts/persistence' },
-                        { label: 'Scaling the Cluster', slug: 'concepts/scaling' },
+                        { label: 'Persistence', slug: 'concepts/persistence' },
+                        { label: 'Scaling', slug: 'concepts/scaling' },
                     ],
                 },
                 {
-                    label: 'Durability & Storage',
+                    label: 'Build Apps',
                     items: [
-                        { label: 'Overview', slug: 'durability/overview' },
-                        { label: 'Tiered Storage', slug: 'durability/tiered-storage' },
-                        { label: 'Configuration Guide', slug: 'durability/configuration' },
-                        { label: 'Crash Recovery', slug: 'durability/crash-recovery' },
-                    ],
-                },
-                {
-                    label: 'Client Libraries',
-                    items: [
-                        { label: 'Overview', slug: 'client-libraries/overview' },
+                        { label: 'Client Libraries', slug: 'client-libraries/overview' },
                         { label: 'Setup & Connection', slug: 'client-libraries/setup' },
-                        { label: 'Producer Guide', slug: 'client-libraries/producer' },
-                        { label: 'Consumer Guide', slug: 'client-libraries/consumer' },
-                        { label: 'Key-Shared Subscriptions', slug: 'client-libraries/key-shared' },
+                        { label: 'Producers', slug: 'client-libraries/producer' },
+                        { label: 'Consumers', slug: 'client-libraries/consumer' },
+                        { label: 'Key-Shared Ordering', slug: 'client-libraries/key-shared' },
                         { label: 'Schema Registry', slug: 'client-libraries/schema-registry' },
                     ],
                 },
                 {
+                    label: 'Operate',
+                    items: [
+                        { label: 'Admin Overview', slug: 'admin/overview' },
+                        { label: 'Cluster, Brokers & Auth', slug: 'admin/cli-cluster' },
+                        { label: 'Topics, Namespaces & Schemas', slug: 'admin/cli-resources' },
+                        { label: 'Produce & Consume', slug: 'admin/cli-messaging' },
+                        { label: 'Web Console', slug: 'admin/admin-ui' },
+                        { label: 'AI Admin (MCP)', slug: 'admin/mcp' },
+                    ],
+                },
+                {
+                    label: 'Durability & Storage',
+                    collapsed: true,
+                    items: [
+                        { label: 'Overview', slug: 'durability/overview' },
+                        { label: 'Tiered Storage', slug: 'durability/tiered-storage' },
+                        { label: 'Storage Configuration', slug: 'durability/configuration' },
+                        { label: 'Crash Recovery', slug: 'durability/crash-recovery' },
+                    ],
+                },
+                {
                     label: 'Security',
+                    collapsed: true,
                     items: [
                         { label: 'Overview', slug: 'security/overview' },
                         { label: 'TLS & Certificates', slug: 'security/tls' },
@@ -80,30 +94,16 @@ export default defineConfig({
                     ],
                 },
                 {
-                    label: 'Administration',
+                    label: 'Edge & Lakehouse',
+                    collapsed: true,
                     items: [
-                        { label: 'Overview', slug: 'admin/overview' },
-                        { label: 'Admin Dashboard UI', slug: 'admin/admin-ui' },
-                        { label: 'AI Admin (MCP)', slug: 'admin/mcp' },
-                        { label: 'CLI: Cluster & Brokers', slug: 'admin/cli-cluster' },
-                        { label: 'CLI: Resources', slug: 'admin/cli-resources' },
-                        { label: 'CLI: Produce & Consume', slug: 'admin/cli-messaging' },
-                    ],
-                },
-                {
-                    label: 'Edge',
-                    items: [
-                        { label: 'Overview', slug: 'edge/overview' },
-                    ],
-                },
-                {
-                    label: 'Lakehouse with Iceberg',
-                    items: [
-                        { label: 'Overview', slug: 'lakehouse/overview' },
+                        { label: 'Edge Gateway', slug: 'edge/overview' },
+                        { label: 'Lakehouse with Iceberg', slug: 'lakehouse/overview' },
                     ],
                 },
                 {
                     label: 'Architecture',
+                    collapsed: true,
                     items: [
                         { label: 'Overview', slug: 'architecture/overview' },
                         { label: 'Schema Registry', slug: 'architecture/schema-registry' },
@@ -115,6 +115,7 @@ export default defineConfig({
                 },
                 {
                     label: 'Integrations',
+                    collapsed: true,
                     items: [
                         { label: 'Danube Connect', slug: 'integrations/danube-connect' },
                         { label: 'Connector Development', slug: 'integrations/connector-development' },
@@ -122,13 +123,15 @@ export default defineConfig({
                 },
                 {
                     label: 'Reference',
+                    collapsed: true,
                     items: [
-                        { label: 'Configuration & CLI Reference', slug: 'reference/broker-configuration' },
+                        { label: 'CLI & Configuration', slug: 'reference/broker-configuration' },
                         { label: 'Lakehouse Configuration', slug: 'reference/iceberg-configuration' },
                     ],
                 },
                 {
                     label: 'Contributing',
+                    collapsed: true,
                     items: [
                         { label: 'Contribution Guide', slug: 'contributing' },
                     ],

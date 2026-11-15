@@ -1,220 +1,122 @@
 ---
 title: Metadata Paths
-description: Reference of all key paths stored in the Raft metadata state machine, organized by resource type.
+description: Every key path Danube stores in its embedded Raft state machine, grouped by area.
 ---
 
-Every piece of cluster state in Danube is stored as a key-value entry in the embedded Raft state machine. This page lists the key paths used by the broker, organized by resource type. Understanding this structure is useful for developers working on cluster internals or debugging metadata issues.
+import { CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
 
-:::note
-Danube previously used etcd for metadata storage. The key hierarchy is the same, but all paths now live inside the embedded Raft state machine (openraft + redb). There is no external metadata dependency.
-:::
+All cluster state in Danube is a key-value entry in the embedded Raft state machine. This page lists every key path the broker uses, grouped by area. Use it when you work on cluster internals or debug a metadata issue.
 
----
+<Aside type="note">
+Danube once used etcd. The key hierarchy stayed, but everything now lives in embedded Raft (openraft + redb). There is no external metadata dependency.
+</Aside>
 
-## Cluster
+<Aside type="tip">
+You rarely touch these keys directly. Cluster settings under `/cluster/config/*` are changed with `danube cluster ...` or `danube apply -f desired_state.yaml`, and `danube cluster export-config` dumps them as a recovery file.
+</Aside>
 
-Broker discovery, topic assignment, load balancing, and leader election.
+## Cluster membership and placement
 
-- **`/cluster/leader`**
+- **`/cluster/leader`**: current leader broker ID. The Load Manager runs only there.
+- **`/cluster/register/{broker_id}`**: broker registration with `broker_url`, `connect_url`, `admin_addr` (`https://` with TLS, `http://` otherwise) and optional `prom_exporter`. Written at startup with a TTL, removed on graceful shutdown.
+- **`/cluster/brokers/{broker_id}/state`**: lifecycle state `active`, `draining` or `drained`, with a reason such as `lakehouse_only` (nodes started with `--role lakehouse`), `stale_restart` or `sigterm_drain`. The Load Manager only assigns topics to `active` brokers.
+- **`/cluster/brokers/{broker_id}/{namespace}/{topic}`**: topic-to-broker assignment. Each broker watches its own prefix to load and unload topics.
+- **`/cluster/unassigned/{namespace}/{topic}`**: topics waiting for placement. The Load Manager watches this prefix.
 
-  Current Raft leader broker ID. The Load Manager runs only on this broker.
+## Load balancing
 
-- **`/cluster/register/{broker_id}`**
+- **`/cluster/load/{broker_id}`**: periodic load report (`resources_usage`, `topic_list`, `topics_len`), published every `load_report_interval_seconds`.
+- **`/cluster/load_balance`**: the Load Manager's computed rankings and decisions.
+- **`/cluster/rebalancing_history/{timestamp}`**: one entry per automated move (topic, source, target, reason). Used for rate limiting, cooldowns and audit.
 
-  Broker registration. Stores a JSON object with `broker_url`, `connect_url`, `admin_addr` (using `https://` when TLS is enabled, `http://` otherwise), and optional `prom_exporter`. Written at startup with a TTL; removed on graceful shutdown.
+See [Load Manager](/architecture/load-manager/).
 
-- **`/cluster/brokers/{broker_id}/state`**
+## Live cluster configuration
 
-  Broker lifecycle state: `active`, `draining`, or `drained` (for example `lakehouse_only` on `--node-role lakehouse` nodes, `stale_restart`, or `sigterm_drain`). Used by the Load Manager to control topic assignments.
+Brokers watch `/cluster/config/*` and hot-reconcile every change.
 
-- **`/cluster/brokers/{broker_id}/{namespace}/{topic}`**
+- **`/cluster/config/storage`**: durable storage backend (`local`, `shared_fs` or `object_store`). Set with `danube cluster storage` or `danube apply`.
+- **`/cluster/config/write_buffer`**: Valkey warm write buffer (`ClusterWriteBufferSpec`). Set with `danube cluster write-buffer` or `danube apply`.
+- **`/cluster/config/wal`**: WAL flush, rotation and local retention (`ClusterWalRetentionSpec`). Set with `danube cluster wal`.
+- **`/cluster/config/load_manager`**: assignment strategy and rebalancing (`LoadManagerConfig`). Set with `danube cluster load-manager` or `danube apply`.
+- **`/cluster/config/bootstrap`**: initial bootstrap configuration, written when the cluster is created.
+- **`/cluster/config/target_voter_count`**: target number of Raft voters for voter scaling.
 
-  Topic-to-broker assignment marker. Each broker watches its own prefix to load/unload topics.
+## Audit and security
 
-- **`/cluster/unassigned/{namespace}/{topic}`**
+- **`/cluster/audit/{timestamp_ms}_{seq}`**: control-plane audit events (`AuditEvent`), zero-padded keys. A bounded ring keeps the newest 1,000.
+- **`/cluster/security/ca`**: cluster CA certificate and sealed private key, created with `--auth auto-tls`.
+- **`/auth/roles/{role_name}`**: role definitions with their permissions (`danube auth role`).
+- **`/auth/bindings/{binding_id}`**: principal-to-role bindings with `principal`, `role` and `scope` (`danube auth binding`).
+- **`/auth/revoked/{subject}`**: revoked JWT subjects, checked during token authentication.
 
-  Queue for topics awaiting assignment. The Load Manager watches this prefix and assigns topics based on load rankings.
-
-- **`/cluster/load/{broker_id}`**
-
-  Periodic load reports. JSON with `resources_usage`, `topic_list`, and `topics_len`. Published by each broker at a configurable interval.
-
-- **`/cluster/load_balance`**
-
-  Load Manager's calculated metrics and assignment decisions.
-
-- **`/cluster/rebalancing_history/{timestamp}`**
-
-  Audit log of rebalancing moves. Each entry records the topic, source broker, target broker, and reason.
-
-- **`/cluster/config/storage`**
-
-  Live cluster storage backend configuration (`local`, `shared_fs`, or `object_store` JSON). Managed via `danube ctl cluster storage` or `danube ctl apply`; brokers watch `/cluster/config/*` and hot-reconcile changes.
-
-- **`/cluster/config/write_buffer`**
-
-  Live Valkey warm write buffer settings (`ClusterWriteBufferSpec` JSON). Managed via `danube ctl cluster write-buffer` or `danube ctl apply`.
-
-- **`/cluster/config/wal`**
-
-  Live WAL flush, rotation, and local retention settings (`ClusterWalRetentionSpec` JSON). Managed via `danube ctl cluster wal`.
-
-- **`/cluster/config/load_manager`**
-
-  Live Load Manager assignment strategy and automated rebalancing configuration (`LoadManagerConfig` JSON). Managed via `danube ctl cluster load-manager` or `danube ctl apply`.
-
-- **`/cluster/config/bootstrap`**
-
-  Initial cluster bootstrap configuration persisted on cluster creation.
-
-- **`/cluster/config/target_voter_count`**
-
-  Target Raft voter count used for voter scaling.
-
-- **`/cluster/audit/{timestamp_ms}_{seq}`**
-
-  Control-plane audit log entries (`AuditEvent` JSON with zero-padded `timestamp_ms` and sequence). Bounded ring retaining the newest 1,000 entries.
-
-- **`/cluster/security/ca`**
-
-  Cluster Certificate Authority certificate and sealed private key material provisioned in `--auth-mode auto-tls` mode.
-
----
+Brokers watch `/auth/` and reload the RBAC and revocation cache on every change.
 
 ## Namespaces
 
-- **`/namespaces/{namespace}/policy`**
-
-  Namespace-wide default policies as JSON: `max_producers_per_topic`, `max_consumers_per_topic`, `max_message_size`, etc. A value of `0` means unlimited.
-
-- **`/namespaces/{namespace}/topics/{namespace}/{topic}`**
-
-  Topic registry within a namespace.
-
----
+- **`/namespaces/{namespace}/policy`**: namespace defaults such as `max_producers_per_topic`, `max_consumers_per_topic`, `max_message_size`. `0` means unlimited.
+- **`/namespaces/{namespace}/topics/{namespace}/{topic}`**: topic registry for the namespace.
 
 ## Topics
 
-- **`/topics/{namespace}/{topic}`**
+All keys below sit under `/topics/{namespace}/{topic}`.
 
-  Topic existence marker. Value is the number of partitions (`0` = non-partitioned).
+- **`/topics/{namespace}/{topic}`**: existence marker. The value is the partition count (`0` = not partitioned).
+- **`.../delivery`**: dispatch mode, `"Reliable"` or `"NonReliable"`.
+- **`.../policy`**: per-topic policy overrides.
+- **`.../intent`**: resolved [stream intent](/concepts/stream-intents/) settings (`ExpandedStreamSettings`) from `danube topic create --intent`.
+- **`.../storage_mode`**: durable tiering override, `{ "mode": "local" | "cloud_tiered" }`. Set with `danube topic storage-mode` or `danube apply`.
+- **`.../schema_subject`**: the topic's bound schema subject.
+- **`.../schema_config`**: subject, `validation_policy` and `enable_payload_validation`. Set with `danube topic schema configure`.
+- **`.../snapshots/{timestamp_ms}`**: subscription cursor snapshots (`CursorSnapshot`) taken before a topic is unloaded or deleted.
+- **`.../producers/{producer_id}`**: active producer with `producer_name`, `access_mode`, `status`, `topic_name`.
 
-- **`/topics/{namespace}/{topic}/delivery`**
+## Subscriptions
 
-  Dispatch mode: `"Reliable"` or `"NonReliable"`.
+All keys below sit under `/topics/{namespace}/{topic}/subscriptions/{subscription}`.
 
-- **`/topics/{namespace}/{topic}/policy`**
-
-  Per-topic policy overrides (JSON).
-
-- **`/topics/{namespace}/{topic}/intent`**
-
-  Resolved stream intent configuration (`ExpandedStreamSettings` JSON) applied when creating topics with `--intent` (see [Stream Intents](/concepts/stream-intents/)).
-
-- **`/topics/{namespace}/{topic}/storage_mode`**
-
-  Per-topic durable tiering override (`{ "mode": "local" | "cloud_tiered" }`). Set via `danube ctl topics storage-mode` or `danube ctl apply`.
-
-- **`/topics/{namespace}/{topic}/snapshots/{timestamp_ms}`**
-
-  Subscription cursor snapshots (`CursorSnapshot` JSON) captured before topic unload or deletion.
-
-- **`/topics/{namespace}/{topic}/producers/{producer_id}`**
-
-  Active producer registration. JSON with `producer_name`, `access_mode`, `status`, and `topic_name`.
-
-- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}`**
-
-  Subscription metadata. JSON with `consumer_id`, `consumer_name`, and `subscription_type` (`0` Exclusive, `1` Shared, `2` Failover).
-
-- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}/cursor`**
-
-  Consumer progress offset (`u64`). Updated in batches (every 1000 acks or 5 seconds).
-
-- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}/checkpoints`**
-
-  Persisted consumer checkpoint map (`offset -> base64` payload) used to restore stateful step checkpoints on reliable redelivery or broker restart.
-
-- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}/failure_policy`**
-
-  Subscription failure policy (JSON). Configures redelivery limits, ack timeouts, backoff strategy, and poison policy.
-
-- **`/topics/{namespace}/{topic}/subscriptions/{subscription_name}/dispatch_config`**
-
-  Per-subscription dispatch configuration override (JSON). Currently contains `max_unacked_messages`. Set via admin API (`danube ctl`); overrides the broker default.
-
----
+- **`.../{subscription}`**: subscription metadata with `consumer_id`, `consumer_name` and `subscription_type` (`0` Exclusive, `1` Shared, `2` Failover, `3` Key-Shared).
+- **`.../cursor`**: consumer progress offset (`u64`). Writes are debounced and flushed about every 5 seconds.
+- **`.../checkpoints`**: consumer checkpoint map (`offset -> base64`), restored on redelivery or broker restart.
+- **`.../failure_policy`**: redelivery limit, ack timeout, backoff and poison policy. Set with `danube topic subscription failure-policy set`.
+- **`.../dispatch_config`**: per-subscription override, currently `max_unacked_messages` (cluster default 10).
 
 ## Schema Registry
 
-- **`/schemas/_global/next_schema_id`**
+- **`/schemas/_global/next_schema_id`**: monotonic schema ID counter (`u64`).
+- **`/schemas/{subject}/metadata`**: subject with version history, `compatibility_mode`, `created_at`, `latest_version`.
+- **`/schemas/{subject}/compatibility`**: subject compatibility mode.
+- **`/schemas/{subject}/versions/{version}`**: one schema version (definition, type, fingerprint).
+- **`/schemas/_index/by_id/{schema_id}`**: reverse lookup from schema ID to subject.
 
-  Monotonically increasing schema ID counter (`u64`).
+See [Schema Registry Architecture](/architecture/schema-registry/).
 
-- **`/schemas/{subject}/metadata`**
+## Persistent storage
 
-  Complete schema subject with version history. JSON with `compatibility_mode`, `versions`, `created_at`, and `latest_version`.
+These keys use the storage metadata prefix, `/danube` by default.
 
-- **`/schemas/{subject}/compatibility`**
+- **`/danube/storage/topics/{namespace}/{topic}/segments/{padded_start_offset}`**: durable segment descriptor (`start_offset`, `end_offset`, `size`, `object_id`, ...). Offsets are zero-padded to 20 digits so keys sort correctly.
+- **`/danube/storage/topics/{namespace}/{topic}/segments/cur`**: pointer to the latest published segment.
+- **`/danube/storage/topics/{namespace}/{topic}/state`**: sealed marker for topic moves (`sealed`, `last_committed_offset`, `broker_id`, `timestamp`). Written on unload, read on recovery.
 
-  Compatibility mode override for a subject (string).
-
-- **`/schemas/_index/by_id/{schema_id}`**
-
-  Reverse lookup from schema ID to subject name. JSON with `schema_id` and `subject`.
-
----
-
-## Security (RBAC)
-
-- **`/auth/roles/{role_name}`**
-
-  Role definitions. JSON with a list of permissions.
-
-- **`/auth/bindings/{binding_id}`**
-
-  Principal-to-role bindings. JSON with `principal`, `role`, and `scope`.
-
-- **`/auth/revoked/{subject}`**
-
-  Revoked JWT subject markers. Checked during token authentication and refreshed alongside RBAC mutations.
-
-Brokers watch the `/auth/` prefix and reload the RBAC/revocation cache on any mutation.
-
----
+See [Reliable Topic Move](/architecture/reliable-topic-move/).
 
 ## Edge
 
-- **`/edge_registry/edges/{edge_name}`**
+On the central cluster:
 
-  Registered edge node state (`EdgeState` JSON covering edge identity, active topic mappings, config version, and last heartbeat timestamp).
+- **`/edge_registry/edges/{edge_name}`**: registered edge node (`EdgeState`): identity, active topic mappings, config version and last heartbeat.
+- **`/edge/replicated/{namespace}/{topic}`**: replicated-offset marker for topics received from edge nodes.
 
-- **`/edge/checkpoints/{edge_name}/{topic}`**
+On the edge node (its own local Raft):
 
-  Per-topic replication checkpoints written by edge nodes to resume store-and-forward replication to the central cluster after restarts.
+- **`/edge/checkpoints/{namespace}/{topic}`**: last WAL offset replicated upstream (`u64`). The replicator resumes from here after a restart. For the topic `/edge1/sensors` the key is `/edge/checkpoints/edge1/sensors`.
 
----
+See [Edge](/edge/overview/).
 
-## Persistent Storage
+## Next steps
 
-Paths are prefixed with the configured `metadata_prefix` (default: `/danube`).
-
-- **`{prefix}/storage/topics/{namespace}/{topic}/segments/{padded_start_offset}`**
-
-  Durable segment descriptor. JSON with `start_offset`, `end_offset`, `size`, `object_id`, etc. Offsets are zero-padded to 20 digits for lexicographic sorting.
-
-- **`{prefix}/storage/topics/{namespace}/{topic}/segments/cur`**
-
-  Pointer to the latest published durable segment (padded start offset string).
-
-- **`{prefix}/storage/topics/{namespace}/{topic}/state`**
-
-  Sealed mobility marker for topic moves. JSON with `sealed`, `last_committed_offset`, `broker_id`, and `timestamp`. Written during unload, read during recovery.
-
----
-
-## Edge
-
-- **`/edge/checkpoints/{topic_name}`**
-
-  Last successfully replicated WAL offset per topic (`u64`). The replicator resumes from this position after restart. The `{topic_name}` includes the namespace prefix, for example `/edge/checkpoints/edge1/sensors` for the Danube topic `/edge1/sensors`.
+<CardGrid>
+  <LinkCard title="Architecture overview" href="/architecture/overview/" description="How brokers, Raft and storage fit together." />
+  <LinkCard title="Configuration workflow" href="/getting-started/configuration-workflow/" description="Change /cluster/config/* live or declaratively." />
+</CardGrid>

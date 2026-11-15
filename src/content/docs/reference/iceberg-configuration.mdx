@@ -1,50 +1,27 @@
 ---
 title: Lakehouse Configuration Reference
-description: Complete schema for DANUBE_LAKEHOUSE_CONFIG YAML covering broker connection, object storage, Iceberg catalogs, topic mappings, compaction, and polling.
+description: Every key of the DANUBE_LAKEHOUSE_CONFIG YAML file, covering the broker connection, object storage, Iceberg catalog, topics, compaction and polling.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Danube's embedded `LakehouseRuntime` is enabled by pointing the `DANUBE_LAKEHOUSE_CONFIG` environment variable to a YAML file. This page documents the complete `DANUBE_LAKEHOUSE_CONFIG` schema (parsed by `danube-iceberg`) and how to launch it on either co-located nodes (`--node-role all`) or dedicated Lakehouse workers (`--node-role lakehouse`).
+The lakehouse runtime reads one YAML file, named by the `DANUBE_LAKEHOUSE_CONFIG` environment variable. This page lists every key, its default and a working example.
 
-```bash title="Running with DANUBE_LAKEHOUSE_CONFIG"
-# Dedicated Lakehouse worker node (auto-registered as drained)
+```bash
 DANUBE_LAKEHOUSE_CONFIG=./lakehouse.yaml \
-  danube up --data-dir /var/lib/danube-lakehouse --seed-nodes broker1:7650 --join --node-role lakehouse
-
-# Or co-located on a broker node (--node-role all is the default)
-DANUBE_LAKEHOUSE_CONFIG=./lakehouse.yaml \
-  danube up --data-dir /var/lib/danube
+  danube up cluster --data-dir /var/lib/danube --single-node
 ```
 
-:::note
-`LakehouseRuntime` requires compiling `danube` with `--features danube-broker/lakehouse` (included in the unified `Dockerfile`) or `--features danube-broker/lakehouse-aws` when using AWS Glue or S3 Tables catalogs.
-:::
+A minimal file needs `broker`, `storage` and at least one entry in `topics`. Everything else has defaults. The node refuses to start if the file cannot be parsed or lists no topics.
 
-:::tip
-At minimum, you must configure `broker.address`, `storage`, and at least one entry in `topics`. Unspecified optional sections use the defaults documented below.
-:::
+## Complete example
 
----
-
-## Broker Connection
-
-```yaml title="danube_iceberg.yaml"
+```yaml title="lakehouse.yaml"
+# Any broker of the cluster: segment discovery and schema lookups
 broker:
   address: "localhost:6650"
-```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `broker.address` | String | *(required)* | gRPC address of any broker in the Danube cluster. Used for segment discovery (`StorageService`) and schema resolution (`SchemaService`). |
-
----
-
-## Object Storage
-
-Configures the storage backend for reading sealed `.dnb1` segments and writing Parquet data files.
-
-```yaml title="danube_iceberg.yaml"
+# Where sealed segments are read and Parquet files are written
 storage:
   backend: "s3"
   root: "s3://my-bucket/danube"
@@ -54,70 +31,100 @@ storage:
     region: "us-east-1"
     access_key: "minioadmin"
     secret_key: "minioadmin"
+
+# Iceberg catalog that tracks the tables
+catalog:
+  type: "rest"
+  name: "danube_catalog"
+  properties:
+    uri: "http://nessie:19120/iceberg"
+    warehouse: "s3://my-bucket/warehouse"
+
+# Global Parquet flush thresholds
+compaction:
+  target_parquet_size_mb: 200
+  max_flush_interval_seconds: 300
+
+# One Danube topic per Iceberg table
+topics:
+  - namespace: "default"
+    topic: "sensor-data"
+    table_name: "sensor_data"
+  - namespace: "default"
+    topic: "events"
+    table_name: "events"
+    compaction:
+      target_parquet_size_mb: 100
+      max_flush_interval_seconds: 60
+
+# How often to look for new sealed segments
+polling:
+  interval_seconds: 30
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `storage.backend` | String | *(required)* | Storage backend type. One of: `s3`, `gcs`, `azure`, `fs`. |
-| `storage.root` | String | *(required)* | Root path for reading `.dnb1` segments. Must match the cluster broker's durable storage path. |
-| `storage.output_prefix` | String | `"iceberg"` | Subdirectory for checkpoint files within the storage root. |
-| `storage.options` | Map | `{}` | Backend-specific options (see below). |
+## broker
 
-### Storage Options by Backend
+- **`broker.address`** (required): `host:port` of any broker, without a scheme, for example `broker-0:6650`. Used to discover sealed segments and to resolve schemas from the registry.
+
+## storage
+
+The object store holding the cluster's sealed segments. Parquet files and checkpoints are written here too.
+
+- **`storage.backend`** (required): `s3`, `gcs`, `azure` or `fs`.
+- **`storage.root`** (required): bucket or path, for example `s3://my-bucket/danube` or `/mnt/danube`. Use the same root as `danube cluster storage object-store --root`.
+- **`storage.output_prefix`** (default `iceberg`): prefix for checkpoint files, stored at `<output_prefix>/checkpoints/<namespace>/<topic>.json`.
+- **`storage.options`** (default empty): backend options, listed below.
 
 <Tabs>
   <TabItem label="S3 / MinIO">
-    | Key | Description |
-    |-----|-------------|
-    | `endpoint` | S3-compatible endpoint URL (required for MinIO, optional for AWS) |
-    | `region` | AWS region (e.g., `us-east-1`) |
-    | `access_key` | AWS access key ID |
-    | `secret_key` | AWS secret access key |
+    - **`endpoint`**: S3-compatible endpoint, required for MinIO.
+    - **`region`**: AWS region, for example `us-east-1`.
+    - **`access_key`**: access key id.
+    - **`secret_key`**: secret access key.
+    - **`virtual_host_style`**: `true` to use virtual-hosted bucket URLs.
   </TabItem>
   <TabItem label="GCS">
-    | Key | Description |
-    |-----|-------------|
-    | `service_account_path` | Path to GCP service account JSON key file |
+    - **`credential_file`**: path to a service account JSON key.
+    - **`endpoint`**: custom endpoint, for example an emulator.
   </TabItem>
   <TabItem label="Azure">
-    | Key | Description |
-    |-----|-------------|
-    | `account_name` | Azure storage account name |
-    | `account_key` | Azure storage account key |
+    - **`account_name`**: storage account name.
+    - **`account_key`**: storage account key.
+    - **`endpoint`**: custom endpoint, for example Azurite.
+
+    The container comes from `root`, for example `azure://my-container/danube`.
   </TabItem>
-  <TabItem label="Local FS">
-    No additional options needed. The `root` path should be a local directory path.
+  <TabItem label="Local filesystem">
+    No options. `root` is a local directory (an optional `file://` prefix is stripped). Useful for tests and single-node setups.
   </TabItem>
 </Tabs>
 
----
+## catalog
 
-## Iceberg Catalog
+Leave the section out, or set `type: "none"`, to write Parquet files without a catalog.
 
-Configures the Iceberg catalog where table metadata is committed. Omit this section entirely (or set `type: "none"`) for Parquet-only mode without catalog integration.
+- **`catalog.type`** (default `none`): `rest`, `glue`, `s3tables` or `none`.
+- **`catalog.name`** (default `danube_catalog`): catalog identifier.
+- **`catalog.properties`** (default empty): passed as-is to the catalog client.
 
 <Tabs>
   <TabItem label="REST">
-    ```yaml title="danube_iceberg.yaml"
+    ```yaml
     catalog:
       type: "rest"
       name: "danube_catalog"
       properties:
-        uri: "http://nessie:19120/api/v1"
+        uri: "http://nessie:19120/iceberg"
         warehouse: "s3://my-bucket/warehouse"
     ```
 
-    | Property | Description |
-    |----------|-------------|
-    | `uri` | REST catalog endpoint URL |
-    | `warehouse` | Default warehouse location for new tables |
-    | `credential` | Optional OAuth2 credential |
-    | `token` | Optional bearer token |
+    - **`uri`**: REST catalog endpoint.
+    - **`warehouse`**: warehouse name or location.
 
-    Compatible with: Nessie, Polaris, Tabular, Snowflake Open Catalog, Databricks Unity.
+    Works with Polaris, Nessie, Unity Catalog, Snowflake Open Catalog and other Iceberg REST catalogs. Included in every `lakehouse` build.
   </TabItem>
   <TabItem label="AWS Glue">
-    ```yaml title="danube_iceberg.yaml"
+    ```yaml
     catalog:
       type: "glue"
       name: "glue_catalog"
@@ -125,14 +132,12 @@ Configures the Iceberg catalog where table metadata is committed. Omit this sect
         warehouse: "s3://my-datalake/warehouse"
     ```
 
-    | Property | Description |
-    |----------|-------------|
-    | `warehouse` | S3 path for table data |
+    - **`warehouse`**: S3 location for table data.
 
-    Uses AWS credentials from the environment (IAM role, env vars, or `~/.aws/credentials`).
+    Uses the standard AWS credential chain (IAM role, environment, `~/.aws/credentials`). Requires the `lakehouse-aws` build.
   </TabItem>
   <TabItem label="S3 Tables">
-    ```yaml title="danube_iceberg.yaml"
+    ```yaml
     catalog:
       type: "s3tables"
       name: "s3tables_catalog"
@@ -140,210 +145,65 @@ Configures the Iceberg catalog where table metadata is committed. Omit this sect
         table_bucket_arn: "arn:aws:s3tables:us-east-1:123456789012:bucket/my-table-bucket"
     ```
 
-    | Property | Description |
-    |----------|-------------|
-    | `table_bucket_arn` | ARN of the S3 Tables bucket |
-    | `endpoint_url` | Optional custom endpoint |
-  </TabItem>
-  <TabItem label="SQL">
-    ```yaml title="danube_iceberg.yaml – SQLite"
-    catalog:
-      type: "sql"
-      name: "sql_catalog"
-      properties:
-        uri: "sqlite://iceberg_catalog.db"
-        warehouse: "/tmp/warehouse"
-    ```
+    - **`table_bucket_arn`**: ARN of the S3 Tables bucket.
 
-    ```yaml title="danube_iceberg.yaml – PostgreSQL"
-    catalog:
-      type: "sql"
-      name: "sql_catalog"
-      properties:
-        uri: "postgresql://user:pass@localhost:5432/iceberg"
-        warehouse: "s3://my-bucket/warehouse"
-    ```
-
-    | Property | Description |
-    |----------|-------------|
-    | `uri` | Database connection string (SQLite or PostgreSQL) |
-    | `warehouse` | Path or S3 location for table data |
+    Requires the `lakehouse-aws` build.
   </TabItem>
 </Tabs>
 
-### Catalog Fields
+## topics
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `catalog.type` | String | `"none"` | Catalog type: `rest`, `glue`, `s3tables`, `sql`, or `none`. |
-| `catalog.name` | String | `"danube_catalog"` | Catalog identifier used when loading. |
-| `catalog.properties` | Map | `{}` | Catalog-specific properties passed to the builder. |
+Only listed topics are exported. Each entry maps one Danube topic to one Iceberg table.
 
----
+- **`namespace`** (required): Danube namespace.
+- **`topic`** (required): topic name. Together they form `/<namespace>/<topic>`.
+- **`table_name`** (required): Iceberg table name. The table is created if it does not exist.
+- **`compaction`**: per-topic override of the global `compaction` block.
 
-## Compaction
+## compaction
 
-Global defaults for Parquet file generation. These can be overridden per topic.
+When to flush buffered records into a Parquet file. Whichever threshold is reached first wins.
 
-```yaml title="danube_iceberg.yaml"
-compaction:
-  target_parquet_size_mb: 200
-  max_flush_interval_seconds: 300
-```
+- **`target_parquet_size_mb`** (default `200`): flush when the buffer reaches this size.
+- **`max_flush_interval_seconds`** (default `300`): flush at least this often.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `compaction.target_parquet_size_mb` | Integer | `200` | Flush when the in-memory buffer reaches this size in MB. |
-| `compaction.max_flush_interval_seconds` | Integer | `300` | Maximum seconds between flushes, even if the size threshold is not reached. |
+<Aside type="tip">
+  For demos, use `1` MB and `30` seconds to see data quickly. Keep the defaults in production for well-sized Parquet files.
+</Aside>
 
-:::caution
-For demos and testing, use small values (e.g., `1` MB and `30` seconds) to see data quickly. For production, use `200` MB and `300` seconds to produce optimally-sized Parquet files.
-:::
+## polling
 
----
+- **`interval_seconds`** (default `30`): seconds between checks for new sealed segments. Lower means fresher tables, higher means fewer calls to the broker.
 
-## Topics
+## Run it in Docker
 
-Only explicitly configured topics are exported. Each entry maps one Danube topic to one Iceberg table.
+The Docker image is built with the `lakehouse` feature, so the same image runs brokers and lakehouse workers.
 
-```yaml title="danube_iceberg.yaml"
-topics:
-  - namespace: "default"
-    topic: "sensor-data"
-    table_name: "sensor_data"
-  - namespace: "default"
-    topic: "events"
-    table_name: "events"
-    compaction:
-      target_parquet_size_mb: 100
-      max_flush_interval_seconds: 60
-```
+```bash
+docker build -t danube -f Dockerfile .
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `namespace` | String | Yes | Danube namespace. Combined with `topic` to form the fully qualified topic `/{namespace}/{topic}`. |
-| `topic` | String | Yes | Danube topic name. |
-| `table_name` | String | Yes | Iceberg table name. The table is created automatically if it does not exist. |
-| `compaction` | Object | No | Per-topic override for compaction thresholds. If omitted, global defaults apply. |
-
----
-
-## Polling
-
-Controls how frequently `LakehouseRuntime` checks the cluster for new sealed segments.
-
-```yaml title="danube_iceberg.yaml"
-polling:
-  interval_seconds: 30
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `polling.interval_seconds` | Integer | `30` | Seconds between segment discovery polls. Lower values reduce latency; higher values reduce API calls. |
-
----
-
-## Complete Example
-
-```yaml title="danube_iceberg.yaml"
-# Broker connection — any broker in the Danube cluster.
-broker:
-  address: "localhost:6650"
-
-# Object storage — where segments are read from and Parquet files are written to.
-storage:
-  backend: "s3"
-  root: "s3://my-bucket/danube"
-  output_prefix: "iceberg"
-  options:
-    endpoint: "http://minio:9000"
-    region: "us-east-1"
-    access_key: "minioadmin"
-    secret_key: "minioadmin"
-
-# Iceberg catalog — manages table metadata for analytics engines.
-catalog:
-  type: "rest"
-  name: "danube_catalog"
-  properties:
-    uri: "http://nessie:19120/api/v1"
-    warehouse: "s3://my-bucket/warehouse"
-
-# Global compaction defaults.
-compaction:
-  target_parquet_size_mb: 200
-  max_flush_interval_seconds: 300
-
-# Topics to export — each topic maps to one Iceberg table.
-topics:
-  - namespace: "default"
-    topic: "sensor-data"
-    table_name: "sensor_data"
-  - namespace: "default"
-    topic: "events"
-    table_name: "events"
-    compaction:
-      target_parquet_size_mb: 100
-      max_flush_interval_seconds: 60
-
-# Polling — how often to check for new sealed segments.
-polling:
-  interval_seconds: 30
-```
-
----
-
-## Docker
-
-The repository's unified `Dockerfile` compiles `/usr/local/bin/danube` with `--features danube-broker/lakehouse`, so the same image serves both broker nodes and dedicated Lakehouse workers:
-
-```bash title="Build unified image"
-docker build -t danube .
-```
-
-```bash title="Run dedicated Lakehouse worker"
 docker run -d \
   -e DANUBE_LAKEHOUSE_CONFIG=/etc/danube/lakehouse.yaml \
   -v ./lakehouse.yaml:/etc/danube/lakehouse.yaml:ro \
-  danube \
-  up \
+  -p 50051:50051 \
+  danube up cluster \
   --data-dir /danube-data \
-  --broker-addr 0.0.0.0:6650 \
-  --seed-nodes broker1:7650 \
-  --join \
-  --node-role lakehouse
+  --listen 0.0.0.0:6650 \
+  --admin-listen 0.0.0.0:50051 \
+  --role lakehouse \
+  --join
 ```
 
-```yaml title="docker-compose.yml"
-services:
-  lakehouse-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    volumes:
-      - ./lakehouse.yaml:/etc/danube/lakehouse.yaml:ro
-      - lakehouse_data:/danube-data
-    environment:
-      - DANUBE_LAKEHOUSE_CONFIG=/etc/danube/lakehouse.yaml
-      - RUST_LOG=warn,danube_broker=info,danube_iceberg=info
-    command:
-      - up
-      - --data-dir
-      - /danube-data
-      - --broker-addr
-      - 0.0.0.0:6650
-      - --seed-nodes
-      - broker1:7650
-      - --join
-      - --node-role
-      - lakehouse
-    depends_on:
-      - broker1
-```
+Then add the worker to the cluster with `danube cluster node add --node-addr http://<worker-host>:50051`.
 
-### Environment Variables
+## Environment variables
 
-| Variable | Description |
-|----------|-------------|
-| `DANUBE_LAKEHOUSE_CONFIG` | Path to the Lakehouse YAML config file. When set on `--node-role all` or `--node-role lakehouse`, activates the embedded `LakehouseRuntime`; when unset, `LakehouseRuntime` stays in idle standby. |
-| `RUST_LOG` | Controls log verbosity. Include `danube_iceberg=info` (or `danube_iceberg=debug` when troubleshooting). |
+- **`DANUBE_LAKEHOUSE_CONFIG`**: path to this file. On `--role all` or `--role lakehouse` it starts the runtime; when unset, the runtime stays idle. Ignored with `--role broker`.
+- **`RUST_LOG`**: log levels. Add `danube_iceberg=info` (or `debug` while troubleshooting).
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Danube Iceberg" href="/lakehouse/overview/" description="How the lakehouse runtime works and where to run it." />
+  <LinkCard title="Tiered Storage" href="/durability/tiered-storage/" description="Configure the cluster object store." />
+</CardGrid>

@@ -1,302 +1,320 @@
 ---
-title: "CLI: Cluster & Brokers"
-description: Manage Raft cluster consensus, live storage/WAL/load-manager config, broker lifecycle, and declarative state with danube ctl.
+title: "CLI: Cluster, Brokers & Access"
+description: Task recipes for running a Danube cluster from the terminal. Add and remove nodes, drain brokers, switch storage to S3, tune the WAL, and manage roles and tokens.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Use `danube ctl cluster`, `danube ctl brokers`, and `danube ctl apply` to operate brokers, manage Raft consensus membership, configure cluster-wide storage and load balancing dynamically, and reconcile declarative YAML/JSON manifests.
-
-```bash
-# Default multiplexed endpoint is http://127.0.0.1:6650
-export DANUBE_ADMIN_ENDPOINT=http://127.0.0.1:6650
-
-# Or override per command
-danube ctl --endpoint http://broker1:6650 brokers list
-```
-
-See [Administration Overview](/admin/overview/) for TLS and JWT environment variables (`DANUBE_ADMIN_TLS`, `DANUBE_ADMIN_CA`, `DANUBE_ADMIN_CERT`, `DANUBE_ADMIN_KEY`, `DANUBE_ADMIN_DOMAIN`, `DANUBE_ADMIN_TOKEN`).
-
----
-
-## Brokers (`danube ctl brokers`)
-
-### `brokers list`
-
-List all registered brokers in the cluster, their IDs, addresses, and statuses.
+This page is a cookbook for the people who keep Danube running. Each section is one task, with the exact commands to do it, using `danube cluster`, `danube broker` and `danube auth`.
 
 ```bash
-danube ctl brokers list
-danube ctl brokers list --output json
+danube cluster status      # who leads, who votes
+danube broker list         # every broker and its state
+danube broker balance      # how evenly load is spread
 ```
 
-### `brokers leader-broker`
+All commands connect to `http://127.0.0.1:6650` by default. Add `--endpoint`, `--context` or `DANUBE_ENDPOINT` to target another cluster, as described in [connecting to a broker](/admin/overview/#connect-to-a-broker).
 
-Show the current cluster controller / leader broker ID and address.
+## Check cluster health
 
 ```bash
-danube ctl brokers leader-broker
+# Raft leader, term, voters and learners
+danube cluster status
+
+# Brokers, their addresses and status
+danube broker list
+danube broker leader
+
+# Load spread across brokers (CV under 20% is well balanced)
+danube broker balance
 ```
 
-### `brokers namespaces`
-
-List namespaces currently tracked by the cluster.
+Every list command accepts `--output json` for scripts:
 
 ```bash
-danube ctl brokers namespaces
-danube ctl brokers namespaces --output json
+danube broker list --output json
 ```
 
-### `brokers unload`
+## Add a node
 
-Drain topics and partitions off a broker for maintenance, upgrades, or scale-down.
+New nodes join as non-voting learners first, then you promote them. This keeps quorum safe while the new node catches up.
+
+<Steps>
+1. **Start the new node in join mode** on its own host. Give it a separate `--admin-listen`: the shared `--listen` port only opens once the node is a member, so the admin port is how the CLI reaches it before that:
+   ```bash
+   danube up cluster --data-dir /var/lib/danube --join \
+     --listen 0.0.0.0:6650 --admin-listen 0.0.0.0:50051 --advertised-addr node4:6650
+   ```
+
+2. **Add it as a learner** from anywhere that can reach both the leader and the new node. `--node-addr` is the new node's admin address:
+   ```bash
+   danube cluster node add --node-addr http://node4:50051 --endpoint http://node1:6650
+   ```
+   The CLI asks the new node for its id and Raft address, then tells the leader to add it. Note the printed `node_id`.
+
+3. **Promote it to a voter** once it has caught up:
+   ```bash
+   danube cluster node promote --node-id 12345678 --endpoint http://node1:6650
+   ```
+
+4. **Spread load onto it**:
+   ```bash
+   danube broker rebalance --dry-run
+   danube broker rebalance
+   ```
+</Steps>
+
+<Aside type="tip">
+Starting a brand-new cluster is different: give every node the same `--seed-nodes` list and they bootstrap together. See [Broker Modes](/getting-started/broker-modes/).
+</Aside>
+
+## Remove a node
+
+Drain the broker first, then take it out of Raft.
 
 ```bash
-danube ctl brokers unload \
-  --broker-id broker-2 \
-  --max-parallel 1 \
-  --timeout-seconds 60
-```
+# Move its topics elsewhere
+danube broker unload --broker-id 12345678
 
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--broker-id <ID>` | required | Target broker ID to drain |
-| `--max-parallel <N>` | `1` | Maximum concurrent topic unloads |
-| `--namespaces-include <NS>` | — | Only unload topics in these namespaces (repeatable) |
-| `--namespaces-exclude <NS>` | — | Skip unloading topics in these namespaces (repeatable) |
-| `--dry-run` | `false` | Preview which topics would be unloaded without moving them |
-| `--timeout-seconds <SEC>` | `60` | Maximum wait time for unload completion |
-
-```bash title="Filter namespaces and dry-run"
-# Preview draining only /prod, excluding /internal
-danube ctl brokers unload \
-  --broker-id broker-2 \
-  --namespaces-include prod \
-  --namespaces-exclude internal \
-  --dry-run
-```
-
-### `brokers activate`
-
-Re-activate a drained or inactive broker so the Load Manager can assign topics to it again.
-
-```bash
-danube ctl brokers activate --broker-id broker-2
-danube ctl brokers activate --broker-id broker-2 --reason maintenance_complete
-```
-
-### `brokers balance`
-
-Inspect the current cluster load-balance score and per-broker topic/partition load distribution.
-
-```bash
-danube ctl brokers balance
-danube ctl brokers balance --output json
-```
-
-### `brokers rebalance`
-
-Trigger an immediate cluster rebalance via the Load Manager.
-
-```bash
-# Preview proposed topic moves
-danube ctl brokers rebalance --dry-run
-
-# Execute up to 5 moves
-danube ctl brokers rebalance --max-moves 5
-```
-
----
-
-## Cluster Consensus & Live Configuration (`danube ctl cluster`)
-
-Raft consensus and cluster-wide storage/WAL/load-manager settings are persisted in Raft metadata — no static broker YAML edits or cluster-wide restarts are needed for runtime configuration changes. See [Cluster & Topic Configuration](/getting-started/configuration-workflow/) for workflow guidance.
-
-### Raft Membership
-
-```bash
-# Inspect Raft leader, term, applied index, voters, and learners
-danube ctl cluster status
-
-# Add a new broker node to the Raft cluster as a learner
-danube ctl cluster add-node --node-addr 10.0.1.14:7650
-
-# Promote a learner node to a voting member
-danube ctl cluster promote-node --node-id 4
-
-# Remove a node from the Raft cluster
-danube ctl cluster remove-node --node-id 4
+# Remove it from the Raft membership
+danube cluster node remove --node-id 12345678
 ```
 
 <Aside type="caution">
-Do not remove a voting member without confirming the remaining voters still maintain a strict quorum majority (`N/2 + 1`).
+Before removing a voter, make sure the remaining voters still form a majority. A three-voter cluster tolerates the loss of one voter, not two.
 </Aside>
 
-### `cluster storage`
+## Drain a broker for maintenance
 
-View or switch the cluster-wide durable persistence storage mode (`local`, `shared-fs`, or `object-store`).
+Unloading moves every topic off a broker so you can upgrade or restart it with no client-visible downtime.
 
-```bash
-# Show active storage mode and configuration
-danube ctl cluster storage status
+<Steps>
+1. **Preview** which topics will move:
+   ```bash
+   danube broker unload --broker-id 12345678 --dry-run
+   ```
 
-# Switch to local node storage only
-danube ctl cluster storage local --force
+2. **Drain it**, a few topics at a time:
+   ```bash
+   danube broker unload --broker-id 12345678 --max-parallel 5 --timeout-seconds 120
+   ```
+   Limit the scope with `--namespaces-include default` or `--namespaces-exclude test` (both repeatable).
 
-# Configure shared POSIX filesystem tiered storage
-danube ctl cluster storage shared-fs --root /mnt/danube-shared --force
+3. **Do the maintenance**, then **bring it back** into topic assignment:
+   ```bash
+   danube broker activate --broker-id 12345678 --reason "kernel upgrade done"
+   ```
+</Steps>
 
-# Configure S3 / object-store tiered storage with backend key-value options
-danube ctl cluster storage object-store \
-  --backend s3 \
-  --root s3://my-danube-bucket/segments \
-  --option region=us-east-1 \
-  --option endpoint=http://minio:9000 \
-  --force
-```
-
-### `cluster write-buffer`
-
-Enable or disable the distributed Raft/Etcd-backed write buffer used for sub-millisecond multi-node replication in `ha` or `dev` profiles.
+## Rebalance the cluster
 
 ```bash
-# Enable HA write buffer across quorum endpoints
-danube ctl cluster write-buffer enable \
-  --endpoints http://10.0.1.11:2379,http://10.0.1.12:2379,http://10.0.1.13:2379 \
-  --profile ha \
-  --wait-replicas 2 \
-  --wait-timeout-ms 250 \
-  --on-wait-timeout fail \
-  --max-cached-segments 64
+# 1. How uneven is it?
+danube broker balance
 
-# Disable the write buffer
-danube ctl cluster write-buffer disable
+# 2. What would move?
+danube broker rebalance --dry-run
+
+# 3. Move at most 10 topics
+danube broker rebalance --max-moves 10
+
+# 4. Check again
+danube broker balance
 ```
 
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--endpoints <URL,...>` | required | Comma-separated write-buffer endpoints |
-| `--profile <ha\|dev>` | — | Preset durability profile |
-| `--wait-replicas <N>` | — | Number of replicas required before acknowledging |
-| `--wait-timeout-ms <MS>` | — | Replication acknowledgment timeout in milliseconds |
-| `--on-wait-timeout <fail\|ack>` | — | Behavior when `--wait-timeout-ms` expires |
-| `--max-cached-segments <N>` | — | Maximum cached segments in buffer |
+To let the cluster do this on its own, turn on automated rebalancing (see [tune the load manager](#tune-the-load-manager)).
 
-### `cluster wal`
+## Switch storage to S3
 
-Tune cluster-wide Write-Ahead Log (WAL) rotation, flush batching, cache capacity, and retention thresholds.
+Cluster storage decides where sealed WAL segments go for durability and tiering. It is a live setting stored in Raft: one command switches every broker, no restart needed.
 
 ```bash
-danube ctl cluster wal \
-  --retention-time-minutes 1440 \
-  --retention-size-mb 10240 \
-  --check-interval-minutes 5 \
-  --rotate-max-bytes 134217728 \
-  --rotate-max-hours 24 \
-  --cache-capacity 1024 \
-  --flush-interval-ms 100 \
-  --flush-max-batch-bytes 1048576
-
-# Clear WAL retention limits
-danube ctl cluster wal --clear-retention
+danube cluster storage show
 ```
 
-### `cluster load-manager`
+<Tabs>
+  <TabItem label="S3 / MinIO">
+    ```bash
+    danube cluster storage object-store --backend s3 \
+      --root s3://danube-prod/segments \
+      --option region=us-east-1
 
-Configure automated topic placement and rebalancing behavior across the cluster.
+    # MinIO or any S3-compatible endpoint
+    danube cluster storage object-store --backend s3 \
+      --root s3://danube/segments \
+      --option endpoint=http://minio:9000 \
+      --option access_key=minio --option secret_key=minio123
+    ```
+    S3 options: `region`, `endpoint`, `access_key`, `secret_key`, `session_token`, `anonymous`, `profile`, `role_arn`, `session_name`, `virtual_host_style`.
+  </TabItem>
+  <TabItem label="GCS">
+    ```bash
+    danube cluster storage object-store --backend gcs \
+      --root gcs://danube-prod/segments \
+      --option credentials_path=/etc/danube/gcs.json
+    ```
+    GCS options: `project`, `endpoint`, `credential_file`, `credentials_path`, `credentials_json`.
+  </TabItem>
+  <TabItem label="Azure Blob">
+    ```bash
+    danube cluster storage object-store --backend azblob \
+      --root azblob://danube-container/segments \
+      --option account_name=mystorage --option account_key="$AZURE_KEY"
+    ```
+    Azure options: `account_name`, `account_key`, `endpoint`.
+  </TabItem>
+  <TabItem label="Shared filesystem">
+    ```bash
+    # NFS, EFS or any POSIX mount shared by all brokers
+    danube cluster storage shared-fs --root /mnt/danube-shared
+    ```
+  </TabItem>
+  <TabItem label="Local only">
+    ```bash
+    # Back to local WAL only
+    danube cluster storage local
+    ```
+  </TabItem>
+</Tabs>
 
-```bash
-danube ctl cluster load-manager \
-  --assignment-strategy weighted_load \
-  --load-report-interval-seconds 10 \
-  --rebalance true \
-  --profile balanced \
-  --check-interval-seconds 30 \
-  --max-moves-per-hour 10 \
-  --cooldown-seconds 300 \
-  --min-brokers 2 \
-  --min-topic-age-seconds 60 \
-  --blacklist-topics /default/pinned-topic \
-  --replace-blacklist
-```
-
-| Flag | Values / Type | Description |
-| :--- | :--- | :--- |
-| `--assignment-strategy` | `fair`, `balanced`, `weighted_load` | Strategy used for new topic placement |
-| `--load-report-interval-seconds` | integer | Broker load report frequency |
-| `--rebalance` | `true`, `false` | Enable or pause automatic rebalancing |
-| `--profile` | `conservative`, `balanced`, `aggressive` | Rebalancing aggressiveness preset |
-| `--check-interval-seconds` | integer | Interval between rebalance evaluations |
-| `--max-moves-per-hour` | integer | Rate limit on automated topic moves |
-| `--cooldown-seconds` | integer | Post-move cooldown period |
-| `--min-brokers` | integer | Minimum brokers required before auto-rebalancing |
-| `--min-topic-age-seconds` | integer | Minimum age before a topic can be moved |
-| `--blacklist-topics` | topic list | Topics excluded from automated rebalancing |
-| `--replace-blacklist` | flag | Replace existing blacklist instead of appending |
-
-### `cluster export-config`
-
-Export the active Raft-persisted cluster configuration (or a specific broker's effective view) to `yaml` or `json`.
-
-```bash
-# Print YAML cluster config to stdout
-danube ctl cluster export-config --format yaml
-
-# Export a specific broker's view to JSON
-danube ctl cluster export-config \
-  --broker-id broker-1 \
-  --format json \
-  --output ./cluster-backup.json
-```
-
----
-
-## Declarative Desired State (`danube ctl apply`)
-
-Apply a declarative YAML or JSON manifest describing namespaces, topics, storage backends, write buffer, and load-manager settings.
-
-```bash
-# Preview planned creates, updates, and deletions without modifying the cluster
-danube ctl apply -f cluster-state.yaml --dry-run
-
-# Apply additions/updates (additive by default)
-danube ctl apply -f cluster-state.yaml
-
-# Also delete namespaces/topics missing from the manifest
-danube ctl apply -f cluster-state.yaml --prune
-
-# Force destructive storage changes when required
-danube ctl apply -f cluster-state.yaml --force
-
-# Read manifest from stdin
-danube ctl apply -f - < cluster-state.yaml
-```
-
-### Example Manifest (`cluster-state.yaml`)
-
-```yaml
-namespaces:
-  - payments
-  - agents
-
-topics:
-  - name: /payments/transactions
-    intent: audit_log
-    partitions: 4
-    schema_subject: payment-txn
-
-  - name: /agents/tasks
-    intent: task_queue
-    partitions: 8
-
-object_store:
-  backend: s3
-  root: s3://danube-prod/segments
-  options:
-    region: us-east-1
-  force: false
-```
-
-<Aside type="tip">
-Always run `danube ctl apply -f cluster-state.yaml --dry-run` before using `--prune`, since `--prune` deletes resources present in the cluster that are omitted from the manifest.
+<Aside type="caution">
+If some topics are already `cloud_tiered`, changing or removing the durable store is refused unless you add `--force`. Know where those segments will be read from before forcing it.
 </Aside>
+
+Once a durable store is configured, move individual topics to it with `danube topic storage-mode /default/events --mode cloud_tiered` (see [tiered storage](/durability/tiered-storage/)).
+
+## Add a Valkey write buffer
+
+A Valkey (or Redis) write buffer keeps recent WAL segments warm and replicated across machines before they reach object storage.
+
+```bash
+# Production preset: wait for 1 replica, fail on timeout
+danube cluster write-buffer enable \
+  --endpoints redis://valkey-0:6379,redis://valkey-1:6379 --profile ha
+
+# Fine-tune any field on top of the preset
+danube cluster write-buffer enable --endpoints redis://valkey-0:6379 \
+  --profile ha --wait-replicas 2 --wait-timeout-ms 250 --max-cached-segments 20
+
+# Turn it off
+danube cluster write-buffer disable
+```
+
+- **`--profile`**: `ha` (1 replica, 100 ms, fail, 10 cached segments) or `dev` (0 replicas, 50 ms, ack, 2 cached segments).
+- **`--on-wait-timeout`**: `fail` rejects the write when replicas do not confirm in time, `ack` accepts it anyway.
+
+## Tune WAL retention
+
+Run `danube cluster wal` with no flags to print the current cluster config. Add flags to change it:
+
+```bash
+# Keep 2 days or 20 GiB of local WAL, whichever comes first
+danube cluster wal --retention-time-minutes 2880 --retention-size-mb 20480
+
+# Rotate segments at 512 MiB or 24 hours
+danube cluster wal --rotate-max-bytes 536870912 --rotate-max-hours 24
+
+# Flush batching and cache size
+danube cluster wal --flush-interval-ms 100 --flush-max-batch-bytes 1048576 --cache-capacity 1024
+
+# Remove retention limits and stop the background deleter
+danube cluster wal --clear-retention
+```
+
+## Tune the load manager
+
+```bash
+# Place new topics by measured load
+danube cluster load-manager --assignment-strategy weighted_load
+
+# Turn on automated rebalancing with a preset
+danube cluster load-manager --rebalance true --profile conservative
+
+# Override individual limits
+danube cluster load-manager --max-moves-per-hour 5 --cooldown-seconds 120 \
+  --min-brokers 3 --min-topic-age-seconds 600
+
+# Never move these topics
+danube cluster load-manager --blacklist-topics "/system/*,/critical/*"
+danube cluster load-manager --blacklist-topics "/critical/*" --replace-blacklist   # replace it
+danube cluster load-manager --replace-blacklist                                   # clear it
+```
+
+- **Strategies**: `fair`, `balanced`, `weighted_load`.
+- **Profiles**: `conservative`, `balanced`, `aggressive` set the check interval, moves per hour and cooldown together.
+
+Run it with no flags to print the current settings. The scoring is explained in [Load Manager](/architecture/load-manager/).
+
+## Back up the cluster config
+
+`export-config` writes the live Raft config as a break-glass recovery file. Keep a copy somewhere safe.
+
+```bash
+danube cluster export-config --format yaml --output recovery.yaml
+
+# Include one broker's bind and admin addresses
+danube cluster export-config --broker-id 12345678 --format json --output broker.json
+```
+
+If quorum is ever lost, start a node with `danube up cluster --data-dir /var/lib/danube --recovery-config recovery.yaml`. See [Crash Recovery](/durability/crash-recovery/) before you do.
+
+## Manage access
+
+These commands need a cluster started with JWT auth (`--auth tls` plus `--jwt-secret`, or `--auth auto-tls`) and a token with the right permissions.
+
+### Give an app permission to produce
+
+```bash
+# 1. A role is a named set of permissions
+danube auth role create producer-role --permissions Produce,Lookup
+
+# 2. A binding grants roles to a principal at a scope
+danube auth binding create orders-app-produce \
+  --principal-type service_account --principal-name orders-app \
+  --roles producer-role --scope namespace --resource default
+
+# 3. Issue a token for that principal (needs ManageCluster)
+danube auth token issue --subject orders-app --ttl 720h
+```
+
+- **Permissions**: `Lookup`, `Produce`, `Consume`, `Replicate`, `ManageNamespace`, `ManageTopic`, `ManageSchema`, `ManageBroker`, `ManageCluster`.
+- **Scopes**: `cluster` (no `--resource`), `namespace` (`--resource default`) or `topic` (`--resource /default/orders`).
+
+### Inspect and clean up
+
+```bash
+danube auth role list
+danube auth role get producer-role --output json
+danube auth binding list --scope namespace --resource default
+danube auth binding get orders-app-produce --scope namespace --resource default
+danube auth binding delete orders-app-produce --scope namespace --resource default
+danube auth role delete producer-role
+```
+
+### Revoke a leaked token
+
+```bash
+# Invalidates every token issued for this subject, cluster-wide
+danube auth token revoke --subject orders-app
+```
+
+### Work with tokens offline
+
+`create` and `validate` never contact a broker. They sign and check tokens with the shared JWT secret, which is handy for bootstrapping.
+
+```bash
+export DANUBE_JWT_SECRET=your-shared-secret
+danube auth token create --subject ci-runner --ttl 24h
+danube auth token create --subject alice --type user --ttl 8h
+danube auth token validate eyJhbGciOi...
+```
+
+For the full model see [Authentication](/security/authentication/) and [Authorization](/security/authorization/).
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Topics, namespaces & schemas" href="/admin/cli-resources/" description="Create topics with intents, fix subscriptions, replay a DLQ." />
+  <LinkCard title="CLI & Configuration Reference" href="/reference/broker-configuration/" description="Every flag of every server and cluster command." />
+  <LinkCard title="Scaling" href="/concepts/scaling/" description="How Danube spreads topics across brokers." />
+</CardGrid>

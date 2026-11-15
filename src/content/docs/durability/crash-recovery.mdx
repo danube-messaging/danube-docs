@@ -1,102 +1,128 @@
 ---
 title: Crash Recovery
-description: How Danube recovers from broker crashes using Valkey as a durability safety net, and what guarantees each configuration provides.
+description: What survives a broker crash in each durability setup, how Valkey replays lost writes, and how to recover a cluster that lost Raft quorum.
 ---
 
-import { Steps } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Aside } from '@astrojs/starlight/components';
 
-This page explains what happens when a Danube broker crashes and how the system recovers without losing messages.
+A broker crash should cost you nothing you were not willing to lose. This page shows exactly what survives in each setup, how Danube recovers on its own, and the break-glass path for when the cluster itself is broken.
 
----
+## The short version
 
-## When Can Crashes Lose Messages?
+- **Same disk comes back** (process crash, OOM kill, pod restart on the same volume): nothing is lost. The broker replays its local WAL and carries on.
+- **Disk is gone** (spot instance reclaimed, diskless pod): messages that were already exported are safe. Messages that were not yet exported survive only if the Valkey write buffer is on.
 
-When a broker receives a message, it first writes to the local WAL (Write-Ahead Log) on disk. A background exporter then asynchronously uploads sealed WAL segments to Cloud Storage (S3, GCS, or Azure Blob).
+The gap Valkey closes is small but real: by default a WAL file is exported when it rotates at 512 MiB, so on a busy topic that window can be minutes of data.
 
-The crash behavior depends on the underlying storage infrastructure:
+## How hard each write hits the disk
 
-- **Persistent Storage (Standard PVCs or Bare-Metal):** If a broker process crashes, restarts, or is rescheduled on the same persistent volume, **no messages are lost**. The local WAL is intact, the broker replays the log tail upon startup, and normal operation resumes with zero data loss.
-- **Ephemeral Storage (Spot Instances, Diskless Pods):** If a broker runs on disposable compute where node termination permanently destroys the local disk, any messages written to the local WAL that were not yet sealed and uploaded to Cloud Storage would vanish with the node.
+Each reliable topic gets a WAL sync mode from its [stream intent](/concepts/stream-intents/). It decides what has happened before the producer is acknowledged.
 
-**This is the specific problem Valkey solves.** By buffering in-flight messages in Valkey in real-time, the cluster maintains a transient off-node copy that survives complete node and disk destruction on ephemeral infrastructure.
+<CardGrid>
+  <Card title="os_cache_flush" icon="rocket">
+    Used by `event_stream`, and by reliable topics created without an intent. The batch is flushed to the OS page cache before the ack. Survives a broker process crash; a power loss can drop the last moments.
+  </Card>
+  <Card title="fsync_batch" icon="approve-check">
+    Used by `task_queue` and `audit_log`. The batch is flushed and `fdatasync`'d before the ack. Survives a power loss of the host.
+  </Card>
+</CardGrid>
 
----
+Writes are group-committed, so many concurrent messages share one flush or one `fdatasync`. The `realtime` intent has no WAL at all.
 
-## Recovery With Valkey
+```bash
+# Strongest local durability: fsync per batch, poison messages block
+danube topic create /payments/ledger --intent audit_log
+```
 
-When a broker starts and takes ownership of a topic, it checks Valkey for any buffered messages that aren't yet covered by Cloud Storage. If found, it replays them into a fresh WAL.
+## Recovery with Valkey
+
+When a broker takes ownership of a topic, it checks Valkey for buffered messages that the durable store does not cover yet, and replays them.
 
 <Steps>
-1. **Broker starts** and claims topic ownership from the metadata store
 
-2. **Check Valkey** for the topic's stream, query for any messages with offsets beyond what Cloud Storage already covers
+1. **Claim the topic**: the broker takes ownership through the metadata store.
 
-3. **Download and replay**, if Valkey has buffered messages, download them via `XRANGE` and replay them into a fresh local WAL
+2. **Look in Valkey**: it reads the topic's stream for offsets beyond what object storage already holds.
 
-4. **Resume normal operation**, the WAL now contains all recovered messages. New writes continue from the correct offset. Consumers reconnect and see a continuous stream.
+3. **Replay**: buffered messages are downloaded with `XRANGE` and written into a fresh local WAL.
+
+4. **Resume**: new writes continue from the right offset. Consumers reconnect and see an unbroken offset sequence.
+
 </Steps>
 
-From the consumer's perspective, nothing happened. The offset sequence is continuous, no messages are missing, and reads work normally.
+From a consumer's point of view nothing happened.
 
----
+## Recovery without Valkey
 
-## Recovery Without Valkey
+The cluster relies on the WAL and the durable store only:
 
-Without the write buffer, the system depends entirely on the local WAL and Cloud Storage:
+- **Already exported**: always recoverable.
+- **Still only in the WAL**: lost if the disk is lost.
 
-- **Messages already exported to Cloud Storage:** safe, always recoverable
-- **Messages in the WAL but not yet exported:** lost if the disk fails or the broker crashes
+The exposure window depends on WAL rotation (`--rotate-max-bytes`, default 512 MiB, and optionally `--rotate-max-hours`) because a segment is exported once it is sealed. Lower the rotation size or add an age limit with `danube cluster wal` to shrink the window.
 
-The window of exposure depends on:
-- WAL rotation frequency (default: every 512 MB)
-- Cloud Storage export cadence (continuous background task)
+## Planned topic moves are different
 
-In practice, this window is typically a few minutes of recent messages.
-
----
-
-## Recovery During Topic Moves
-
-When a topic moves between brokers (due to rebalancing or maintenance), the system follows a coordinated handoff:
+When a topic moves between brokers on purpose (rebalancing, draining a node), no data is at risk:
 
 <Steps>
-1. **Old broker seals the topic**: stops accepting writes, records the last committed offset, and exports all remaining WAL data to Cloud Storage
 
-2. **New broker loads the topic**: reads the sealed state from metadata, creates a fresh WAL starting at `last_committed_offset + 1`
+1. **Seal**: the old owner stops accepting writes, records the last committed offset and exports the remaining WAL data.
 
-3. **Valkey is not involved**: because producers were stopped during sealing and all data was exported to Cloud Storage, there is no gap for Valkey to fill. Valkey's crash recovery role applies only to **unplanned** broker failures.
+2. **Load**: the new owner creates a fresh WAL starting at `last_committed_offset + 1`.
 
-4. **Consumers reconnect**: they resume from their subscription cursor. The tiered reader serves historical data from Cloud Storage, then transitions to the new broker's WAL for live data.
+3. **No Valkey needed**: producers were paused during the seal and everything was exported. Valkey only matters for unplanned failures.
+
+4. **Reconnect**: consumers resume from their cursor. History comes from the durable store, then live data from the new WAL.
+
 </Steps>
 
-For more details on topic moves, see [Reliable Topic Move](/architecture/reliable-topic-move/).
+Details: [Reliable Topic Move](/architecture/reliable-topic-move/).
 
----
+## What each setup survives
 
-## Guarantees by Configuration
+- **WAL only**: survives a restart on the same disk. Loses unexported data if the disk dies.
+- **WAL + object storage**: same, plus everything sealed is safe forever. Recommended on persistent volumes.
+- **WAL + Valkey**: survives losing the node and its disk (replayed from Valkey). If Valkey itself fails at the same time, in-flight data is lost.
+- **WAL + Valkey + object storage**: survives losing the node and its disk, with full history in object storage. Recommended on spot or diskless compute.
 
-The table below contrasts durability guarantees between persistent volume deployments and disposable ephemeral compute:
+**RPO** (recovery point objective) is how much recent data you can lose. Valkey with `on_wait_timeout: fail` takes it close to zero.
 
-| Configuration | Broker Restart (Persistent Disk / PVC) | Node Destroyed (Ephemeral Disk Vanished) | Valkey Down | Overall Guarantee |
-|---|---|---|---|---|
-| **WAL only** | **Zero message loss** (WAL survives on disk) | Unexported messages lost | N/A | Local durability |
-| **WAL + Cloud Storage** | **Zero message loss** | Unexported window lost; all sealed safe | N/A | **Recommended for PVCs** (Zero external deps) |
-| **WAL + Valkey** | **Zero message loss** | **Zero message loss** (Replayed from Valkey) | In-flight lost | RPO=0 on ephemeral nodes (no cloud) |
-| **WAL + Valkey + Cloud Storage** | **Zero message loss** | **Zero message loss** (Replayed from Valkey) | Cloud storage safe | **Full enterprise durability on spot compute** |
+## Break glass: recover a broken cluster
 
-:::note
-**RPO** = Recovery Point Objective. RPO=0 means no data loss on recovery.
-:::
+Cluster settings live in Raft. If a cluster loses quorum and you need to restart nodes with known-good settings, use a recovery file.
 
-:::tip
-If the broker simply restarts on the same node with the same volume (e.g., process crash, OOM restart), the WAL data is still on local disk and normal operation resumes without any recovery needed.
-:::
+<Steps>
 
-### What Each Tier Protects Against
+1. **Export the config while the cluster is healthy.** Do this ahead of time and keep the file somewhere safe:
 
-| Risk | WAL | Valkey | Cloud Storage |
-|------|-----|--------|---------------|
-| Broker restart (same volume) | Survives | Survives | Survives |
-| Broker lost (new instance, new volume) | **Lost** | Survives | Survives |
-| Valkey primary crash | Survives | **Lost** (unless replicated) | Survives |
-| Cloud Storage region outage | Survives | Survives | **Unavailable** |
+   ```bash
+   danube cluster export-config --broker-id 1 --output recovery.yaml
+   ```
+
+   `--broker-id` adds that node's listen and admin addresses. Use `--format json` for JSON.
+
+2. **Edit what has to change**, for example `seed_nodes` to point at the surviving members.
+
+3. **Start the node with the override:**
+
+   ```bash
+   danube up cluster --data-dir /var/lib/danube --recovery-config recovery.yaml
+   ```
+
+   The broker logs a warning that a break-glass override was applied.
+
+</Steps>
+
+A recovery file can set `seed_nodes`, `super_admins`, `auto_create_topics`, `policies`, `storage`, `load_manager`, `auth`, `broker_addr` and `admin_addr`. Fields you leave out keep their normal values. An edge node started with `--recovery-config` does not need `--cloud-endpoint`.
+
+<Aside type="danger">
+The exported file contains the cluster's auth settings, including the JWT signing secret, and any object storage credentials you passed as options. Treat it like a private key: restrict its permissions and store it in a secrets manager.
+</Aside>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Configure durability" href="/durability/configuration/" description="Turn on Valkey and object storage, and tune WAL rotation." />
+  <LinkCard title="Tiered storage" href="/durability/tiered-storage/" description="How reads are served across WAL, Valkey and object storage." />
+</CardGrid>

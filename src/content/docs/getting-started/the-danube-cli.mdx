@@ -1,0 +1,140 @@
+---
+title: The danube CLI
+description: A quick tour of the danube command tree, built-in help, connection flags, contexts, completions and dry runs.
+---
+
+import { Card, CardGrid, LinkCard, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+One binary does everything: `danube` starts nodes, sends messages, manages topics and runs the cluster. Learn its shape once and every command feels familiar.
+
+## Ask it for help
+
+```bash
+danube                 # overview of every command, plus a quick start
+danube up              # the three node modes, with examples
+danube topic --help    # any command or subcommand
+danube produce -h      # short summary instead of full help
+```
+
+Running `danube` alone only prints the overview. It never starts a server; that is always `danube up <mode>`.
+
+## The command tree
+
+<CardGrid>
+	<Card title="Server" icon="rocket">
+		- `danube up standalone|cluster|edge`: start a node
+		- `danube mcp`: MCP server for AI agents (stdio, or `--http ADDR`)
+		- `danube console`: web console backend (REST + `/mcp`)
+	</Card>
+	<Card title="Messaging" icon="random">
+		- `danube produce <TOPIC> -m MSG`: publish messages
+		- `danube consume <TOPIC> -s SUB`: stream messages
+	</Card>
+	<Card title="Resources" icon="list-format">
+		- `danube topic`: create, describe, peek, branch, subscriptions, schemas, DLQ
+		- `danube namespace`: namespaces and their policies
+		- `danube schema`: schema registry subjects
+	</Card>
+	<Card title="Cluster operations" icon="setting">
+		- `danube cluster`: membership, storage, WAL, load manager
+		- `danube broker`: list, unload, rebalance brokers
+		- `danube auth`: roles, bindings, tokens
+		- `danube apply -f FILE`: reconcile a desired-state manifest
+	</Card>
+	<Card title="Utilities" icon="seti:shell">
+		- `danube context`: saved connection profiles
+		- `danube completions <shell>`: shell completion scripts
+		- `danube version`: print the version
+	</Card>
+</CardGrid>
+
+Deep dives: [Messaging](/admin/cli-messaging/), [Resources](/admin/cli-resources/), [Cluster operations](/admin/cli-cluster/), [MCP server](/admin/mcp/).
+
+## Connect to a broker
+
+Every client command (everything except `up`, `context`, `completions` and `version`) talks to a broker at `http://127.0.0.1:6650` by default. Point it elsewhere with the shared connection flags:
+
+- **`--endpoint URL`**: broker address. `https://` turns on TLS.
+- **`--context NAME`**: use a saved profile.
+- **`--token JWT`**: bearer token for secured clusters.
+- **`--tls`**: force TLS.
+- **`--tls-ca FILE`**: CA certificate used to verify the broker.
+- **`--tls-cert FILE`**, **`--tls-key FILE`**: client certificate and key for mTLS.
+- **`--tls-domain NAME`**: server name to verify (default `localhost`).
+
+```bash
+danube topic list --namespace default --endpoint https://danube.example.com:6650 --tls-ca ./ca.pem
+```
+
+Each flag has a matching environment variable: `DANUBE_ENDPOINT`, `DANUBE_CONTEXT`, `DANUBE_TOKEN`, `DANUBE_TLS`, `DANUBE_TLS_CA`, `DANUBE_TLS_CERT`, `DANUBE_TLS_KEY`, `DANUBE_TLS_DOMAIN`.
+
+<Aside type="note" title="Resolution order">
+A flag beats an environment variable, which beats the current context, which beats the built-in default.
+</Aside>
+
+## Save connections as contexts
+
+Typing endpoints and certificates gets old fast. Save them once:
+
+```bash
+# Save two profiles and make "local" the current one
+danube context add local --endpoint http://127.0.0.1:6650 --use
+danube context add prod --endpoint https://danube.example.com:6650 --tls-ca ./ca.pem --token "$TOKEN"
+
+danube context list          # * marks the current context
+danube context use prod      # switch
+danube context show          # settings of the current context, token masked
+danube topic list --namespace default --context local   # one-off override
+```
+
+Contexts live in `~/.config/danube/contexts.toml` (or `$DANUBE_CONFIG_DIR/contexts.toml`). They are client-side only; the server never reads them. Also available: `danube context current` and `danube context delete <NAME>`.
+
+## Configure nodes with environment variables
+
+`danube up` reads a few environment variables, handy in containers: `DANUBE_DATA_DIR`, `DANUBE_LISTEN`, `DANUBE_ADVERTISED_ADDR`, `DANUBE_SEED_NODES`, `DANUBE_AUTH`, `DANUBE_JWT_SECRET`, and for edge nodes `DANUBE_EDGE_NAME`, `DANUBE_CLOUD_ENDPOINT`, `DANUBE_CLOUD_TOKEN`. See [Broker configuration](/reference/broker-configuration/) for every flag.
+
+## Preview before you change anything
+
+`--dry-run` shows what would happen and changes nothing:
+
+```bash
+danube up cluster --data-dir /var/lib/danube --single-node --dry-run   # print the resolved node config
+danube apply -f desired_state.yaml --dry-run                           # print the reconcile plan
+danube broker rebalance --dry-run                                      # preview topic moves
+```
+
+## Shell completions
+
+<Tabs>
+<TabItem label="bash">
+```bash
+danube completions bash > /etc/bash_completion.d/danube
+```
+</TabItem>
+<TabItem label="zsh">
+```bash
+danube completions zsh > "${fpath[1]}/_danube"
+```
+</TabItem>
+<TabItem label="fish">
+```bash
+danube completions fish > ~/.config/fish/completions/danube.fish
+```
+</TabItem>
+</Tabs>
+
+PowerShell and Elvish are supported too: `danube completions powershell`, `danube completions elvish`.
+
+## Check your version
+
+```bash
+danube version     # or: danube -V
+```
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Quickstart" description="Use the CLI end to end in five minutes." href="/getting-started/quickstart/" />
+	<LinkCard title="Broker modes" description="Every option of standalone, cluster and edge." href="/getting-started/broker-modes/" />
+	<LinkCard title="Configuration workflow" description="Node flags vs. live cluster settings vs. manifests." href="/getting-started/configuration-workflow/" />
+</CardGrid>

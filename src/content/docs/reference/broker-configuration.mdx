@@ -1,241 +1,296 @@
 ---
-title: Configuration, CLI Flags & Manifest Reference
-description: Complete reference for Danube's four configuration surfaces — danube up flags, live danube ctl cluster commands, DesiredStateManifest YAML/JSON, and break-glass RecoveryConfig.
+title: CLI & Configuration Reference
+description: Every danube up flag per mode, the shared client connection flags, all environment variables, and the cluster-wide settings managed live with danube cluster and danube apply.
 ---
 
-import { FileTree, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Aside, FileTree } from '@astrojs/starlight/components';
 
-Danube does not require a static per-node YAML configuration file (`danube_broker.yml`) to run. Instead, configuration is split across four clear surfaces:
+This is the lookup page: every startup flag, connection flag, environment variable and cluster setting in one place. Danube has no broker config file, so this page is the whole configuration surface.
 
-1. **Per-node startup flags (`danube up`)** — process-local addresses, directories, workload role, and bootstrap security
-2. **Live cluster configuration (`danube ctl cluster ...`)** — cluster-wide storage, WAL, write buffer, and load manager settings stored in Raft and hot-reconciled across all brokers
-3. **Declarative desired-state manifest (`danube ctl apply`)** — GitOps YAML/JSON spec for namespaces, topics, storage, write buffer, and load manager
-4. **Break-glass recovery file (`--recovery-config`)** — emergency disaster-recovery overrides (plus optional custom edge MQTT mappings), exported from live state via `danube ctl cluster export-config`
+```bash
+# See exactly what a node would run with, without starting it
+danube up cluster --data-dir /var/lib/danube --seed-nodes n1:7650,n2:7650 --dry-run
+```
 
-See [Configuration Workflow](/getting-started/configuration-workflow/) for how these surfaces interact in practice.
+## Where configuration lives
 
----
+<CardGrid>
+  <Card title="Startup flags" icon="rocket">
+    Per node, set once at `danube up`: addresses, data directory, role, membership, bootstrap security.
+  </Card>
+  <Card title="Cluster settings" icon="setting">
+    Shared by all nodes, stored in Raft, changed live with `danube cluster ...` or `danube apply`: storage, write buffer, WAL, load manager.
+  </Card>
+  <Card title="Client connection" icon="laptop">
+    Per user or script: `--endpoint`, `--token`, TLS, saved contexts. Read only by client commands.
+  </Card>
+  <Card title="Recovery file" icon="warning">
+    Break-glass only: `--recovery-config` overrides when Raft quorum is lost.
+  </Card>
+</CardGrid>
 
-## 1. Per-Node Startup Flags (`danube up`)
+See [Configuration Workflow](/getting-started/configuration-workflow/) for how they work together.
 
-Running `danube` without a subcommand defaults to `danube up`. By default, a node starts in `cluster` mode on single-port gRPC multiplexing (`127.0.0.1:6650` for both client pub/sub and admin RPCs), Raft transport port `7650`, and `./danube-data`.
+## danube up
 
-### Broker & Cluster Flags
+```bash
+danube up standalone [OPTIONS]
+danube up cluster --data-dir <DIR> [OPTIONS]
+danube up edge --data-dir <DIR> --name <NAME> --cloud-endpoint <URL> [OPTIONS]
+```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--mode <mode>` | `cluster` | Runtime mode: `cluster`, `standalone`, or `edge` |
-| `--data-dir <path>` | `./danube-data` | Base directory for Raft logs/snapshots, auto-generated `node_id`, WAL default, and auto-TLS artifacts |
-| `--wal-dir <path>` | `{data_dir}/wal` | Per-node local WAL staging directory override (e.g., dedicated NVMe mount) |
-| `--node-role <role>` | `all` | Workload role: `broker`, `lakehouse`, or `all`. See [Danube Iceberg](/lakehouse/overview/) |
-| `--broker-addr <ip:port>` | `127.0.0.1:6650` | Bind/listen address for client gRPC (and Admin gRPC when `--admin-addr` is omitted) |
-| `--admin-addr <ip:port>` | *(same as `--broker-addr`)* | Optional separate Admin gRPC listen address |
-| `--advertised-addr <host:port>` | *(derived from `--broker-addr`)* | Address advertised to cluster peers and clients (e.g., Kubernetes Pod DNS / FQDN) |
-| `--connect-url <url>` | *(same as `broker_url`)* | External proxy or ingress URL for clients; enables proxy routing when different from `broker_url` |
-| `--raft-addr <ip:port>` | `*:7650` | Overrides the Raft inter-node transport port (`7650` by default) |
-| `--seed-nodes <a,b,...>` | *(empty — single-node init)* | Comma-separated Raft peer seed addresses (`host:7650`) for multi-node discovery |
-| `--join` | `false` | Join an existing Raft cluster (mutually exclusive with `--mode standalone` and `--mode edge`) |
-| `--prom-exporter <ip:port>` | *(disabled)* | Optional Prometheus metrics HTTP listener address |
-| `--auth-mode <mode>` | `none` | Startup authentication mode: `none`, `tls`, or `auto-tls` |
-| `--tls-cert <path>` | *(none)* | Server TLS certificate PEM (required when configuring manual TLS via CLI) |
-| `--tls-key <path>` | *(none)* | Server TLS private key PEM |
-| `--ca-cert <path>` | *(none)* | CA certificate PEM used to verify peers and clients |
-| `--jwt-secret <secret>` | *(none)* | HMAC shared secret for validating JWT bearer tokens (`issuer: danube-auth`, `expiration_time: 3600`) |
-| `--super-admins <a,b,...>` | *(empty)* | Comma-separated JWT subjects granted super-admin bypass over RBAC |
-| `--recovery-config <path>` | *(none)* | Local JSON/YAML `RecoveryConfig` break-glass file (also supplies custom edge `topic_mappings`) |
+The flags below are shared by all three modes. Mode-specific flags follow.
 
-### Edge Mode Flags (`--mode edge`)
+### Node
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--cloud-endpoint <url>` | *(required unless `--recovery-config` sets `edge`)* | Upstream Danube cluster gRPC URL (`http://` or `https://`) |
-| `--edge-name <name>` | `HOSTNAME` or `edge-node` | Unique edge node identity used for `/{edge_name}/ingest` and `/edge_registry/edges/{edge_name}` |
-| `--mqtt-addr <ip:port>` | `0.0.0.0:1883` | TCP listen address for the embedded MQTT broker |
-| `--edge-token <token>` | *(none)* | Optional bearer token for authenticating to the upstream cluster |
+- **`--data-dir <DIR>`**: data directory holding the Raft log, node identity and WAL. Default `./danube-data` in standalone, required in cluster and edge. Env: `DANUBE_DATA_DIR`.
+- **`--wal-dir <DIR>`**: put the write-ahead log on another disk. Default `<data-dir>/wal`.
+- **`--role <ROLE>`**: workloads this node runs. `broker` (producers and consumers only), `lakehouse` (Iceberg conversion only) or `all`. Default `all`.
 
-:::note
-`--mode edge` cannot be combined with `--join`. Node IDs in cluster mode are auto-generated on first boot and persisted under `{data_dir}/raft/`; there is no `--node-id` flag.
-:::
+### Network
 
-### Environment Variables
+- **`--listen <ADDR>`**: client and admin gRPC listen address. Default `127.0.0.1:6650`. Env: `DANUBE_LISTEN`.
+- **`--admin-listen <ADDR>`**: serve admin gRPC on a separate address. Default: shared with `--listen`.
+- **`--metrics-listen <ADDR>`**: Prometheus exporter listen address. Disabled when unset.
+- **`--advertised-addr <HOST:PORT>`**: address clients and peers use to reach this node, for example a Kubernetes pod DNS name. Default: derived from `--listen`. Env: `DANUBE_ADVERTISED_ADDR`.
+- **`--connect-url <URL>`**: external proxy or ingress URL handed to clients.
+- **`--raft-port <PORT>`**: Raft transport port. Default `7650`.
 
-| Variable | Component | Description |
-|----------|-----------|-------------|
-| `RUST_LOG` | `danube` | Tracing log filter (default: `warn,danube_broker=info,danube_raft=info,danube_persistent_storage=info,danube_client=info`) |
-| `DANUBE_CLUSTER_SECRET` | `danube up --auth-mode auto-tls` | Shared secret used to derive/unseal the cluster CA key material stored in Raft `/cluster/security/ca` |
-| `DANUBE_LAKEHOUSE_CONFIG` | `danube up` (`--node-role all\|lakehouse`) | Path to Lakehouse YAML config activating the embedded `LakehouseRuntime` |
-| `DANUBE_ADMIN_ENDPOINT` | `danube ctl` | Target cluster gRPC endpoint (default: `http://127.0.0.1:6650`) |
-| `DANUBE_ADMIN_TOKEN` / `DANUBE_ADMIN_API_KEY` | `danube ctl` | Admin JWT bearer token |
-| `DANUBE_ADMIN_TLS`, `DANUBE_ADMIN_DOMAIN`, `DANUBE_ADMIN_CA`, `DANUBE_ADMIN_CERT`, `DANUBE_ADMIN_KEY` | `danube ctl` | Admin TLS/mTLS connection overrides |
-| `DANUBE_TLS`, `DANUBE_CA`, `DANUBE_CERT`, `DANUBE_KEY`, `DANUBE_TOKEN` | `danube ctl produce\|consume` | Data-plane CLI client TLS and JWT flags |
+<Aside type="note">
+One port, `6650`, serves client gRPC, the schema registry and admin gRPC together. Use `--admin-listen` only if you want admin traffic on its own listener.
+</Aside>
 
-### Node Data Directory Layout
+### Security
+
+- **`--auth <MODE>`**: `none` (plaintext, default), `tls` (your own certificates) or `auto-tls` (generates a cluster CA, node certificate and bootstrap admin token in the data directory). Env: `DANUBE_AUTH`.
+- **`--tls-cert <FILE>`**: server certificate (PEM). Required with `--auth tls`.
+- **`--tls-key <FILE>`**: server private key (PEM). Required with `--auth tls`.
+- **`--ca-cert <FILE>`**: CA certificate (PEM) used to verify peers and clients. Required with `--auth tls`.
+- **`--jwt-secret <SECRET>`**: HMAC secret for signing and validating JWTs. Env: `DANUBE_JWT_SECRET`.
+- **`--super-admin <SUBJECT>`**: JWT subject with super-admin rights. Repeatable or comma-separated.
+
+### Recovery and checks
+
+- **`--recovery-config <FILE>`**: local JSON or YAML override used when Raft quorum is lost. See [recovery file](#recovery-file).
+- **`--dry-run`**: print the resolved node configuration and exit without starting.
+
+### Standalone only
+
+`danube up standalone` has no extra flags. It runs one node with a local single-member Raft log: no membership, leader election or load balancing. When it creates a new node in the default `./danube-data`, it prints a warning so you notice where data is going.
+
+### Cluster only
+
+Pick at most one membership flag:
+
+- **`--single-node`**: bootstrap a brand-new one-node cluster.
+- **`--seed-nodes <HOST:PORT,...>`**: Raft addresses of the initial members. The node with the lowest id bootstraps the cluster. Env: `DANUBE_SEED_NODES`.
+- **`--join`**: start empty and wait to be added with `danube cluster node add`.
+
+With none of them, a fresh data directory bootstraps a single-node cluster and prints a warning. A data directory that already holds Raft state always resumes its existing identity and membership, whatever flags you pass.
+
+### Edge only
+
+- **`--name <NAME>`**: unique name of this edge node. Required. Env: `DANUBE_EDGE_NAME`.
+- **`--cloud-endpoint <URL>`**: cloud Danube cluster to replicate to, e.g. `https://danube.example.com:6650`. Required unless `--recovery-config` supplies it. Env: `DANUBE_CLOUD_ENDPOINT`.
+- **`--cloud-token <TOKEN>`**: token used to authenticate to the cloud cluster. Env: `DANUBE_CLOUD_TOKEN`.
+- **`--mqtt-listen <ADDR>`**: MQTT listen address. Default `0.0.0.0:1883`.
+
+See [Danube Edge](/edge/overview/) for topic mapping and replication.
+
+### Data directory
+
+Every data directory records the mode that created it in `danube-node.json`. Starting it later in a different mode is refused, so a standalone directory cannot accidentally become a cluster node.
 
 <FileTree>
 - danube-data/
-  - raft/
-    - log/ (Raft log entries, redb)
-    - snapshot/ (Raft state machine snapshots)
-  - wal/ (Default local WAL staging directory, or custom --wal-dir)
-  - cluster_ca.secret (Generated in auto-TLS mode when DANUBE_CLUSTER_SECRET is unset)
-  - bootstrap_admin.token (Initial super-admin JWT written on auto-TLS first boot)
+  - danube-node.json (mode marker)
+  - raft/ (Raft log, snapshots and node id)
+  - wal/ (local WAL, unless --wal-dir is set)
+  - tls/ (auto-tls only: ca.pem, cert.pem, key.pem, jwt.secret)
+  - bootstrap_admin.token (auto-tls only: first super-admin JWT)
+  - cluster_ca.secret (auto-tls only, when DANUBE_CLUSTER_SECRET is unset)
 </FileTree>
 
----
+## danube mcp and danube console
 
-## 2. Live Cluster Configuration (`danube ctl cluster`)
+Both run an admin server in front of a broker and share these backend flags:
 
-Cluster-wide settings are persisted in the Raft state machine under `/cluster/config/*` and applied live across all connected brokers without restarts.
+- **`--config <FILE>`**: MCP configuration file that enables log access tools. Env: `DANUBE_MCP_CONFIG`.
+- **`--prometheus-url <URL>`**: Prometheus for metrics. Default `http://localhost:9090`. Env: `DANUBE_PROMETHEUS_URL`.
+- **`--metrics-timeout-ms <MS>`**: Prometheus query timeout. Default `5000`.
+- **`--request-timeout-ms <MS>`**: admin API request timeout. Default `5000`.
 
-### Storage Backend (`danube ctl cluster storage`)
+`danube mcp` adds:
 
-Controls where sealed WAL segments are exported for durable cross-broker storage (`/cluster/config/storage`):
+- **`--http <ADDR>`**: serve streamable HTTP MCP at `/mcp` instead of stdio.
 
-```bash
-# Inspect current effective storage configuration
-danube ctl cluster storage status
+`danube console` adds:
 
-# Switch to local-only WAL mode
-danube ctl cluster storage local [--force]
+- **`--listen <ADDR>`**: HTTP listen address. Default `0.0.0.0:8080`. Env: `DANUBE_CONSOLE_LISTEN`.
+- **`--require-auth`**: require a bearer token on HTTP requests. Env: `DANUBE_HTTP_REQUIRE_AUTH`.
+- **`--http-token <TOKEN>`**: bearer token accepted on HTTP requests. Env: `DANUBE_HTTP_TOKEN`.
+- **`--cors-allow-origin <ORIGIN>`**: CORS allowed origin.
+- **`--cache-ttl-ms <MS>`**: response cache TTL. Default `3000`.
 
-# Switch to shared POSIX storage (NFS / EFS)
-danube ctl cluster storage shared-fs --root /mnt/shared-danube/storage [--force]
+Guides: [AI Admin (MCP)](/admin/mcp/) and [Web Console](/admin/admin-ui/).
 
-# Switch to cloud or local object storage (s3 | gcs | azblob | filesystem)
-danube ctl cluster storage object-store \
-  --backend s3 \
-  --root my-bucket/danube \
-  --option region=us-east-1 \
-  [--force]
-```
+## Client connection flags
 
-Supported `--option KEY=VALUE` pairs by backend:
+Every command that talks to a broker (`produce`, `consume`, `topic`, `namespace`, `schema`, `cluster`, `broker`, `auth`, `apply`, `mcp`, `console`) accepts:
 
-- **`s3`**: `region`, `endpoint`, `access_key`, `secret_key`, `session_token`, `anonymous`, `profile`, `role_arn`, `session_name`, `virtual_host_style`
-- **`gcs`**: `project`, `endpoint`, `credential_file`, `credentials_path`, `credentials_json`
-- **`azblob`**: `account_name`, `account_key`, `endpoint`
-- **`filesystem`**: no extra options required (uses `--root` directory directly)
+- **`--endpoint <URL>`**: broker endpoint. Default `http://127.0.0.1:6650`. Env: `DANUBE_ENDPOINT`.
+- **`--context <NAME>`**: saved connection profile to use. Env: `DANUBE_CONTEXT`.
+- **`--token <JWT>`**: JWT bearer token. Env: `DANUBE_TOKEN`.
+- **`--tls`**: connect with TLS. Implied by `https://` endpoints. Env: `DANUBE_TLS`.
+- **`--tls-ca <FILE>`**: CA certificate (PEM) used to verify the broker. Env: `DANUBE_TLS_CA`.
+- **`--tls-cert <FILE>`**: client certificate (PEM) for mTLS. Env: `DANUBE_TLS_CERT`.
+- **`--tls-key <FILE>`**: client private key (PEM) for mTLS. Env: `DANUBE_TLS_KEY`.
+- **`--tls-domain <NAME>`**: TLS server name to verify. Default `localhost`. Env: `DANUBE_TLS_DOMAIN`.
 
-### Valkey Write Buffer (`danube ctl cluster write-buffer`)
+Each setting resolves as **flag, then environment variable, then the current context, then the default**.
 
-Enables or tunes the Valkey warm write buffer (`/cluster/config/write_buffer`):
-
-```bash
-danube ctl cluster write-buffer status
-
-danube ctl cluster write-buffer enable \
-  --endpoints redis://valkey-0:6379,redis://valkey-1:6379 \
-  --profile ha \
-  [--wait-replicas <n>] \
-  [--wait-timeout-ms <ms>] \
-  [--on-wait-timeout fail|ack] \
-  [--max-cached-segments <n>]
-
-danube ctl cluster write-buffer disable
-```
-
-| Profile | `wait_replicas` | `wait_timeout_ms` | `on_wait_timeout` | `max_cached_closed_segments` |
-|---|---|---|---|---|
-| `ha` | `1` | `100` | `fail` | `10` |
-| `dev` | `0` | `50` | `ack` | `2` |
-
-When no `--profile` is supplied, unset fields use `WriteBufferConfig` defaults: `wait_replicas=1`, `wait_timeout_ms=100`, `on_wait_timeout=fail`, `max_cached_closed_segments=5`.
-
-### WAL Lifecycle & Local Retention (`danube ctl cluster wal`)
-
-Updates WAL buffering, flush batching, segment rotation, and local retention pruning (`/cluster/config/wal`):
+### Contexts
 
 ```bash
-danube ctl cluster wal \
-  --retention-time-minutes 2880 \
-  --retention-size-mb 20480 \
-  --check-interval-minutes 5 \
-  --rotate-max-bytes 536870912 \
-  --rotate-max-hours 24 \
-  --cache-capacity 1024 \
-  --flush-interval-ms 5000 \
-  --flush-max-batch-bytes 10485760
-
-# Clear all local retention limits
-danube ctl cluster wal --clear-retention
+danube context add prod --endpoint https://danube.example.com:6650 \
+  --tls-ca ./ca.pem --token "$TOKEN" --use
+danube context list
+danube context use prod
+danube context show
 ```
 
-### Load Manager & Rebalancing (`danube ctl cluster load-manager`)
+- Stored client-side in `$DANUBE_CONFIG_DIR/contexts.toml`, else `$XDG_CONFIG_HOME/danube/contexts.toml`, else `~/.config/danube/contexts.toml`. The broker never reads it.
+- `context add` accepts `--endpoint` (required), `--token`, `--tls`, `--tls-ca`, `--tls-cert`, `--tls-key`, `--tls-domain`, `--use` and `--force` (replace an existing profile).
+- Tokens are stored in plain text; the file is created with mode `0600`.
 
-Updates topic placement strategy and automated rebalancing (`/cluster/config/load_manager`):
+More in [The Danube CLI](/getting-started/the-danube-cli/).
 
-```bash
-danube ctl cluster load-manager \
-  --assignment-strategy balanced \
-  --load-report-interval-seconds 30 \
-  --rebalance true \
-  --profile balanced \
-  --check-interval-seconds 240 \
-  --max-moves-per-hour 10 \
-  --cooldown-seconds 60 \
-  --min-brokers 2 \
-  --min-topic-age-seconds 300 \
-  --blacklist-topics "/system/*,/critical/*" \
-  [--replace-blacklist]
-```
+## Environment variables
 
-See [Load Manager Architecture](/architecture/load-manager/) for scoring formulas and rebalancing profile defaults.
+### Node (danube up)
 
-### Per-Topic Tiering & Stream Intents (`danube ctl topics`)
+- `DANUBE_DATA_DIR`: `--data-dir`
+- `DANUBE_LISTEN`: `--listen`
+- `DANUBE_ADVERTISED_ADDR`: `--advertised-addr`
+- `DANUBE_SEED_NODES`: `--seed-nodes` (cluster)
+- `DANUBE_AUTH`: `--auth`
+- `DANUBE_JWT_SECRET`: `--jwt-secret` (also used by `danube auth token create|validate`)
+- `DANUBE_EDGE_NAME`: `--name` (edge)
+- `DANUBE_CLOUD_ENDPOINT`: `--cloud-endpoint` (edge)
+- `DANUBE_CLOUD_TOKEN`: `--cloud-token` (edge)
+- `DANUBE_CLUSTER_SECRET`: secret protecting the auto-tls cluster CA. When unset, one is generated in `<data-dir>/cluster_ca.secret`.
+- `DANUBE_LAKEHOUSE_CONFIG`: path to the lakehouse config that activates Iceberg pipelines on `lakehouse` and `all` nodes. See [Iceberg configuration](/reference/iceberg-configuration/).
 
-```bash
-# Assign a stream intent preset on topic creation (realtime | event_stream | task_queue | audit_log)
-danube ctl topics create /default/orders --intent audit_log
+### Clients
 
-# Promote or revert an individual topic's storage tiering live
-danube ctl topics storage-mode /default/events --mode cloud_tiered
-danube ctl topics storage-mode /default/events --mode local --force
-```
+- `DANUBE_ENDPOINT`, `DANUBE_CONTEXT`, `DANUBE_TOKEN`
+- `DANUBE_TLS`, `DANUBE_TLS_CA`, `DANUBE_TLS_CERT`, `DANUBE_TLS_KEY`, `DANUBE_TLS_DOMAIN`
+- `DANUBE_CONFIG_DIR`: where `contexts.toml` lives.
 
-See [Stream Intents](/concepts/stream-intents/) for intent presets.
+### Console and MCP
 
----
+- `DANUBE_CONSOLE_LISTEN`, `DANUBE_HTTP_REQUIRE_AUTH`, `DANUBE_HTTP_TOKEN` (console)
+- `DANUBE_MCP_CONFIG`, `DANUBE_PROMETHEUS_URL` (console and mcp)
 
-## 3. Declarative Desired-State Manifest (`danube ctl apply`)
+### Logging
 
-Use `danube ctl apply` to reconcile cluster configuration, namespaces, and topics from a declarative YAML or JSON manifest (`DesiredStateManifest`):
+- `RUST_LOG`: log filter for every command. Node default: `warn,danube_broker=info,danube_raft=info,danube_persistent_storage=info,danube_client=info`. Logs go to stderr.
 
-```bash
-danube ctl apply -f desired_state.yaml --dry-run
-danube ctl apply -f desired_state.yaml [--prune] [--force]
-```
+## Cluster-wide settings
 
-Passing `--prune` deletes namespaces/topics absent from the manifest while automatically skipping `/system/*` internal topics.
+These are not startup flags. They live in Raft, apply to every broker, and change live without restarts. Set them imperatively with `danube cluster ...` or declaratively with `danube apply`.
 
-### Full `DesiredStateManifest` Schema
+### Storage: danube cluster storage
+
+- **`show`**: print the effective storage configuration.
+- **`local [--force]`**: local WAL only.
+- **`shared-fs --root <ROOT> [--force]`**: shared filesystem (NFS, EFS) for durable segments.
+- **`object-store --backend <BACKEND> --root <ROOT> [--option KEY=VALUE]... [--force]`**: object storage.
+  - Backends: `s3`, `gcs`, `azblob`, `filesystem`.
+  - Root: `s3://bucket/prefix`, `gcs://bucket/prefix`, `azblob://container/prefix`, or a path for `filesystem`.
+  - S3 options: `region`, `endpoint`, `access_key`, `secret_key`, `session_token`, `anonymous`, `profile`, `role_arn`, `session_name`, `virtual_host_style`.
+  - GCS options: `project`, `endpoint`, `credential_file`, `credentials_path`, `credentials_json`.
+  - Azure options: `account_name`, `account_key`, `endpoint`.
+- **`--force`**: allow the change while cloud-tiered topics exist.
+
+### Write buffer: danube cluster write-buffer
+
+- **`enable --endpoints <URL,...>`**: enable or update the Valkey warm write buffer.
+  - `--profile <ha|dev>`: preset. `ha` = 1 replica, 100 ms, `fail`, 10 cached segments. `dev` = 0 replicas, 50 ms, `ack`, 2 cached segments.
+  - `--wait-replicas <N>`: replicas that must confirm a write.
+  - `--wait-timeout-ms <MS>`: how long to wait for them.
+  - `--on-wait-timeout <fail|ack>`: reject or accept the write on timeout.
+  - `--max-cached-segments <N>`: closed WAL segments kept in Valkey.
+- **`disable`**: turn it off.
+
+### WAL and retention: danube cluster wal
+
+Run with no flags to print the current cluster config.
+
+- `--retention-time-minutes <N>`: retention window.
+- `--retention-size-mb <N>`: retention size cap in MiB.
+- `--check-interval-minutes <N>`: how often the retention deleter runs.
+- `--rotate-max-bytes <N>`: segment rotation size.
+- `--rotate-max-hours <N>`: segment rotation age.
+- `--cache-capacity <N>`: in-memory WAL cache, in entries.
+- `--flush-interval-ms <N>`: batch flush interval.
+- `--flush-max-batch-bytes <N>`: batch flush size.
+- `--clear-retention`: remove retention limits and stop the background deleter.
+
+### Load manager: danube cluster load-manager
+
+Run with no flags to print the current settings.
+
+- `--assignment-strategy <fair|balanced|weighted_load>`: placement of new topics.
+- `--load-report-interval-seconds <N>`: how often brokers report load.
+- `--rebalance <true|false>`: automated rebalancing on or off.
+- `--profile <conservative|balanced|aggressive>`: preset for check interval, moves per hour and cooldown.
+- `--check-interval-seconds <N>`, `--max-moves-per-hour <N>`, `--cooldown-seconds <N>`: override the preset.
+- `--min-brokers <N>`: active brokers required before rebalancing.
+- `--min-topic-age-seconds <N>`: topics younger than this are never moved.
+- `--blacklist-topics <PATTERNS>`: comma-separated topic patterns never moved. Appends unless `--replace-blacklist` is given.
+- `--replace-blacklist`: replace the list (alone, it clears it).
+
+### Export: danube cluster export-config
+
+- `--format <yaml|json>`: default `yaml`.
+- `--output <FILE>`: write to a file instead of stdout.
+- `--broker-id <ID>`: include that broker's bind and admin addresses.
+
+Task-style examples for all of these are in [CLI: Cluster, Brokers & Access](/admin/cli-cluster/).
+
+## Desired-state manifest
+
+`danube apply -f <FILE> [--dry-run] [--prune] [--force]` reconciles the cluster with a YAML or JSON file (`-` reads stdin). Every section is optional.
 
 ```yaml title="desired_state.yaml"
 namespaces:
   - production
-  - analytics
 
-# Use EITHER shared_fs OR object_store (not both)
-shared_fs:
-  root: /mnt/shared-danube/storage
-  force: false
+topics:
+  - name: /production/orders     # required
+    intent: audit_log            # realtime | event_stream | task_queue | audit_log
+    partitions: 6
+    dispatch_strategy: reliable  # non_reliable | reliable
+    schema_subject: orders-value
+    storage_mode: cloud_tiered   # local | cloud_tiered
 
+# Use shared_fs OR object_store
 object_store:
   backend: s3                    # s3 | gcs | azblob | filesystem
-  root: my-bucket/danube
+  root: s3://my-bucket/danube
   options:
     region: us-east-1
   force: false
 
 write_buffer:
   enabled: true
-  endpoints:
-    - "redis://valkey-0:6379"
-    - "redis://valkey-1:6379"
-  profile: ha                    # Optional preset: ha | dev
-  wait_replicas: 1               # Optional override
-  wait_timeout_ms: 100           # Optional override
+  endpoints: ["redis://valkey-0:6379", "redis://valkey-1:6379"]
+  profile: ha                    # ha | dev
+  wait_replicas: 1
+  wait_timeout_ms: 100
   on_wait_timeout: fail          # fail | ack
-  max_cached_closed_segments: 10 # Optional override
+  max_cached_closed_segments: 10
 
 load_manager:
   assignment_strategy: balanced  # fair | balanced | weighted_load
@@ -248,159 +303,49 @@ load_manager:
     cooldown_seconds: 60
     min_brokers_for_rebalance: 2
     min_topic_age_seconds: 300
-    min_topic_age_before_move_secs: 60
-    topic_move_cooldown_secs: 120
-    blacklist_topics:
-      - "/system/*"
-
-topics:
-  - name: /production/orders
-    intent: audit_log            # Optional: realtime | event_stream | task_queue | audit_log
-    partitions: 6                # Optional partitioned topic count
-    dispatch_strategy: reliable  # Optional: non_reliable | reliable
-    schema_subject: orders-value # Optional Schema Registry subject
-    storage_mode: cloud_tiered   # Optional: local | cloud_tiered
+    blacklist_topics: ["/system/*"]
 ```
 
-### Manifest Field Reference
+- **`namespaces`**: namespaces to create. Namespaces of listed topics are created automatically.
+- **`topics`**: topics to create or update. Only `name` is required.
+- **`shared_fs`**: `root` and `force`.
+- **`object_store`**: `backend`, `root`, `options` and `force`.
+- **`write_buffer`**: same fields as `danube cluster write-buffer enable`.
+- **`load_manager`**: same fields as `danube cluster load-manager`.
 
-| Top-Level Key | Type | Description |
-|---|---|---|
-| `namespaces` | `String[]` | Namespaces to ensure exist in the cluster |
-| `topics` | `DesiredTopicSpec[]` | Desired topics (`name` required; optional `intent`, `partitions`, `dispatch_strategy`, `schema_subject`, `storage_mode`) |
-| `shared_fs` | `Object` | Shared filesystem config: `{ root, force }` (mutually exclusive with `object_store`) |
-| `object_store` | `Object` | Object store config: `{ backend, root, options, force }` |
-| `write_buffer` | `Object` | Valkey buffer spec: `{ enabled, endpoints, profile, wait_replicas, wait_timeout_ms, on_wait_timeout, max_cached_closed_segments }` |
-| `load_manager` | `Object` | Load manager config matching `LoadManagerConfig` (`assignment_strategy`, `load_report_interval_seconds`, `rebalancing.*`) |
+Apply is additive. `--prune` also deletes topics missing from the manifest (only empty, idle ones unless `--force`), and never touches `/system/*`.
 
-### Edge Mode & Custom MQTT Mappings
+## Recovery file
 
-In edge mode (`danube up --mode edge`), zero-YAML startup maps `#` -> `/{edge_name}/ingest` and stamps `mqtt.topic` and `edge.node_id` attributes on every message. When you need custom `topic_mappings`, payload validation, wildcard attribute extraction, or custom batching (`ingestion` / `replicator`), supply an `edge:` section inside `--recovery-config` (see [Danube Edge](/edge/overview/) for the complete `edge:` YAML schema and field table).
+<Aside type="caution">
+`--recovery-config` is for emergencies: lost quorum, admin lockout, a broken storage setting. On a healthy cluster always use `danube cluster ...` or `danube apply`.
+</Aside>
 
----
-
-## 4. Break-Glass Recovery File (`--recovery-config`)
-
-:::caution
-`--recovery-config` is a **local disaster-recovery and emergency override mechanism** for quorum loss, admin lockout, emergency bind/storage overrides, or custom edge MQTT routing—**not** day-to-day cluster configuration. On healthy clusters, always use `danube ctl cluster ...` or `danube ctl apply`.
-:::
-
-Export a break-glass snapshot of the live cluster configuration at any time:
+Export one while things are healthy, and use it only to start a node in trouble:
 
 ```bash
-danube ctl cluster export-config --format yaml --output recovery.yaml
-# Optional: include bind/admin addresses from a specific broker
-danube ctl cluster export-config --broker-id 1 --format yaml --output recovery.yaml
+danube cluster export-config --format yaml --output recovery.yaml
+danube up cluster --data-dir /var/lib/danube --recovery-config recovery.yaml
 ```
 
-Apply a recovery file at startup only when recovering a node or cluster:
+Every field is optional; only fields present in the file override the node:
 
-```bash
-danube up --data-dir /var/lib/danube --recovery-config ./recovery.yaml
-```
+- **`seed_nodes`**: force the Raft seed list.
+- **`super_admins`**: JWT subjects with super-admin rights, to recover from a lockout.
+- **`auto_create_topics`**: allow topic creation on first publish.
+- **`policies`**: default namespace limits (producers, subscriptions, consumers, rates, message size).
+- **`storage`**: storage mode, durable backend, local retention, WAL and write buffer.
+- **`load_manager`**: same structure as in the manifest.
+- **`auth`**: auth mode, TLS files, JWT settings and super admins.
+- **`broker_addr`**, **`admin_addr`**: bind address overrides.
+- **`edge`**: full edge configuration with custom MQTT topic mappings. Read in edge mode, never written by `export-config`.
 
-### `RecoveryConfig` Schema
+Walkthrough in [Crash Recovery](/durability/crash-recovery/).
 
-All fields in `RecoveryConfig` are optional; only present fields override the node's startup configuration:
+## Next steps
 
-```yaml title="recovery.yaml"
-seed_nodes:
-  - "broker-1:7650"
-  - "broker-2:7650"
-
-super_admins:
-  - "break-glass-admin"
-
-auto_create_topics: true
-broker_addr: "0.0.0.0:6650"
-admin_addr: "0.0.0.0:6650"
-
-policies:
-  max_producers_per_topic: 0            # 0 = unlimited
-  max_subscriptions_per_topic: 0        # 0 = unlimited
-  max_consumers_per_topic: 0            # 0 = unlimited
-  max_consumers_per_subscription: 0     # 0 = unlimited
-  max_publish_rate: 0                   # msgs/sec, 0 = unlimited
-  max_subscription_dispatch_rate: 0     # msgs/sec, 0 = unlimited
-  max_message_size: 10485760            # 10 MB default
-
-storage:
-  mode: object_store                    # local | shared_fs | object_store
-  local_wal_root: /var/lib/danube/wal
-  metadata_prefix: /danube
-  durable:
-    backend: s3                         # s3 | gcs | azblob (or { root: ... } for shared_fs)
-    root: my-bucket/danube
-    region: us-east-1
-  local_retention:
-    time_minutes: 2880
-    size_mb: 20480
-    check_interval_minutes: 5
-  wal:
-    cache_capacity: 1024
-    file_sync:
-      interval_ms: 5000
-      max_batch_bytes: 10485760
-    rotation:
-      max_bytes: 536870912
-      max_hours: 24
-  write_buffer:
-    backend: valkey
-    endpoints:
-      - "redis://valkey-0:6379"
-    wait_replicas: 1
-    wait_timeout_ms: 100
-    on_wait_timeout: fail
-    max_cached_closed_segments: 5
-
-load_manager:
-  assignment_strategy: balanced
-  load_report_interval_seconds: 30
-  rebalancing:
-    enabled: false
-    aggressiveness: balanced
-    check_interval_seconds: 300
-    max_moves_per_hour: 10
-    cooldown_seconds: 60
-    min_brokers_for_rebalance: 2
-    min_topic_age_seconds: 300
-    min_topic_age_before_move_secs: 60
-    topic_move_cooldown_secs: 120
-    blacklist_topics: []
-
-auth:
-  mode: tls                             # none | tls
-  tls:
-    cert_file: /etc/danube/certs/server.crt
-    key_file: /etc/danube/certs/server.key
-    ca_file: /etc/danube/certs/ca.crt
-  jwt:
-    secret_key: "<shared-hmac-secret>"
-    issuer: danube-auth
-    expiration_time: 3600
-  super_admins:
-    - "admin"
-
-# Optional edge override (omitted by `cluster export-config`, parsed by `--recovery-config` in edge mode)
-edge:
-  edge:
-    edge_name: edge-factory-01
-    cluster_url: https://cloud:6650
-    token: ""
-    heartbeat_interval_ms: 30000
-  replicator:
-    batch_size: 100
-    batch_timeout_ms: 1000
-  mqtt:
-    listener: "0.0.0.0:1883"
-    max_payload_size: 262144
-    max_connections: 10000
-    ingestion:
-      batch_size: 100
-      batch_timeout_ms: 500
-    topic_mappings:
-      - mqtt_pattern: "#"
-        danube_topic: "/edge-factory-01/ingest"
-```
-
-Note that `edge` has `#[serde(skip_serializing)]` on `RecoveryConfig`, so `danube ctl cluster export-config` emits only cluster/broker recovery fields and never includes `edge:`.
+<CardGrid>
+  <LinkCard title="Broker modes" href="/getting-started/broker-modes/" description="Standalone, cluster and edge, side by side." />
+  <LinkCard title="Cluster operations" href="/admin/cli-cluster/" description="Recipes for the settings on this page." />
+  <LinkCard title="Iceberg configuration" href="/reference/iceberg-configuration/" description="Lakehouse settings for DANUBE_LAKEHOUSE_CONFIG." />
+</CardGrid>

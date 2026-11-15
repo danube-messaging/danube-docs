@@ -1,367 +1,306 @@
 ---
-title: "CLI: Resources"
-description: Manage namespaces, topics, failure policies, branching/seeking/DLQ replay, Schema Registry subjects, and RBAC security with danube ctl.
+title: "CLI: Topics, Namespaces & Schemas"
+description: Task recipes for the resources inside Danube. Create topics with stream intents, fix stuck subscriptions, replay a DLQ, branch a topic, evolve schemas and apply a desired-state manifest.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard, Steps, Aside } from '@astrojs/starlight/components';
 
-Use `danube ctl` subcommands (`namespaces`, `topics`, `schemas`, `security`) to manage all messaging resources against the broker endpoint configured via `--endpoint` or `DANUBE_ADMIN_ENDPOINT` (default `http://127.0.0.1:6650`).
-
-```bash
-export DANUBE_ADMIN_ENDPOINT=http://127.0.0.1:6650
-```
-
-See [CLI: Produce & Consume](/admin/cli-messaging/) for data-plane `produce` and `consume` commands, and [CLI: Cluster & Brokers](/admin/cli-cluster/) for cluster configuration and declarative `apply`.
-
----
-
-## Namespaces (`danube ctl namespaces`)
-
-Namespaces provide multi-tenant isolation for topics and policies. Every topic path begins with `/<namespace>/<topic>` (for example, `/default/events`).
-
-### `namespaces create` / `namespaces delete`
+This page covers the things you create and fix every day: namespaces, topics, subscriptions and schemas. Each section is a task with copy-paste commands built on `danube topic`, `danube namespace`, `danube schema` and `danube apply`.
 
 ```bash
-# Create a namespace
-danube ctl namespaces create payments
-
-# Delete an empty namespace
-danube ctl namespaces delete payments
+danube topic create /default/orders --intent task_queue
+danube topic describe /default/orders
+danube topic subscription list /default/orders
 ```
 
-<Aside type="caution">
-A namespace **must be empty** before it can be deleted. Delete all topics inside the namespace first using `danube ctl topics delete`.
-</Aside>
+Topic arguments accept a full path (`/default/orders`) or a bare name plus `--namespace default`. Most read commands take `--output json`.
 
-### `namespaces topics`
+## Organise topics into namespaces
 
-List all topics belonging to a namespace:
+A namespace groups topics and carries their policies. Every cluster starts with `default`.
 
 ```bash
-danube ctl namespaces topics default
-danube ctl namespaces topics default --output json
+danube namespace create payments
+danube namespace topics payments
+danube namespace policies payments --output json
+danube namespace delete payments     # must be empty first
 ```
 
-### `namespaces policies`
+Namespace policies cap producers, subscriptions and consumers per topic, publish and dispatch rates, and message size.
 
-Inspect effective resource limits and rate policies on a namespace (`max_producers_per_topic`, `max_subscriptions_per_topic`, `max_consumers_per_topic`, `max_consumers_per_subscription`, `max_publish_rate`, `max_subscription_dispatch_rate`, `max_message_size`):
+## Create a topic for your workload
+
+Pick a stream intent and Danube chooses delivery, durability and retry behaviour for you:
 
 ```bash
-danube ctl namespaces policies default
-danube ctl namespaces policies default --output json
+danube topic create /default/telemetry --intent realtime
+danube topic create /default/events    --intent event_stream
+danube topic create /default/jobs      --intent task_queue
+danube topic create /default/audit     --intent audit_log
 ```
 
-Example JSON output:
+- **`realtime`**: in memory, no disk I/O, best effort. For telemetry and live dashboards.
+- **`event_stream`**: reliable, WAL-backed, 3 retries then a `<topic>-dlq` dead-letter topic.
+- **`task_queue`**: reliable with batched fsync, 5 retries then a `<topic>-dlq`.
+- **`audit_log`**: reliable with batched fsync, 10 retries, then blocks rather than dropping anything.
 
-```json
-{
-  "max_producers_per_topic": 0,
-  "max_subscriptions_per_topic": 0,
-  "max_consumers_per_topic": 0,
-  "max_consumers_per_subscription": 0,
-  "max_publish_rate": 0,
-  "max_subscription_dispatch_rate": 0,
-  "max_message_size": 0
-}
-```
-
----
-
-## Topics (`danube ctl topics`)
-
-### `topics list` & `topics describe`
-
-List topics by namespace or by owning broker, or inspect full topic metadata:
+Partitions and schemas stay explicit:
 
 ```bash
-# List topics in a namespace
-danube ctl topics list --namespace default
-danube ctl topics list --namespace default --output json
-
-# List topics currently owned by a specific broker
-danube ctl topics list --broker broker-1
-
-# Describe topic partitions, delivery strategy, subscriptions, producers, and consumers
-danube ctl topics describe /default/orders
-danube ctl topics describe orders --namespace default --output json
+danube topic create /default/orders --intent event_stream --partitions 6 --schema-subject orders-value
 ```
 
-### `topics create` & `topics delete`
-
-Create a topic directly using a workload [`StreamIntent` profile](/concepts/stream-intents/) (`--intent`) or explicit dispatch/partition settings:
+Prefer to choose the dispatch strategy yourself? Skip the intent:
 
 ```bash
-# Recommended: create with a StreamIntent profile
-danube ctl topics create /default/agent-tasks --intent task_queue
-danube ctl topics create /default/telemetry --intent realtime --partitions 8
-danube ctl topics create /default/audit --intent audit_log
-
-# Or specify partitions, dispatch strategy, and schema explicitly
-danube ctl topics create /default/orders \
-  --partitions 4 \
-  --dispatch-strategy reliable \
-  --schema-subject order-events
-
-# Using --namespace flag separately
-danube ctl topics create orders --namespace default --partitions 4
-
-# Delete a topic
-danube ctl topics delete /default/orders
+danube topic create /default/raw --dispatch-strategy reliable
 ```
 
-| Flag | Values | Description |
-| :--- | :--- | :--- |
-| `--namespace <NS>` | string | Namespace if omitted from `<topic>` |
-| `--partitions <N>` | integer | Partition count |
-| `--dispatch-strategy` | `non_reliable`, `reliable` | Delivery / persistence strategy |
-| `--intent` | `realtime`, `event_stream`, `task_queue`, `audit_log` | Preset [Stream Intent](/concepts/stream-intents/) workload profile |
-| `--schema-subject` | string | Bind topic to an existing Schema Registry subject |
+See [Stream Intents](/concepts/stream-intents/) for every setting each intent applies.
 
-### `topics storage-mode`
-
-Switch an existing topic between local storage and cloud-tiered storage (`local` or `cloud_tiered`):
+## Inspect a topic
 
 ```bash
-danube ctl topics storage-mode /default/orders --mode cloud_tiered
-danube ctl topics storage-mode /default/orders --mode local --force
-```
+# Topics in a namespace, or owned by one broker
+danube topic list --namespace default
+danube topic list --broker 12345678 --output json
 
-### `topics subscriptions`, `unsubscribe` & `unload`
+# Partitions, dispatch strategy, schema and subscriptions
+danube topic describe /default/orders
 
-```bash
-# List active subscriptions on a topic
-danube ctl topics subscriptions /default/orders --output json
-
-# Remove an unused subscription
-danube ctl topics unsubscribe /default/orders -s old-worker-sub
-
-# Unload a topic so the Load Manager reassigns it
-danube ctl topics unload /default/orders
-```
-
-### Subscription Failure Policies (`set-failure-policy` / `get-failure-policy`)
-
-Configure redelivery backoff, ack timeouts, dead-letter routing, and poison-message handling per subscription:
-
-```bash
-# Configure exponential backoff and Dead-Letter Queue (DLQ) routing
-danube ctl topics set-failure-policy /default/orders \
-  -s payment-workers \
-  --max-redelivery-count 5 \
-  --ack-timeout-ms 30000 \
-  --base-redelivery-delay-ms 1000 \
-  --max-redelivery-delay-ms 60000 \
-  --backoff-strategy exponential \
-  --dead-letter-topic /default/orders-dlq \
-  --poison-policy dead_letter
-
-# Inspect active failure policy
-danube ctl topics get-failure-policy /default/orders -s payment-workers --output json
-```
-
-| Flag | Values | Description |
-| :--- | :--- | :--- |
-| `-s`, `--subscription <NAME>` | string | Target subscription name |
-| `--max-redelivery-count <N>` | integer | Maximum redelivery attempts before poison-policy triggers |
-| `--ack-timeout-ms <MS>` | integer | Unacknowledged delivery timeout in milliseconds |
-| `--base-redelivery-delay-ms <MS>` | integer | Initial redelivery delay |
-| `--max-redelivery-delay-ms <MS>` | integer | Upper bound for exponential backoff delay |
-| `--backoff-strategy` | `fixed`, `exponential` | Redelivery delay progression |
-| `--dead-letter-topic <TOPIC>` | topic path | Destination DLQ topic when using `dead_letter` policy |
-| `--poison-policy` | `dead_letter` (`dead-letter`), `block`, `drop` | Action once redeliveries exceed `--max-redelivery-count` |
-
-### Zero-Copy Branching, Seeking, Peeking, Replay & Schema Inference
-
-```bash
-# Zero-copy branch a topic at head, at an offset, or at a nanosecond timestamp
-danube ctl topics branch /default/events /default/events-replay
-danube ctl topics branch /default/events /default/events-fork --at-offset 1500
-danube ctl topics branch /default/events /default/events-t0 --at-timestamp-ns 1731619200000000000
-
-# Seek an existing subscription to a specific offset or timestamp
-danube ctl topics seek /default/events --subscription analytics --to-offset 1000
-danube ctl topics seek /default/events --subscription analytics --to-timestamp-ns 1731619200000000000
-
-# Replay messages from a Dead-Letter Queue back into the source topic
-danube ctl topics replay-dlq /default/orders \
-  --subscription payment-workers \
-  --dlq-topic /default/orders-dlq \
-  --max-messages 100 \
-  --start-offset 0
-
-# Peek at retained messages without advancing any consumer cursor (requires ReadPayload)
-danube ctl topics peek /default/events --start-offset 0 --count 10
-
-# Infer a JSON Schema draft from recent JSON payloads on a topic (requires ReadPayload)
-danube ctl topics infer-schema /default/events --sample-size 100
+# Read up to 100 stored messages without moving any cursor
+danube topic peek /default/orders --start-offset 0 --count 20
 ```
 
 <Aside type="note">
-When RBAC authorization is enabled, `topics peek` and `topics infer-schema` require the `ReadPayload` permission on the target topic because they inspect raw message bytes.
+`peek` and `schema infer` read payloads, so on a secured cluster your token needs the `ReadPayload` permission.
 </Aside>
 
-### Topic Schema Association & Validation
+## Fix a stuck consumer
+
+When a subscription stops making progress, the cause is usually a poison message or a failure policy that does not fit the workload.
+
+<Steps>
+1. **Find the subscription** and look at its failure policy:
+   ```bash
+   danube topic subscription list /default/orders
+   danube topic subscription failure-policy get /default/orders --subscription billing
+   ```
+
+2. **Adjust retries and send poison messages to a DLQ** instead of blocking:
+   ```bash
+   danube topic subscription failure-policy set /default/orders --subscription billing \
+     --max-redelivery-count 5 --ack-timeout-ms 30000 \
+     --base-redelivery-delay-ms 1000 --max-redelivery-delay-ms 60000 \
+     --backoff-strategy exponential \
+     --poison-policy dead_letter --dead-letter-topic /default/orders-dlq
+   ```
+   Poison policies: `dead_letter`, `block` or `drop`.
+
+3. **Or skip past the bad range** by moving the cursor:
+   ```bash
+   danube topic subscription seek /default/orders --subscription billing --to-offset 4200
+   ```
+</Steps>
+
+To ask an AI assistant for a diagnosis instead, the MCP tool `explain_consumer_stall` does it in one call (see [AI Admin](/admin/mcp/)).
+
+## Replay a DLQ
+
+After you fix the bug that sent messages to the dead-letter topic, push them back to the source topic:
 
 ```bash
-# Associate a schema subject and validation policy with a topic
-danube ctl topics configure-schema /default/orders \
-  --subject order-events \
-  --validation-policy enforce \
-  --enable-payload-validation
+# Look at what is in the DLQ first
+danube topic peek /default/orders-dlq --count 10
 
-# Update only the validation policy (none, warn, or enforce)
-danube ctl topics set-validation-policy /default/orders \
-  --policy enforce \
-  --enable-payload-validation
+# Replay up to 500 messages into /default/orders for the billing subscription
+danube topic dlq replay /default/orders --subscription billing --max-messages 500
 
-# Inspect topic schema configuration
-danube ctl topics get-schema-config /default/orders --output json
+# Use an explicit DLQ topic and start offset
+danube topic dlq replay /default/orders --subscription billing \
+  --dlq-topic /default/orders-dlq --start-offset 100
 ```
 
----
+## Rewind a subscription
 
-## Schemas (`danube ctl schemas`)
-
-Manage centralized schemas, versions, and compatibility rules in the Danube Schema Registry.
-
-### `schemas list-subjects`
+Seeking moves an existing subscription's cursor, so its consumers re-read (or skip) messages.
 
 ```bash
-danube ctl schemas list-subjects
-danube ctl schemas list-subjects --output json
+danube topic subscription seek /default/events --subscription analytics --to-offset 0
+danube topic subscription seek /default/events --subscription analytics \
+  --to-timestamp-ns 1700000000000000000
 ```
 
-### `schemas register`
+## Branch a topic for an experiment
 
-Register a new schema or evolve an existing subject (`json_schema`, `avro`, `protobuf`, `string`, `bytes`):
+A branch is a zero-copy fork of a topic's history. Test a new consumer or replay production data without touching the original.
 
 ```bash
-# Register from file
-danube ctl schemas register order-events \
-  --schema-type json_schema \
-  --file ./order.schema.json \
-  --description "Order lifecycle event schema" \
-  --tags domain=commerce \
-  --tags team=checkout \
-  --output json
+# Branch everything up to now
+danube topic branch /default/orders /default/orders-exp
 
-# Or pass schema inline
-danube ctl schemas register metric-ping \
-  --schema-type json_schema \
-  --schema '{"type":"object","properties":{"cpu":{"type":"number"}},"required":["cpu"]}'
+# Branch up to an offset or a point in time
+danube topic branch /default/orders /default/orders-exp --at-offset 1000
+danube topic branch /default/orders /default/orders-exp --at-timestamp-ns 1700000000000000000
 ```
 
-### `schemas get` & `schemas versions`
+## Move a topic to cloud storage
+
+When cluster storage points at an object store (see [Switch storage to S3](/admin/cli-cluster/#switch-storage-to-s3)), promote topics to tiered storage one at a time:
 
 ```bash
-# List all registered versions of a subject
-danube ctl schemas versions order-events --output json
+danube topic storage-mode /default/events --mode cloud_tiered
 
-# Fetch latest schema for a subject
-danube ctl schemas get --subject order-events --output json
-
-# Fetch by global schema ID (optionally pinning a version)
-danube ctl schemas get --id 1 --version 2 --output json
+# Back to local only (needs --force)
+danube topic storage-mode /default/events --mode local --force
 ```
 
-### `schemas check`, `get-compatibility` & `set-compatibility`
+## Move a topic to another broker
+
+Unloading releases a topic from its current broker so the load manager can assign it to a different one.
 
 ```bash
-# Get or set subject compatibility mode (none, backward, forward, full)
-danube ctl schemas get-compatibility order-events
-danube ctl schemas set-compatibility order-events --mode backward
-
-# Check whether a candidate schema satisfies compatibility rules
-danube ctl schemas check order-events \
-  --file ./order-v2.schema.json \
-  --schema-type json_schema \
-  --mode full
+danube topic unload /default/orders
 ```
 
-### `schemas delete`
-
-Delete a specific schema version (requires explicit `--confirm`):
+## Delete things
 
 ```bash
-danube ctl schemas delete order-events --version 1 --confirm
+danube topic subscription delete /default/orders --subscription old-sub
+danube topic delete /default/orders
 ```
 
----
+## Register and evolve a schema
 
-## Security (`danube ctl security`)
+The schema registry stores versioned schemas under a subject. Producers and consumers reference the subject; the registry enforces compatibility.
 
-Manage RBAC roles, principal bindings, and JWT tokens. See [Security Overview](/security/overview/) and [Authentication & Authorization](/security/authorization/) for full details.
+<Steps>
+1. **Register the first version**:
+   ```bash
+   danube schema register orders-value --schema-type json_schema --file orders.json \
+     --description "Order events"
+   ```
+   Types: `json_schema`, `avro`, `protobuf`, `string`, `bytes`.
 
-### Permissions
+2. **Pick a compatibility mode**:
+   ```bash
+   danube schema set-compatibility orders-value --mode backward
+   ```
+   Modes: `none`, `backward` (new readers read old data), `forward` (old readers read new data), `full` (both).
 
-Roles are composed from these 10 granular permissions:
+3. **Check a new version before registering it**:
+   ```bash
+   danube schema check orders-value --schema-type json_schema --file orders-v2.json
+   danube schema register orders-value --schema-type json_schema --file orders-v2.json
+   ```
 
-* Data plane: `Lookup`, `Produce`, `Consume`, `Replicate`, `ReadPayload`
-* Admin plane: `ManageNamespace`, `ManageTopic`, `ManageSchema`, `ManageBroker`, `ManageCluster`
+4. **Inspect what is registered**:
+   ```bash
+   danube schema list-subjects
+   danube schema versions orders-value
+   danube schema get --subject orders-value --version 1 --output json
+   danube schema get --id 42
+   danube schema get-compatibility orders-value
+   ```
+</Steps>
 
-### Roles (`danube ctl security roles`)
+Remove a single version with `danube schema delete orders-value --version 1 --confirm`.
+
+## Enforce a schema on a topic
+
+Bind a subject to a topic and choose how strictly payloads are checked:
 
 ```bash
-# Create a role
-danube ctl security roles create topic-writer --permissions Lookup,Produce
-danube ctl security roles create schema-admin --permissions ManageSchema,ManageTopic
+danube topic schema configure /default/orders --subject orders-value \
+  --validation-policy enforce --enable-payload-validation
 
-# Inspect, list, and delete roles
-danube ctl security roles get topic-writer --output json
-danube ctl security roles list --output json
-danube ctl security roles delete topic-writer
+danube topic schema show /default/orders
+
+# Loosen it later
+danube topic schema validation-policy /default/orders --policy warn
 ```
 
-### Bindings (`danube ctl security bindings`)
+- **`none`**: no checks.
+- **`warn`**: invalid messages are accepted and logged.
+- **`enforce`**: invalid messages are rejected. Add `--enable-payload-validation` to validate the payload itself, not only the schema reference.
 
-Bind roles to `user` or `service_account` principals at `cluster`, `namespace`, or `topic` scope:
+## Infer a schema from live data
+
+Have JSON flowing but no schema yet? Let Danube draft one from recent messages:
 
 ```bash
-# Grant a service account topic-level write permissions
-danube ctl security bindings create orders-producer \
-  --principal-type service_account \
-  --principal-name checkout-svc \
-  --roles topic-writer \
-  --scope topic \
-  --resource /default/orders
-
-# List and inspect bindings at namespace or cluster scope
-danube ctl security bindings list --scope namespace --resource default --output json
-danube ctl security bindings get orders-producer --scope topic --resource /default/orders --output json
-
-# Remove a binding
-danube ctl security bindings delete orders-producer --scope topic --resource /default/orders
+danube topic schema infer /default/orders --sample-size 200
 ```
 
-### Tokens (`danube ctl security tokens`)
-
-Danube supports both **online cluster-managed tokens** (`issue` / `revoke`, persisted & checked against the broker `SecurityAdmin` RPC) and **offline signed tokens** (`create` / `validate`, using `--secret-key` or `DANUBE_JWT_SECRET_KEY`):
+The output reports how many messages were sampled and prints a Draft-07 JSON Schema. Review it, save it as `orders.json`, then register it:
 
 ```bash
-# Online: issue a JWT via the broker SecurityAdmin service (requires ManageCluster)
-danube ctl security tokens issue \
-  --subject checkout-svc \
-  --type service_account \
-  --ttl 24h
+danube schema register orders-value --schema-type json_schema --file orders.json
+```
 
-# Online: revoke a subject's tokens immediately cluster-wide (requires ManageCluster)
-danube ctl security tokens revoke --subject compromised-svc
+More on schemas in [Schema Registry](/client-libraries/schema-registry/).
 
-# Offline: sign a token locally with the shared HMAC secret key
-export DANUBE_JWT_SECRET_KEY="my-secret-key"
-danube ctl security tokens create \
-  --subject bootstrap-admin \
-  --type user \
-  --ttl 8760h \
-  --issuer danube-auth \
-  --secret-key "$DANUBE_JWT_SECRET_KEY"
+## Manage everything from a manifest
 
-# Offline: validate and decode a token
-danube ctl security tokens validate \
-  --token "<jwt>" \
-  --secret-key "$DANUBE_JWT_SECRET_KEY"
+`danube apply` reconciles the cluster with a YAML or JSON file. Keep it in git and you have reviewable, repeatable infrastructure.
+
+```yaml title="desired_state.yaml"
+namespaces:
+  - payments
+  - agents
+
+topics:
+  - name: /payments/transactions
+    intent: audit_log
+    partitions: 4
+    schema_subject: payment-txn
+  - name: /agents/tasks
+    intent: task_queue
+    partitions: 8
+  - name: /agents/events
+    dispatch_strategy: reliable
+    storage_mode: cloud_tiered
+
+object_store:
+  backend: s3
+  root: s3://danube-prod/segments
+  options:
+    region: us-east-1
+
+load_manager:
+  assignment_strategy: balanced
+  rebalancing:
+    enabled: true
+    aggressiveness: conservative
+```
+
+```bash
+# Always look at the plan first
+danube apply -f desired_state.yaml --dry-run
+
+# Create and update what differs
+danube apply -f desired_state.yaml
+
+# Also delete topics missing from the file (empty, idle ones only)
+danube apply -f desired_state.yaml --prune
+
+# Prune even busy or non-empty topics
+danube apply -f desired_state.yaml --prune --force
+
+# Read from stdin
+cat desired_state.json | danube apply -f -
 ```
 
 <Aside type="caution">
-Danube enforces **last-admin lockout protection**: the broker blocks deleting the last role or binding granting `ManageCluster` at cluster scope, or revoking the last active admin / `super_admin` subject.
+`apply` is additive by default. Topics only disappear with `--prune`, and `/system/*` topics are never pruned. Run `--dry-run` before every prune.
 </Aside>
+
+The manifest also accepts `shared_fs` and `write_buffer` sections. Every field is listed in the [manifest reference](/reference/broker-configuration/#desired-state-manifest).
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Produce & consume" href="/admin/cli-messaging/" description="Send test traffic to the topics you just created." />
+  <LinkCard title="Subscriptions" href="/concepts/subscriptions/" description="Exclusive, shared, failover and key-shared explained." />
+  <LinkCard title="Cluster operations" href="/admin/cli-cluster/" description="Storage, WAL, nodes and access control." />
+</CardGrid>

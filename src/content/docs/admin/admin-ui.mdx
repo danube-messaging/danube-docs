@@ -1,100 +1,169 @@
 ---
-title: Admin Dashboard UI
-description: Explore, monitor, and manage your Danube clusters visually in real-time.
+title: Web Console
+description: Run danube console to get dashboards for brokers, topics, schemas and RBAC, plus a remote MCP endpoint, from one HTTP server.
 ---
 
-import { Card, CardGrid, Steps } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Aside } from '@astrojs/starlight/components';
 
-The **Danube Admin UI** is a modern, responsive web dashboard designed for cluster operators and developers. It provides full visibility into cluster state, namespace topology, topic metrics, schema registry configurations, and security policies.
+`danube console` gives your cluster a visual control room. It runs the HTTP backend behind the Danube web console, so you can see broker load, topic traffic, schemas and access rules at a glance and act on them with a click.
 
----
+```bash
+danube console --endpoint http://127.0.0.1:6650
+curl http://localhost:8080/ui/v1/health
+# {"status":"ok","leader_reachable":true}
+```
 
-## How It Works
+## How it fits together
 
-The Admin UI is a single-page web application ([danube-admin-ui](https://github.com/danube-messaging/danube-admin-ui), built with React and Material UI) that runs in your browser.
+The console has two parts:
 
-It communicates over REST/HTTP (`/ui/v1/...`) with the **Danube Admin BFF Server**, built directly into the unified `danube` binary (`danube ctl serve --mode ui`). The BFF translates HTTP requests into gRPC calls against your cluster's multiplexed endpoint (default port `6650`) and optionally queries Prometheus for time-series charts.
+- **The backend** (`danube console`): an HTTP server built into the `danube` binary. It serves a REST API under `/ui/v1/...` and a streamable HTTP MCP endpoint under `/mcp`. Every request is translated into admin gRPC calls against your broker, and charts are enriched with Prometheus data when it is available.
+- **The frontend**: the [Danube Admin UI](https://github.com/danube-messaging/danube-admin-ui), a single-page web app that runs in the browser and talks to the backend over HTTP.
 
----
+Because the backend is a plain REST API, you can also script against it directly or put your own UI on top.
 
-## Guided Tour
-
-Here is a walkthrough of the main pages in the Danube Admin UI.
-
-### Cluster Dashboard
-The landing page is your operational command center. It is organized into three main areas:
-
-**Cluster Info Panels**: Three summary cards at the top give you an instant snapshot of the cluster:
-* **Load Manager Info**: Active broker count and total topic count across the cluster.
-* **Traffic & Connectivity**: Aggregate RPC totals and the number of active client connections.
-* **Raft Consensus Health**: The current election term and last applied log index, confirming that the consensus layer is healthy and converging.
-
-**Cluster Nodes**: Each broker is displayed as a card showing its Raft role, status, and live stats. Operational actions like Activate, Unload, Promote, and Remove are available directly from each card.
-
-![Cluster Dashboard — Info panels and node cards](../../../assets/danube_ui/danube_cluster_top.png)
-
-**Load Balancing & Traffic Distribution**: Shows the cluster's balance health score, per-broker load distribution, and lets you trigger a cluster rebalance with an optional dry-run preview.
-
-![Cluster Dashboard — Load balancing and traffic distribution](../../../assets/danube_ui/danube_cluster_bottom.png)
-
-### Broker Details
-Clicking on a broker card takes you to the broker detail page. Here you can see the full list of topics currently assigned to that broker, along with per-topic stats such as subscription counts and producer/consumer activity.
-
-![Broker detail page](../../../assets/danube_ui/broker_details.png)
-
-### Topics
-The Topics page lists all topics across the cluster with key metadata at a glance: delivery type,  active producer, subscriptions and consumers.
-
-Clicking on a topic opens its detail page, where you can inspect traffic metrics, active producers and consumers, subscriptions, and the schema associated with the topic.
-
-![Topic detail page](../../../assets/danube_ui/topic_details.png)
-
-### Schema Registry
-The Schema Registry page provides a browsable view of all registered schemas. You can inspect individual schema definitions, see which topics reference them, and review schema versions.
-
-![Schema Registry](../../../assets/danube_ui/schema_registry.png)
-
-### Schema Details
-Clicking on a schema opens its detail page, where you can inspect the schema definition and review schema versions.
-
-![Schema detail page](../../../assets/danube_ui/schema_details.png)
-
-### Namespaces
-The Namespaces page lists all active namespaces in the cluster. You can create new namespaces or inspect administrative properties, allowing you to segment your messaging resources by environment, team, or application.
-
-### Security & RBAC
-Manage access control policies for your messaging resources. You can configure custom roles with fine-grained permissions (e.g., `Produce`, `Consume`, `Lookup`) and bind them to users or service accounts at cluster, namespace, or topic scopes.
-
----
-
-## Running the BFF with a Docker Compose Cluster
-
-The unified `docker/docker-compose.yml` boots a 3-broker Raft cluster (`broker1`, `broker2`, `broker3`) from the single `danube` image with **zero mounted YAML config files**, exposing multiplexed data + admin gRPC on ports `6650`, `6651`, and `6652`.
+## Run the console
 
 <Steps>
-1. **Start the 3-broker cluster**:
+1. **Start a broker** (skip this if you already have one):
    ```bash
-   wget https://raw.githubusercontent.com/danube-messaging/danube/main/docker/docker-compose.yml
-   docker compose up -d
+   danube up standalone
    ```
 
-2. **Start the Admin BFF server (`danube ctl serve --mode ui`)**:
-   Point the BFF at `broker1` on the multiplexed port `6650` (and pass `--cors-allow-origin` for your frontend origin if serving the React UI separately):
+2. **Start the console backend** and point it at the broker:
    ```bash
-   danube ctl serve --mode ui \
-     --listen-addr 0.0.0.0:8080 \
-     --broker-endpoint http://127.0.0.1:6650
+   danube console --listen 0.0.0.0:8080 --endpoint http://127.0.0.1:6650
    ```
-   This serves the `/ui/v1/...` REST BFF endpoints as well as the `/mcp` Streamable HTTP endpoint on `http://localhost:8080`. See [Administration Overview](/admin/overview/) for the complete BFF route table and Bearer auth environment variables (`DANUBE_HTTP_TOKEN`, `DANUBE_ADMIN_TOKEN`).
 
-3. **Connect the Web UI**:
-   Run or deploy the [Danube Admin UI](https://github.com/danube-messaging/danube-admin-ui) frontend configured against the BFF address (`http://localhost:8080`), or test the BFF health directly:
+3. **Check that it can reach the cluster leader**:
    ```bash
    curl http://localhost:8080/ui/v1/health
    ```
 
-4. **Stop and Clean Up**:
-   ```bash
-   docker compose down -v
-   ```
+4. **Open the frontend**: run or deploy the [Danube Admin UI](https://github.com/danube-messaging/danube-admin-ui) configured with the backend address `http://localhost:8080`.
 </Steps>
+
+<Aside type="tip">
+The console uses the same connection settings as every other client command. If you saved a context with `danube context add ... --use`, plain `danube console` connects to it, TLS and token included.
+</Aside>
+
+## Console flags
+
+### Server
+
+- **`--listen <ADDR>`**: HTTP listen address. Default `0.0.0.0:8080`. Env: `DANUBE_CONSOLE_LISTEN`.
+- **`--require-auth`**: reject HTTP requests that carry no valid bearer token. Env: `DANUBE_HTTP_REQUIRE_AUTH`.
+- **`--http-token <TOKEN>`**: the bearer token the console accepts. Env: `DANUBE_HTTP_TOKEN`.
+- **`--cors-allow-origin <ORIGIN>`**: CORS allowed origin.
+- **`--cache-ttl-ms <MS>`**: how long dashboard responses are cached. Default `3000`.
+
+### Backend
+
+- **`--prometheus-url <URL>`**: Prometheus used for charts and metrics tools. Default `http://localhost:9090`. Env: `DANUBE_PROMETHEUS_URL`.
+- **`--metrics-timeout-ms <MS>`**: Prometheus query timeout. Default `5000`.
+- **`--request-timeout-ms <MS>`**: admin API request timeout. Default `5000`.
+- **`--config <FILE>`**: MCP configuration file that enables log access tools on `/mcp`. Env: `DANUBE_MCP_CONFIG`. See [AI Admin (MCP)](/admin/mcp/#add-log-access-with-a-config-file).
+
+### Connection
+
+`--endpoint`, `--context`, `--token`, `--tls`, `--tls-ca`, `--tls-cert`, `--tls-key` and `--tls-domain` work exactly as on every other client command. See [client connection flags](/reference/broker-configuration/#client-connection-flags).
+
+<Aside type="tip">
+Without `--cors-allow-origin` the console accepts browser requests from any origin. Set it (for example `--cors-allow-origin https://console.example.com`) to allow only your UI's origin.
+</Aside>
+
+## Protect the console
+
+The console can change your cluster (unload brokers, delete topics, edit RBAC), so lock it down before exposing it beyond localhost.
+
+```bash
+export DANUBE_HTTP_TOKEN="$(openssl rand -hex 32)"
+danube console --require-auth --prometheus-url http://prometheus:9090 \
+  --endpoint https://broker1:6650 --tls-ca ./ca.pem --token "$ADMIN_JWT"
+```
+
+- Requests must send `Authorization: Bearer <token>` (or an `x-api-key: <token>` header).
+- Setting `--http-token` alone already enables the check. `--require-auth` without a token rejects every request, so the console fails closed.
+- `/ui/v1/health` always stays open, so load balancers can probe it.
+- `--token` is a different thing: it is the JWT the console uses when calling the broker.
+
+## A tour of the console
+
+### Cluster dashboard
+
+The landing page shows broker count and total topics, traffic and active connections, and the Raft term and last applied index. Below that, each broker is a card with its Raft role, status and live stats, plus Activate, Unload and Remove actions.
+
+![Cluster dashboard: info panels and node cards](../../../assets/danube_ui/danube_cluster_top.png)
+
+The bottom of the page shows how evenly load is spread and lets you trigger a rebalance, with a dry-run preview first.
+
+![Cluster dashboard: load balancing and traffic distribution](../../../assets/danube_ui/danube_cluster_bottom.png)
+
+### Broker details
+
+Click a broker to see every topic it currently owns, with producers, consumers and subscriptions per topic.
+
+![Broker detail page](../../../assets/danube_ui/broker_details.png)
+
+### Topics
+
+The topics page lists every topic in the cluster with its delivery type, producers, subscriptions and consumers. Open a topic for traffic charts, subscriptions and its schema.
+
+![Topic detail page](../../../assets/danube_ui/topic_details.png)
+
+### Schema registry
+
+Browse every registered subject, open one to read its definition and walk through its versions.
+
+![Schema registry](../../../assets/danube_ui/schema_registry.png)
+
+![Schema detail page](../../../assets/danube_ui/schema_details.png)
+
+### Namespaces and security
+
+The namespaces page lists namespaces with their topics and policies. The security pages manage roles and bindings: create a role from permissions such as `Produce`, `Consume` and `Lookup`, then bind it to a user or service account at cluster, namespace or topic scope.
+
+## REST API
+
+All routes live under `/ui/v1`. Topic paths in URLs must be URL-encoded (`/default/orders` becomes `%2Fdefault%2Forders`).
+
+<CardGrid>
+  <Card title="Cluster and brokers" icon="setting">
+    - `GET /health`
+    - `GET /cluster`
+    - `POST /cluster/actions`
+    - `GET /cluster/balance`
+    - `POST /cluster/rebalance`
+    - `GET /cluster/raft`
+    - `POST /cluster/raft/actions`
+    - `GET /brokers/{broker_id}`
+  </Card>
+  <Card title="Topics and namespaces" icon="list-format">
+    - `GET /topics`
+    - `GET /topics/{topic}`
+    - `GET /topics/{topic}/series?from=&to=&step=`
+    - `POST /topics/actions`
+    - `GET /namespaces`
+  </Card>
+  <Card title="Schemas" icon="document">
+    - `GET /schemas`
+    - `GET /schemas/{subject}`
+    - `POST /schemas/actions`
+  </Card>
+  <Card title="Security" icon="approve-check">
+    - `GET /security/roles`
+    - `POST /security/roles/actions`
+    - `GET /security/bindings`
+    - `POST /security/bindings/actions`
+  </Card>
+</CardGrid>
+
+The same server also exposes MCP at `/mcp`, so remote AI agents can connect to `http://<host>:8080/mcp`.
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="AI Admin (MCP)" href="/admin/mcp/" description="Connect an AI assistant to the /mcp endpoint." />
+  <LinkCard title="Cluster operations" href="/admin/cli-cluster/" description="The CLI equivalents of every console action." />
+  <LinkCard title="Securing a cluster" href="/security/securing-a-cluster/" description="TLS, JWT and RBAC end to end." />
+</CardGrid>

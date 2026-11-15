@@ -1,108 +1,103 @@
 ---
 title: Docker Compose
-description: Run a zero-YAML 3-node Danube Raft cluster with Docker Compose or launch a standalone container.
+description: Start a three-node Danube cluster with Docker Compose, or a single standalone container, and manage it with the danube CLI inside the containers.
 ---
 
-import { Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard, Steps, Aside } from '@astrojs/starlight/components';
 
-Danube ships a consolidated Docker Compose setup in `danube/docker/` that starts a **zero-YAML 3-broker Raft cluster** using the single `/usr/local/bin/danube` binary—no mounted `danube_broker.yml` files, no ZooKeeper/ETCD, and no separate CLI or admin containers required.
+Get a real three-node Raft cluster on your laptop with one command. The Compose file in the Danube repository builds the image and starts three brokers. No config files are mounted.
+
+```bash
+cd danube/docker && docker compose up -d --build
+```
 
 ## Prerequisites
 
 - Docker Engine 20.10+
 - Docker Compose 2.0+
-- At least 2GB RAM
 
----
-
-## Start the 3-Node Cluster
+## Start the cluster
 
 <Steps>
-1. **Clone the repository and navigate to `danube/docker`**
+1. **Clone the repository.**
 
    ```bash
    git clone https://github.com/danube-messaging/danube.git
    cd danube/docker
    ```
 
-2. **Build and start the 3 brokers**
+2. **Build the image and start three brokers.**
 
    ```bash
    docker compose up -d --build
    ```
 
-3. **Verify all brokers are healthy**
+3. **Check that all three containers run.**
 
    ```bash
    docker compose ps
    ```
-
-   All three nodes (`broker1`, `broker2`, `broker3`) form an embedded Raft cluster using `--seed-nodes` and expose multiplexed Client gRPC, Schema Registry, and Admin gRPC on ports `6650`-`6652`, plus Prometheus exporters on `9040`-`9042`:
-
-   | Container | Service | gRPC Port (Client + Schema + Admin) | Prometheus Metrics |
-   |-----------|---------|-------------------------------------|--------------------|
-   | `danube-broker1` | `broker1` | `localhost:6650` | `localhost:9040/metrics` |
-   | `danube-broker2` | `broker2` | `localhost:6651` | `localhost:9041/metrics` |
-   | `danube-broker3` | `broker3` | `localhost:6652` | `localhost:9042/metrics` |
 </Steps>
 
----
+Each broker is reachable from your host:
 
-## Run Standalone with `docker run`
+- **`danube-broker1`**: gRPC on `localhost:6650`, metrics on `localhost:9040/metrics`
+- **`danube-broker2`**: gRPC on `localhost:6651`, metrics on `localhost:9041/metrics`
+- **`danube-broker3`**: gRPC on `localhost:6652`, metrics on `localhost:9042/metrics`
 
-If you only need a single container without cloning the repository, pull `ghcr.io/danube-messaging/danube:latest`:
+Each gRPC port serves clients, the schema registry and admin commands.
 
-```bash title="Standalone container"
-docker run -d --name danube \
-  -p 6650:6650 -p 9040:9040 \
-  ghcr.io/danube-messaging/danube:latest \
-  up --mode standalone --data-dir /danube-data \
-  --broker-addr 0.0.0.0:6650 --prom-exporter 0.0.0.0:9040
+## How the brokers start
+
+Every service runs the same command, changing only its advertised name:
+
+```yaml title="docker/docker-compose.yml (broker1)"
+command:
+  [
+    "up", "cluster",
+    "--data-dir", "/danube-data",
+    "--listen", "0.0.0.0:6650",
+    "--raft-port", "7650",
+    "--metrics-listen", "0.0.0.0:9040",
+    "--advertised-addr", "broker1:6650",
+    "--seed-nodes", "broker1:7650,broker2:7650,broker3:7650",
+  ]
 ```
 
----
+- **`--seed-nodes`**: the three brokers find each other and the lowest node id bootstraps the cluster.
+- **`--advertised-addr`**: the name other brokers and clients use. The Raft address is derived from it (`broker1:7650`).
+- **`/danube-data`**: a named volume per broker, so data survives `docker compose restart`.
 
-## Interact Using `danube ctl`
+## Produce and consume
 
-Because `danube` bundles the CLI, Admin, and MCP server inside the same container image, run `danube ctl` directly against `danube-broker1` via `docker exec` (or from your host pointing `--endpoint` / `DANUBE_ADMIN_ENDPOINT` at `http://127.0.0.1:6650`).
+Every container ships the `danube` binary, so you don't need a separate CLI container. Commands default to the broker inside the container.
 
-### Produce & Consume Messages
-
-```bash title="Produce messages"
-docker exec danube-broker1 danube ctl produce \
-  -s http://127.0.0.1:6650 \
-  -t /default/test \
-  -c 20 \
-  -m "Hello Danube!"
+```bash title="Terminal 1: consume"
+docker exec -it danube-broker1 danube consume /default/test -s my-sub
 ```
 
-```bash title="Consume messages"
-docker exec -it danube-broker1 danube ctl consume \
-  -s http://127.0.0.1:6650 \
-  -t /default/test \
-  --subscription my-sub
+```bash title="Terminal 2: produce"
+docker exec danube-broker1 danube produce /default/test \
+  --count 100 \
+  --message "Hello Danube!"
 ```
 
-### Intent-Driven Topics, Branching & GitOps Apply
+## Create topics and apply a manifest
 
-Provision topics with canonical workload intents (`realtime`, `event_stream`, `task_queue`, `audit_log`), create zero-copy branches for replay, and apply declarative cluster state directly over stdin:
+```bash
+# A durable task queue (5 retries, DLQ at /default/agent-tasks-dlq)
+docker exec danube-broker1 danube topic create /default/agent-tasks --intent task_queue
 
-```bash title="Create intent-driven topics & branch"
-# Create a durable task queue topic (5 retries, fsync_batch, DLQ -> /default/tasks-dlq)
-docker exec danube-broker1 danube ctl topics create /default/tasks \
-  --intent task_queue --partitions 4
-
-# Non-destructively peek at the first 5 messages
-docker exec danube-broker1 danube ctl topics peek /default/tasks --start-offset 0 --count 5
-
-# Create a zero-copy counterfactual branch at offset 10
-docker exec danube-broker1 danube ctl topics branch /default/tasks /default/tasks-replay --at-offset 10
+# Fork the topic into a new one for replay
+docker exec danube-broker1 danube topic branch /default/agent-tasks /default/agent-tasks-replay
 ```
 
-```bash title="Declarative GitOps apply over stdin"
-docker exec -i danube-broker1 danube ctl apply -f - << 'EOF'
+Pipe a manifest from your host through stdin:
+
+```bash
+docker exec -i danube-broker1 danube apply -f - <<'EOF'
 namespaces:
-  - /agents
+  - agents
 topics:
   - name: /agents/events
     intent: event_stream
@@ -112,37 +107,58 @@ topics:
 EOF
 ```
 
-### Cluster Administration
+## Inspect the cluster
 
-```bash title="Inspect cluster & Raft status"
-docker exec danube-broker1 danube ctl cluster status
-docker exec danube-broker1 danube ctl brokers list
-docker exec danube-broker1 danube ctl topics list --namespace default
+```bash
+docker exec danube-broker1 danube cluster status
+docker exec danube-broker1 danube broker list
+docker exec danube-broker1 danube topic list --namespace default
 ```
 
----
+Cluster-wide settings (storage, write buffer, WAL, load manager) are changed live with `danube cluster ...`. See [Configure Cluster & Topics](/getting-started/configuration-workflow/).
 
-## Configuration Overrides & Security
+## Run a single standalone container
 
-- **Dynamic Cluster Config**: Manage tiered storage (`cluster storage`), write buffer (`cluster write-buffer`), WAL retention (`cluster wal`), and load rebalancing (`cluster load-manager`) directly via `danube ctl cluster ...`—settings replicate automatically over Raft without editing YAML files. See [Configuration Workflow](/getting-started/configuration-workflow/).
-- **Single-Port vs. Isolated Admin Port**: Admin gRPC shares port `6650` by default. To bind Admin gRPC to a separate port for network isolation, pass `--admin-addr 0.0.0.0:50051` to `danube up` in your Compose command.
-- **Zero-Trust Security (`--auth-mode`)**: Add `--auth-mode auto-tls` (or `--auth-mode tls` with mounted certs) to `danube up` in `docker-compose.yml` to enable encrypted client/peer communication.
-- **Break-Glass Recovery (`--recovery-config`)**: Pass `--recovery-config /path/to/recovery.yaml` alongside `danube ctl cluster export-config` snapshots if you ever need node-local overrides before Raft convergence.
+Build the image once and run one node:
 
----
-
-## Troubleshooting & Reset
-
-- **Port conflicts**: Ensure host ports `6650`-`6652` and `9040`-`9042` are free.
-- **Follow logs**: `docker compose logs -f broker1`
-- **Built-in telemetry without Prometheus**: Brokers keep 1 hour of metrics (`GetMetricsSnapshot`) and 5,000 log entries (`GetBrokerLogs`) in memory, queryable directly via `danube mcp`.
-- **Prometheus metrics endpoint**: `curl http://localhost:9040/metrics`
-
-```bash title="Full reset"
-docker compose down -v
-docker compose up -d --build
+```bash
+docker build -t danube:local -f Dockerfile .
+docker run --rm -p 6650:6650 -p 9040:9040 \
+  danube:local up standalone \
+  --data-dir /danube-data \
+  --listen 0.0.0.0:6650 \
+  --metrics-listen 0.0.0.0:9040
 ```
+
+Run the `docker build` from the repository root. Released images are also published as `ghcr.io/danube-messaging/danube`.
+
+## Customize the containers
+
+Add flags to the `command` list of each service:
+
+- **TLS**: `--auth auto-tls`, or `--auth tls` with `--tls-cert`, `--tls-key` and `--ca-cert` (plus optional `--jwt-secret` and `--super-admin`).
+- **Separate admin port**: `--admin-listen 0.0.0.0:50051` to firewall admin gRPC away from `6650`.
+- **Check before you start**: append `--dry-run` to print the resolved configuration.
+- **Break-glass recovery**: mount a file exported with `danube cluster export-config` and pass `--recovery-config /path/to/recovery.yaml`.
+
+## Troubleshoot and reset
+
+```bash
+docker compose logs -f broker1          # follow one broker
+curl http://localhost:9040/metrics      # Prometheus metrics
+docker compose down -v                  # stop and delete all data
+```
+
+If a container exits right away, check that host ports `6650`-`6652` and `9040`-`9042` are free.
 
 <Aside type="caution">
-  This Docker Compose setup is intended for local development and integration testing. For production deployments, enable TLS/RBAC (`--auth-mode auto-tls` or `tls`), configure S3/GCS/Azure tiered storage via `danube ctl cluster storage object-store`, and deploy on [Kubernetes](/getting-started/kubernetes/).
+  This setup is for development and testing. For production, enable TLS, configure tiered storage with `danube cluster storage object-store` and run on [Kubernetes](/getting-started/kubernetes/).
 </Aside>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Configure Cluster & Topics" href="/getting-started/configuration-workflow/" description="Live cluster settings and declarative manifests." />
+  <LinkCard title="Kubernetes" href="/getting-started/kubernetes/" description="Run the same three-node cluster as a StatefulSet." />
+  <LinkCard title="Securing a Cluster" href="/security/securing-a-cluster/" description="Turn on TLS, tokens and RBAC." />
+</CardGrid>
