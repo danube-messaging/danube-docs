@@ -1,93 +1,173 @@
 ---
 title: Schema Registry
-description: Type-safe messaging with schema validation, evolution, and compatibility checking.
+description: Register schemas, link producers to them, evolve them safely and let the broker validate every message.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-The Schema Registry provides type safety, validation, and schema evolution for your messages. Register schemas once, reference them from producers, and let the broker enforce validation.
+The Schema Registry turns raw bytes into typed, validated messages. Register a schema once, point producers at its subject, and the broker can reject anything that does not match.
 
-## Workflow
+## The workflow
 
-1. Register a schema with the Schema Registry
-2. Link the producer to the schema subject
-3. Send validated messages (broker enforces schema matching)
-4. Consumer fetches the schema and deserializes
+<Steps>
 
----
+1. **Register** a schema under a subject, for example `user-events`.
+2. **Link** a producer to the subject. Messages carry the schema id and version.
+3. **Enforce** (optional): bind the subject to a topic with a validation policy.
+4. **Consume** and decode, using the schema id on each message if you need it.
 
-## Creating the Schema Client
+</Steps>
 
-<Tabs>
+## Quick start
+
+Save a JSON Schema as `user-events.json`:
+
+```json title="user-events.json"
+{
+  "type": "object",
+  "properties": {
+    "user_id":   { "type": "string" },
+    "event":     { "type": "string" },
+    "timestamp": { "type": "integer" }
+  },
+  "required": ["user_id", "event", "timestamp"]
+}
+```
+
+Register it and bind it to a topic with the CLI:
+
+```bash
+# Register the schema under the subject "user-events"
+danube schema register user-events --schema-type json_schema --file user-events.json
+
+# Reject messages on this topic that don't match the schema
+danube topic schema configure /default/user-events --subject user-events --validation-policy enforce --enable-payload-validation
+```
+
+Then produce typed messages:
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="Schema client"
-let client = DanubeClient::builder()
-    .service_url("http://127.0.0.1:6650")
-    .build()
-    .await?;
+```rust title="Schema-linked producer"
+#[derive(serde::Serialize)]
+struct UserEvent { user_id: String, event: String, timestamp: i64 }
 
-let schema_client = client.schema();
+let mut producer = client
+    .new_producer()
+    .with_topic("/default/user-events")
+    .with_name("event-producer")
+    .with_schema_subject("user-events") // latest version
+    .build()?;
+producer.create().await?;
+
+let event = serde_json::to_vec(&UserEvent {
+    user_id: "user-123".into(),
+    event: "login".into(),
+    timestamp: 1_700_000_000,
+})?;
+producer.send(event, None).await?;
 ```
 
 </TabItem>
 <TabItem label="Go">
 
-```go title="Schema client"
-client, _ := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
+```go title="Schema-linked producer"
+producer, _ := client.NewProducer().
+    WithTopic("/default/user-events").
+    WithName("event-producer").
+    WithSchemaSubject("user-events").
+    Build()
+producer.Create(ctx)
 
-schemaClient := client.Schema()
+event := map[string]interface{}{
+    "user_id":   "user-123",
+    "event":     "login",
+    "timestamp": 1700000000,
+}
+jsonBytes, _ := json.Marshal(event)
+producer.Send(ctx, jsonBytes, nil)
 ```
 
 </TabItem>
 <TabItem label="Java">
 
-```java title="Schema client"
-DanubeClient client = DanubeClient.builder()
-        .serviceUrl("http://127.0.0.1:6650")
+```java title="Schema-linked producer"
+Producer producer = client.newProducer()
+        .withTopic("/default/user-events")
+        .withName("event-producer")
+        .withSchemaLatest("user-events")
         .build();
+producer.create();
 
-SchemaRegistryClient schemaClient = client.newSchemaRegistry();
+String event = "{\"user_id\": \"user-123\", \"event\": \"login\", \"timestamp\": 1700000000}";
+producer.send(event.getBytes(), Map.of());
 ```
 
 </TabItem>
 <TabItem label="Python">
 
-```python title="Schema client"
-client = await DanubeClientBuilder().service_url("http://127.0.0.1:6650").build()
+```python title="Schema-linked producer"
+import json
 
-schema_client = client.schema()
+producer = (
+    client.new_producer()
+    .with_topic("/default/user-events")
+    .with_name("event-producer")
+    .with_schema_subject("user-events")  # latest version
+    .build()
+)
+await producer.create()
+
+event = json.dumps({"user_id": "user-123", "event": "login", "timestamp": 1700000000})
+await producer.send(event.encode())
 ```
 
 </TabItem>
 </Tabs>
 
----
+Check it with the CLI consumer, which decodes and validates schema-bound messages before printing:
 
-## Registering Schemas
+```bash
+danube consume /default/user-events -s schema-check
+```
 
-### JSON Schema
+## Register schemas from code
 
-<Tabs>
+Every client exposes a schema client on the same connection. Registering identical content again returns the existing id, so it is safe to run at startup.
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="Register JSON Schema"
+```rust title="Register JSON Schema and Avro"
 use danube_client::SchemaType;
 
-let json_schema = r#"{
-    "type": "object",
-    "properties": {
-        "user_id": {"type": "string"},
-        "event": {"type": "string"},
-        "timestamp": {"type": "integer"}
-    },
-    "required": ["user_id", "event", "timestamp"]
-}"#;
+let schema_client = client.schema();
 
+let json_schema = std::fs::read("user-events.json")?;
 let schema_id = schema_client
     .register_schema("user-events")
     .with_type(SchemaType::JsonSchema)
-    .with_schema_data(json_schema.as_bytes())
+    .with_schema_data(json_schema)
+    .with_description("User activity events")
+    .execute()
+    .await?;
+
+let avro_schema = r#"{
+    "type": "record",
+    "name": "UserEvent",
+    "namespace": "com.example",
+    "fields": [
+        {"name": "user_id", "type": "string"},
+        {"name": "event", "type": "string"},
+        {"name": "timestamp", "type": "long"},
+        {"name": "metadata", "type": ["null", "string"], "default": null}
+    ]
+}"#;
+let avro_id = schema_client
+    .register_schema("user-events-avro")
+    .with_type(SchemaType::Avro)
+    .with_schema_data(avro_schema.as_bytes())
     .execute()
     .await?;
 ```
@@ -95,19 +175,28 @@ let schema_id = schema_client
 </TabItem>
 <TabItem label="Go">
 
-```go title="Register JSON Schema"
+```go title="Register JSON Schema and Avro"
 jsonSchema := `{"type": "object", "properties": {"user_id": {"type": "string"}, "event": {"type": "string"}, "timestamp": {"type": "integer"}}, "required": ["user_id", "event", "timestamp"]}`
 
 schemaID, err := client.Schema().RegisterSchema("user-events").
     WithType(danube.SchemaTypeJSONSchema).
     WithSchemaData([]byte(jsonSchema)).
     Execute(ctx)
+
+avroSchema := `{"type": "record", "name": "UserEvent", "fields": [{"name": "user_id", "type": "string"}, {"name": "event", "type": "string"}, {"name": "timestamp", "type": "long"}]}`
+
+avroID, err := client.Schema().RegisterSchema("user-events-avro").
+    WithType(danube.SchemaTypeAvro).
+    WithSchemaData([]byte(avroSchema)).
+    Execute(ctx)
 ```
 
 </TabItem>
 <TabItem label="Java">
 
-```java title="Register JSON Schema"
+```java title="Register JSON Schema and Avro"
+SchemaRegistryClient schemaClient = client.newSchemaRegistry();
+
 String jsonSchema = """
         {
           "type": "object",
@@ -124,78 +213,7 @@ var registration = schemaClient.registerSchema(
                 .withSubject("user-events")
                 .withSchemaType(SchemaType.JSON_SCHEMA)
                 .withSchemaDefinition(jsonSchema.getBytes()));
-```
 
-</TabItem>
-<TabItem label="Python">
-
-```python title="Register JSON Schema"
-import json
-from danube import SchemaType
-
-json_schema = json.dumps({
-    "type": "object",
-    "properties": {
-        "user_id": {"type": "string"},
-        "event": {"type": "string"},
-        "timestamp": {"type": "integer"},
-    },
-    "required": ["user_id", "event", "timestamp"],
-})
-
-schema_id = await (
-    schema_client.register_schema("user-events")
-    .with_type(SchemaType.JSON_SCHEMA)
-    .with_schema_data(json_schema.encode())
-    .execute()
-)
-```
-
-</TabItem>
-</Tabs>
-
-### Avro Schema
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Register Avro Schema"
-let avro_schema = r#"{
-    "type": "record",
-    "name": "UserEvent",
-    "namespace": "com.example",
-    "fields": [
-        {"name": "user_id", "type": "string"},
-        {"name": "event", "type": "string"},
-        {"name": "timestamp", "type": "long"},
-        {"name": "metadata", "type": ["null", "string"], "default": null}
-    ]
-}"#;
-
-let schema_id = schema_client
-    .register_schema("user-events-avro")
-    .with_type(SchemaType::Avro)
-    .with_schema_data(avro_schema.as_bytes())
-    .execute()
-    .await?;
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go title="Register Avro Schema"
-avroSchema := `{"type": "record", "name": "UserEvent", "fields": [{"name": "user_id", "type": "string"}, {"name": "event", "type": "string"}, {"name": "timestamp", "type": "long"}]}`
-
-schemaID, err := client.Schema().RegisterSchema("user-events-avro").
-    WithType(danube.SchemaTypeAvro).
-    WithSchemaData([]byte(avroSchema)).
-    Execute(ctx)
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="Register Avro Schema"
 String avroSchema = """
         {
           "type": "record",
@@ -207,7 +225,7 @@ String avroSchema = """
           ]
         }""";
 
-var registration = schemaClient.registerSchema(
+var avroRegistration = schemaClient.registerSchema(
         schemaClient.newRegistration()
                 .withSubject("user-events-avro")
                 .withSchemaType(SchemaType.AVRO)
@@ -217,7 +235,28 @@ var registration = schemaClient.registerSchema(
 </TabItem>
 <TabItem label="Python">
 
-```python title="Register Avro Schema"
+```python title="Register JSON Schema and Avro"
+import json
+from danube import SchemaType
+
+schema_client = client.schema()
+
+json_schema = json.dumps({
+    "type": "object",
+    "properties": {
+        "user_id": {"type": "string"},
+        "event": {"type": "string"},
+        "timestamp": {"type": "integer"},
+    },
+    "required": ["user_id", "event", "timestamp"],
+})
+schema_id = await (
+    schema_client.register_schema("user-events")
+    .with_type(SchemaType.JSON_SCHEMA)
+    .with_schema_data(json_schema.encode())
+    .execute()
+)
+
 avro_schema = json.dumps({
     "type": "record",
     "name": "UserEvent",
@@ -227,8 +266,7 @@ avro_schema = json.dumps({
         {"name": "timestamp", "type": "long"},
     ],
 })
-
-schema_id = await (
+avro_id = await (
     schema_client.register_schema("user-events-avro")
     .with_type(SchemaType.AVRO)
     .with_schema_data(avro_schema.encode())
@@ -239,118 +277,195 @@ schema_id = await (
 </TabItem>
 </Tabs>
 
-Registering the same schema content multiple times returns the existing schema ID (idempotent).
+Rust registration builder:
 
----
+- **with_type(SchemaType)**: `JsonSchema`, `Avro`, `Protobuf`, `String`, `Number` or `Bytes`.
+- **with_schema_data(bytes)**: the schema definition.
+- **with_description(text)**, **with_created_by(name)**, **with_tags(vec)**: optional metadata.
+- **execute()**: registers and returns the schema id (`u64`).
 
-## Retrieving Schemas
+## Choose a schema version on the producer
 
-### Get Latest Version
+- **with_schema_subject("user-events")**: always the latest version. The usual choice.
+- **with_schema_version("user-events", 2)**: pinned to version 2, even after v3 exists. Good for legacy apps and staged rollouts.
+- **with_schema_min_version("user-events", 2)**: version 2 or newer. Requires a minimum feature set but still upgrades.
 
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="Get latest schema"
-let schema = schema_client.get_latest_schema("user-events").await?;
-
-println!("Schema ID: {}", schema.schema_id);
-println!("Version: {}", schema.version);
-println!("Type: {}", schema.schema_type);
+```rust title="Version strategies"
+.with_schema_version("user-events", 2)      // pinned
+.with_schema_min_version("user-events", 2)  // 2 or newer
 ```
 
 </TabItem>
 <TabItem label="Go">
 
-```go title="Get latest schema"
+```go title="Version strategies"
+.WithSchemaVersion("user-events", 2)     // pinned
+.WithSchemaMinVersion("user-events", 2)  // 2 or newer
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Version strategies"
+.withSchemaPinnedVersion("user-events", 2) // pinned
+// Minimum version is not supported yet in Java: use withSchemaLatest
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Version strategies"
+.with_schema_version("user-events", 2)      # pinned
+.with_schema_min_version("user-events", 2)  # 2 or newer
+```
+
+</TabItem>
+</Tabs>
+
+## Look up schemas
+
+<Tabs syncKey="client-lang">
+<TabItem label="Rust">
+
+```rust title="Fetch schemas"
+let latest = schema_client.get_latest_schema("user-events").await?;
+println!("id={} v{} type={}", latest.schema_id, latest.version, latest.schema_type);
+println!("{}", latest.schema_definition_as_string().unwrap_or_default());
+
+let versions = schema_client.list_versions("user-events").await?; // Vec<u32>
+
+// Resolve the schema a message was written with
+if let Some(id) = message.schema_id {
+    let info = schema_client.get_schema_version(id, message.schema_version).await?;
+}
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Fetch schemas"
 schema, err := client.Schema().GetLatestSchema(ctx, "user-events")
+fmt.Printf("Schema ID: %d, version %d\n", schema.SchemaID, schema.Version)
 
-fmt.Printf("Schema ID: %d\n", schema.SchemaID)
-fmt.Printf("Version: %d\n", schema.Version)
+versions, _ := client.Schema().ListSchemaVersions(ctx, "user-events")
 ```
 
 </TabItem>
 <TabItem label="Java">
 
-```java title="Get latest schema"
+```java title="Fetch schemas"
 SchemaInfo schema = schemaClient.getLatestSchema("user-events");
+System.out.println("Schema ID: " + schema.schemaId() + ", version " + schema.version());
 
-System.out.println("Schema ID: " + schema.schemaId());
-System.out.println("Version: " + schema.version());
+List<SchemaVersionInfo> versions = schemaClient.listVersions("user-events");
 ```
 
 </TabItem>
 <TabItem label="Python">
 
-```python title="Get latest schema"
+```python title="Fetch schemas"
 schema = await schema_client.get_latest_schema("user-events")
+print(f"Schema ID: {schema.schema_id}, version {schema.version}")
 
-print(f"Schema ID: {schema.schema_id}")
-print(f"Version: {schema.version}")
+versions = await schema_client.list_versions("user-events")
 ```
 
 </TabItem>
 </Tabs>
 
-### List All Versions
+From the CLI:
 
-<Tabs>
+```bash
+danube schema get --subject user-events
+danube schema versions user-events
+```
+
+## Consume and decode
+
+The payload is still bytes: decode it with the library that matches the schema type.
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="List versions"
-let versions = schema_client.list_versions("user-events").await?;
-println!("Available versions: {:?}", versions);
+```rust title="Decode JSON messages"
+#[derive(serde::Deserialize, Debug)]
+struct UserEvent { user_id: String, event: String, timestamp: i64 }
+
+let mut stream = consumer.receive().await?;
+while let Some(message) = stream.recv().await {
+    let event: UserEvent = serde_json::from_slice(&message.payload)?;
+    println!("{event:?} (schema v{:?})", message.schema_version);
+    consumer.ack(&message).await?;
+}
 ```
 
 </TabItem>
 <TabItem label="Go">
 
-```go title="List versions"
-versions, _ := client.Schema().ListSchemaVersions(ctx, "user-events")
-fmt.Printf("Available versions: %v\n", versions)
+```go title="Decode JSON messages"
+for msg := range stream {
+    var event Event
+    if err := json.Unmarshal(msg.GetPayload(), &event); err != nil {
+        log.Printf("decode failed: %v", err)
+        continue
+    }
+    fmt.Printf("Event: %+v\n", event)
+    consumer.Ack(ctx, msg)
+}
 ```
 
 </TabItem>
 <TabItem label="Java">
 
-```java title="List versions"
-List<SchemaVersionInfo> versions = schemaClient.listVersions("user-events");
-System.out.println("Available versions: " + versions.size());
+```java title="Decode JSON messages"
+// Inside onNext(StreamMessage msg):
+String json = new String(msg.payload());
+System.out.println("Event: " + json);
+consumer.ack(msg);
 ```
 
 </TabItem>
 <TabItem label="Python">
 
-```python title="List versions"
-versions = await schema_client.list_versions("user-events")
-print(f"Available versions: {versions}")
+```python title="Decode JSON messages"
+while True:
+    message = await queue.get()
+    event = json.loads(message.payload)
+    print(f"Event: {event}")
+    await consumer.ack(message)
 ```
 
 </TabItem>
 </Tabs>
 
----
+## Evolve a schema safely
 
-## Compatibility Checking
+Each subject has a compatibility mode that every new version must pass:
 
-Check if a new schema version is compatible before registering:
+- **backward** (default): the new schema can read data written with the old one. Upgrade consumers first.
+- **forward**: the old schema can read data written with the new one. Upgrade producers first.
+- **full**: both directions. For critical, long-lived data.
+- **none**: no checks. Development only.
 
-<Tabs>
+Check a candidate before you register it:
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Check compatibility"
+let new_schema = std::fs::read("user-events-v2.json")?;
+
 let result = schema_client
-    .check_compatibility(
-        "user-events",
-        new_schema.as_bytes(),
-        SchemaType::JsonSchema,
-        None,  // Use subject's default mode
-    )
+    .check_compatibility("user-events", new_schema, SchemaType::JsonSchema, None) // None = subject's mode
     .await?;
 
 if result.is_compatible {
-    println!("Safe to register!");
+    println!("safe to register");
 } else {
-    eprintln!("Incompatible: {:?}", result.errors);
+    eprintln!("incompatible: {:?}", result.errors);
 }
 ```
 
@@ -378,315 +493,66 @@ is_compatible, errors = await schema_client.check_compatibility(
     SchemaType.JSON_SCHEMA,
     None,
 )
-
-if is_compatible:
-    print("Safe to register!")
-else:
-    print(f"Incompatible: {errors}")
+print("Safe to register!" if is_compatible else f"Incompatible: {errors}")
 ```
 
 </TabItem>
 </Tabs>
 
-### Compatibility Modes
+Or from the CLI, together with changing the mode:
 
-Compatibility modes control schema evolution at the subject level. This is an **admin-only** operation:
+```bash
+# Dry-run a new version against the subject's rules
+danube schema check user-events --schema-type json_schema --file user-events-v2.json
 
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `Backward` | New schema reads old data | Consumers upgrade first (default) |
-| `Forward` | Old schema reads new data | Producers upgrade first |
-| `Full` | Both backward + forward | Critical schemas |
-| `None` | No validation | Development only |
-
-```bash title="Set compatibility mode (admin only)"
-danube ctl schemas set-compatibility user-events --mode backward
+# Change the subject's compatibility mode
+danube schema set-compatibility user-events --mode full
 ```
 
----
+Changing the mode needs the `ManageSchema` permission when auth is on. In Rust, `schema_client.set_compatibility_mode(subject, CompatibilityMode::Full)` does the same.
 
-## Producer with Schema
+## Enforce schemas on the broker
 
-The most common pattern: link a producer to a schema subject and send typed messages.
+A topic's validation policy decides what happens to messages that do not match its subject:
 
-<Tabs>
-<TabItem label="Rust">
+- **none**: no checks.
+- **warn**: the broker logs a warning and accepts the message.
+- **enforce**: the broker rejects messages with a missing, unknown or mismatched schema id.
 
-```rust title="Schema-validated producer"
-// 1. Register schema
-schema_client
-    .register_schema("user-events")
-    .with_type(SchemaType::JsonSchema)
-    .with_schema_data(schema.as_bytes())
-    .execute()
-    .await?;
+`--enable-payload-validation` goes further and checks the payload itself against the schema, not just the id.
 
-// 2. Create producer with schema reference
-let mut producer = client
-    .new_producer()
-    .with_topic("/default/user-events")
-    .with_name("event-producer")
-    .with_schema_subject("user-events")  // Uses latest version
-    .build()?;
+```bash
+# Bind a subject and set the policy
+danube topic schema configure /default/user-events --subject user-events --validation-policy enforce --enable-payload-validation
 
-producer.create().await?;
+# Change only the policy later
+danube topic schema validation-policy /default/user-events --policy warn
 
-// 3. Send typed messages
-let event = serde_json::to_vec(&UserEvent {
-    user_id: "user-123".into(),
-    event: "login".into(),
-    timestamp: 1234567890,
-})?;
-
-producer.send(event, None).await?;
+# See what a topic is bound to
+danube topic schema show /default/user-events
 ```
 
-</TabItem>
-<TabItem label="Go">
+## Infer a schema from live traffic
 
-```go title="Schema-validated producer"
-// 1. Register schema
-client.Schema().RegisterSchema("user-events").
-    WithType(danube.SchemaTypeJSONSchema).
-    WithSchemaData([]byte(jsonSchema)).
-    Execute(ctx)
+Already producing JSON without a schema? Sample recent messages and get a Draft-07 JSON Schema to start from:
 
-// 2. Create producer with schema reference
-producer, _ := client.NewProducer().
-    WithTopic("/default/user-events").
-    WithName("event-producer").
-    WithSchemaSubject("user-events").
-    Build()
-
-producer.Create(ctx)
-
-// 3. Send typed messages
-event := map[string]interface{}{
-    "user_id":   "user-123",
-    "event":     "login",
-    "timestamp": 1234567890,
-}
-jsonBytes, _ := json.Marshal(event)
-producer.Send(ctx, jsonBytes, nil)
+```bash
+danube topic schema infer /default/user-events --sample-size 100
 ```
 
-</TabItem>
-<TabItem label="Java">
+Review the result, save it to a file and register it with `danube schema register`.
 
-```java title="Schema-validated producer"
-// 1. Register schema
-schemaClient.registerSchema(
-        schemaClient.newRegistration()
-                .withSubject("user-events")
-                .withSchemaType(SchemaType.JSON_SCHEMA)
-                .withSchemaDefinition(schema.getBytes()));
+## Schema types
 
-// 2. Create producer with schema reference
-Producer producer = client.newProducer()
-        .withTopic("/default/user-events")
-        .withName("event-producer")
-        .withSchemaLatest("user-events")
-        .build();
+- **JSON Schema** (`json_schema`): JSON payloads, web APIs, general purpose.
+- **Avro** (`avro`): compact binary records, data pipelines.
+- **Protobuf** (`protobuf`): `.proto` definitions, cross-language RPC.
+- **String** and **Bytes**: simple typed payloads without a structured schema.
 
-producer.create();
+## Next steps
 
-// 3. Send typed messages
-String event = "{\"user_id\": \"user-123\", \"event\": \"login\", \"timestamp\": 1234567890}";
-producer.send(event.getBytes(), Map.of());
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Schema-validated producer"
-# 1. Register schema
-await (
-    schema_client.register_schema("user-events")
-    .with_type(SchemaType.JSON_SCHEMA)
-    .with_schema_data(json_schema.encode())
-    .execute()
-)
-
-# 2. Create producer with schema reference
-producer = (
-    client.new_producer()
-    .with_topic("/default/user-events")
-    .with_name("event-producer")
-    .with_schema_subject("user-events")  # Uses latest version
-    .build()
-)
-
-await producer.create()
-
-# 3. Send typed messages
-event = json.dumps({"user_id": "user-123", "event": "login", "timestamp": 1234567890})
-await producer.send(event.encode())
-```
-
-</TabItem>
-</Tabs>
-
-### Version Selection Strategies
-
-The examples above use `with_schema_subject`, which always resolves to the **latest** version. You can also pin to a specific version or set a minimum:
-
-| Strategy | Method | Behavior |
-|----------|--------|----------|
-| **Latest** (default) | `with_schema_subject("subj")` | Always uses the newest registered version |
-| **Pinned** | `with_schema_version("subj", 2)` | Locked to version 2, even if v3+ exists |
-| **Minimum** | `with_schema_min_version("subj", 2)` | Uses v2 or any newer compatible version |
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Version strategies"
-// Pinned to version 2
-.with_schema_version("user-events", 2)
-
-// Minimum version 2 (uses latest >= 2)
-.with_schema_min_version("user-events", 2)
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go title="Version strategies"
-// Pinned to version 2
-.WithSchemaVersion("user-events", 2)
-
-// Minimum version 2 (uses latest >= 2)
-.WithSchemaMinVersion("user-events", 2)
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="Version strategies"
-// Pinned to version 2
-.withSchemaPinnedVersion("user-events", 2)
-
-// Minimum version — not yet supported, use withSchemaLatest
-.withSchemaLatest("user-events")
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Version strategies"
-# Pinned to version 2
-.with_schema_version("user-events", 2)
-
-# Minimum version 2 (uses latest >= 2)
-.with_schema_min_version("user-events", 2)
-```
-
-</TabItem>
-</Tabs>
-
-**When to use each:**
-
-- **Latest**: most common, automatic upgrades when new versions are registered
-- **Pinned**: legacy apps that haven't upgraded, testing specific versions, gradual rollouts
-- **Minimum**: require a minimum feature set but allow automatic upgrades to compatible versions
-
----
-
-## Consumer with Schema
-
-Consume messages and deserialize using the schema:
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Schema-validated consumer"
-let mut stream = consumer.receive().await?;
-while let Some(message) = stream.recv().await {
-    let event: UserEvent = serde_json::from_slice(&message.payload)?;
-    println!("Event: {:?}", event);
-    consumer.ack(&message).await?;
-}
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go title="Schema-validated consumer"
-for msg := range stream {
-    var event Event
-    if err := json.Unmarshal(msg.GetPayload(), &event); err != nil {
-        log.Printf("decode failed: %v", err)
-        continue
-    }
-    fmt.Printf("Event: %+v\n", event)
-    consumer.Ack(ctx, msg)
-}
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="Schema-validated consumer"
-// Inside onNext(StreamMessage msg):
-String json = new String(msg.payload());
-System.out.println("Event: " + json);
-consumer.ack(msg);
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Schema-validated consumer"
-while True:
-    message = await queue.get()
-    event = json.loads(message.payload)
-    print(f"Event: {event}")
-    await consumer.ack(message)
-```
-
-</TabItem>
-</Tabs>
-
----
-
-## Broker Validation Policies
-
-The broker validates schema fields based on the topic's validation policy:
-
-| Policy | Behavior |
-|--------|----------|
-| **None** | No validation; schema fields optional |
-| **Warn** | Logs warning if `schema_id` missing or invalid; allows message |
-| **Enforce** | Rejects message if `schema_id` missing, invalid, or doesn't match |
-
-Set or update topic schema governance via `danube ctl`:
-
-```bash title="Bind schema subject and update validation policy"
-# Attach a registered schema subject to a topic with initial validation policy
-danube ctl topics configure-schema /default/user-events \
-  --subject user-events \
-  --validation-policy enforce \
-  --enable-payload-validation
-
-# Update validation policy on an existing schema-bound topic
-danube ctl topics set-validation-policy /default/user-events \
-  --policy enforce \
-  --enable-payload-validation
-```
-
-### Inferring a Schema from Live Traffic
-
-If producers have already published JSON payloads without registering a schema first, use `danube ctl topics infer-schema` to sample recent messages and synthesize a JSON Schema draft:
-
-```bash title="Infer a JSON Schema from sampled topic messages"
-danube ctl topics infer-schema /default/user-events --sample-size 100
-```
-
----
-
-## Supported Schema Types
-
-| Type | Format | Use Case |
-|------|--------|----------|
-| **JSON Schema** | JSON | Web APIs, general-purpose |
-| **Avro** | JSON (Avro IDL) | Big data, compact binary serialization |
-| **Protobuf** | `.proto` definitions | High-performance RPC, cross-language |
+<CardGrid>
+  <LinkCard title="Schema Registry architecture" href="/architecture/schema-registry/" description="How subjects, versions and ids are stored." />
+  <LinkCard title="Producer guide" href="/client-libraries/producer/" description="All producer options in one place." />
+  <LinkCard title="Resource commands" href="/admin/cli-resources/" description="Every danube topic and schema command." />
+</CardGrid>

@@ -1,31 +1,176 @@
 ---
 title: Client Libraries
-description: Official Danube client libraries for Rust, Go, Java, and Python.
+description: Official Danube clients for Rust, Go, Java and Python, with one builder API across all four.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Danube provides official client libraries for four languages. All clients follow the same builder pattern and support the full feature set.
+Danube ships official clients for Rust, Go, Java and Python. They share one builder-style API, so code you write in one language reads almost the same in the others.
 
-## Supported Languages
+## Your first round trip
 
-<Tabs>
+Start a broker (`danube up standalone`), then run this producer and consumer against `127.0.0.1:6650`:
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-Async client built on Tokio.
+```rust title="main.rs"
+use danube_client::{DanubeClient, SubType};
 
-```bash title="Install"
-cargo add danube-client
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = DanubeClient::builder()
+        .service_url("http://127.0.0.1:6650")
+        .build()
+        .await?;
+
+    // Creating the producer also creates the topic
+    let mut producer = client
+        .new_producer()
+        .with_topic("/default/hello")
+        .with_name("hello-producer")
+        .build()?;
+    producer.create().await?;
+
+    // Subscribe before sending so the consumer sees the message
+    let mut consumer = client
+        .new_consumer()
+        .with_topic("/default/hello")
+        .with_consumer_name("hello-consumer")
+        .with_subscription("hello-sub")
+        .with_subscription_type(SubType::Exclusive)
+        .build()?;
+    consumer.subscribe().await?;
+    let mut stream = consumer.receive().await?;
+
+    producer.send(b"Hello Danube!".to_vec(), None).await?;
+
+    if let Some(msg) = stream.recv().await {
+        println!("got: {}", String::from_utf8_lossy(&msg.payload));
+        consumer.ack(&msg).await?;
+    }
+    Ok(())
+}
 ```
-
-[Crate](https://crates.io/crates/danube-client) · [Examples](https://github.com/danube-messaging/danube/tree/main/danube-client/examples)
 
 </TabItem>
 <TabItem label="Go">
 
-Context-based client with gRPC transport.
+```go title="main.go"
+client, _ := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
+ctx := context.Background()
 
-```bash title="Install"
+producer, _ := client.NewProducer().
+    WithTopic("/default/hello").
+    WithName("hello-producer").
+    Build()
+producer.Create(ctx)
+
+consumer, _ := client.NewConsumer().
+    WithTopic("/default/hello").
+    WithConsumerName("hello-consumer").
+    WithSubscription("hello-sub").
+    WithSubscriptionType(danube.Exclusive).
+    Build()
+consumer.Subscribe(ctx)
+stream, _ := consumer.Receive(ctx)
+
+producer.Send(ctx, []byte("Hello Danube!"), nil)
+
+msg := <-stream
+fmt.Printf("got: %s\n", string(msg.GetPayload()))
+consumer.Ack(ctx, msg)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Hello.java"
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("http://127.0.0.1:6650")
+        .build();
+
+Producer producer = client.newProducer()
+        .withTopic("/default/hello")
+        .withName("hello-producer")
+        .build();
+producer.create();
+
+Consumer consumer = client.newConsumer()
+        .withTopic("/default/hello")
+        .withConsumerName("hello-consumer")
+        .withSubscription("hello-sub")
+        .withSubscriptionType(SubType.EXCLUSIVE)
+        .build();
+consumer.subscribe();
+
+producer.send("Hello Danube!".getBytes(), Map.of());
+
+// Messages arrive on consumer.receive(), a Flow.Publisher.
+// See the Consumer guide for the subscriber loop.
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="hello.py"
+import asyncio
+from danube import DanubeClientBuilder, SubType
+
+async def main():
+    client = await DanubeClientBuilder().service_url("http://127.0.0.1:6650").build()
+
+    producer = (
+        client.new_producer()
+        .with_topic("/default/hello")
+        .with_name("hello-producer")
+        .build()
+    )
+    await producer.create()
+
+    consumer = (
+        client.new_consumer()
+        .with_topic("/default/hello")
+        .with_consumer_name("hello-consumer")
+        .with_subscription("hello-sub")
+        .with_subscription_type(SubType.EXCLUSIVE)
+        .build()
+    )
+    await consumer.subscribe()
+    queue = await consumer.receive()
+
+    await producer.send(b"Hello Danube!")
+
+    msg = await queue.get()
+    print(f"got: {msg.payload.decode()}")
+    await consumer.ack(msg)
+
+asyncio.run(main())
+```
+
+</TabItem>
+</Tabs>
+
+## Install a client
+
+<Tabs syncKey="client-lang">
+<TabItem label="Rust">
+
+Async client built on Tokio.
+
+```bash
+cargo add danube-client
+cargo add tokio --features full
+```
+
+[crates.io](https://crates.io/crates/danube-client) · [docs.rs](https://docs.rs/danube-client) · [Examples](https://github.com/danube-messaging/danube/tree/main/danube-client/examples)
+
+</TabItem>
+<TabItem label="Go">
+
+Context-based client over gRPC.
+
+```bash
 go get github.com/danube-messaging/danube-go
 ```
 
@@ -34,7 +179,7 @@ go get github.com/danube-messaging/danube-go
 </TabItem>
 <TabItem label="Java">
 
-Java 21+ with virtual threads and reactive `Flow.Publisher` API.
+Java 21+, virtual threads and a reactive `Flow.Publisher` API.
 
 ```groovy title="Gradle"
 implementation 'com.danube-messaging:danube-client:0.4.0'
@@ -55,7 +200,7 @@ implementation 'com.danube-messaging:danube-client:0.4.0'
 
 Async client built on `asyncio` and `grpc.aio`.
 
-```bash title="Install"
+```bash
 pip install danube-client
 ```
 
@@ -64,142 +209,32 @@ pip install danube-client
 </TabItem>
 </Tabs>
 
----
+## What every client supports
 
-## Feature Matrix
+<CardGrid>
+  <Card title="Producers and consumers" icon="rocket">
+    Partitioned topics, reliable dispatch, routing keys and attributes.
+  </Card>
+  <Card title="All subscription types" icon="random">
+    Exclusive, Shared, Failover and Key-Shared, with `ack` and `nack`.
+  </Card>
+  <Card title="Schema Registry" icon="document">
+    JSON Schema, Avro and Protobuf, with version pinning.
+  </Card>
+  <Card title="Security" icon="approve-check">
+    TLS, mTLS, JWT tokens and runtime token rotation.
+  </Card>
+</CardGrid>
 
-| Feature | Rust | Go | Java | Python |
-|---------|:----:|:--:|:----:|:------:|
-| Producers & Consumers | ✅ | ✅ | ✅ | ✅ |
-| Partitioned Topics | ✅ | ✅ | ✅ | ✅ |
-| Reliable Dispatch | ✅ | ✅ | ✅ | ✅ |
-| Exclusive Subscription | ✅ | ✅ | ✅ | ✅ |
-| Shared Subscription | ✅ | ✅ | ✅ | ✅ |
-| Failover Subscription | ✅ | ✅ | ✅ | ✅ |
-| Key-Shared Subscription | ✅ | ✅ | ✅ | ✅ |
-| Negative Acknowledgment (`nack`) | ✅ | ✅ | ✅ | ✅ |
-| Request / Reply (`request_reply`) | ✅ | — | — | — |
-| Lease Extension (`extend_lease`) | ✅ | — | — | — |
-| Progress Checkpoints (`report_progress`) | ✅ | — | — | — |
-| Task-Tree Cancellation (`cancel_task_tree`) | ✅ | — | — | — |
-| JSON Schema | ✅ | ✅ | ✅ | ✅ |
-| Avro | ✅ | ✅ | ✅ | ✅ |
-| Protobuf | ✅ | ✅ | ✅ | ✅ |
-| TLS / mTLS | ✅ | ✅ | ✅ | ✅ |
-| JWT Authentication | ✅ | ✅ | ✅ | ✅ |
+<Aside type="note" title="Rust-only agent primitives">
+The Rust client (`danube-client`) adds four primitives for long-running and AI agent workloads: `request_reply`, `extend_lease`, `report_progress` and `cancel_task_tree`. See [Danube for AI Agents](/ai-agents/overview/) for patterns.
+</Aside>
 
-:::note
-Agent runtime primitives (`request_reply`, `extend_lease`, `report_progress`, `cancel_task_tree`) are currently implemented in the Rust client (`danube-client`). See [Danube for AI Agents](/ai-agents/overview/) for examples and attribute conventions.
-:::
+## Next steps
 
----
-
-## API Pattern
-
-All four clients use the same builder pattern. The API surface is intentionally consistent across languages:
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Pattern overview"
-// Client
-let client = DanubeClient::builder()
-    .service_url("http://127.0.0.1:6650")
-    .build()
-    .await?;
-
-// Producer
-let mut producer = client.new_producer()
-    .with_topic("/default/my-topic")
-    .with_name("my-producer")
-    .build()?;
-
-// Consumer
-let mut consumer = client.new_consumer()
-    .with_topic("/default/my-topic")
-    .with_consumer_name("my-consumer")
-    .with_subscription("my-sub")
-    .with_subscription_type(SubType::Exclusive)
-    .build()?;
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go title="Pattern overview"
-// Client
-client, _ := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
-
-// Producer
-producer, _ := client.NewProducer().
-    WithTopic("/default/my-topic").
-    WithName("my-producer").
-    Build()
-
-// Consumer
-consumer, _ := client.NewConsumer().
-    WithTopic("/default/my-topic").
-    WithConsumerName("my-consumer").
-    WithSubscription("my-sub").
-    WithSubscriptionType(danube.Exclusive).
-    Build()
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="Pattern overview"
-// Client
-DanubeClient client = DanubeClient.builder()
-        .serviceUrl("http://127.0.0.1:6650")
-        .build();
-
-// Producer
-Producer producer = client.newProducer()
-        .withTopic("/default/my-topic")
-        .withName("my-producer")
-        .build();
-
-// Consumer
-Consumer consumer = client.newConsumer()
-        .withTopic("/default/my-topic")
-        .withConsumerName("my-consumer")
-        .withSubscription("my-sub")
-        .withSubscriptionType(SubType.EXCLUSIVE)
-        .build();
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Pattern overview"
-# Client
-client = await DanubeClientBuilder().service_url("http://127.0.0.1:6650").build()
-
-# Producer
-producer = client.new_producer() \
-    .with_topic("/default/my-topic") \
-    .with_name("my-producer") \
-    .build()
-
-# Consumer
-consumer = client.new_consumer() \
-    .with_topic("/default/my-topic") \
-    .with_consumer_name("my-consumer") \
-    .with_subscription("my-sub") \
-    .with_subscription_type(SubType.EXCLUSIVE) \
-    .build()
-```
-
-</TabItem>
-</Tabs>
-
----
-
-## Next Steps
-
-- **[Setup & Connection](/client-libraries/setup/)**: TLS, mTLS, `--auth-mode auto-tls`, JWT authentication, token rotation
-- **[Producer Guide](/client-libraries/producer/)**: Sending messages, partition auto-discovery, `ProducerOptions`, `request_reply`
-- **[Consumer Guide](/client-libraries/consumer/)**: Receiving messages, `ack`/`nack`, lease/checkpoint primitives, subscription types
-- **[Danube for AI Agents](/ai-agents/overview/)**: End-to-end agent runtime patterns (`request_reply`, `extend_lease`, `report_progress`, `cancel_task_tree`)
-- **[Schema Registry](/client-libraries/schema-registry/)**: Type-safe messaging with validation and schema inference
+<CardGrid>
+  <LinkCard title="Setup and connection" href="/client-libraries/setup/" description="TLS, mTLS, auto-TLS, JWT tokens and token rotation." />
+  <LinkCard title="Producer guide" href="/client-libraries/producer/" description="Send messages, partitions, reliable dispatch, retries." />
+  <LinkCard title="Consumer guide" href="/client-libraries/consumer/" description="Receive, ack, nack, partitions and agent leases." />
+  <LinkCard title="Schema Registry" href="/client-libraries/schema-registry/" description="Typed messages with validation and evolution." />
+</CardGrid>

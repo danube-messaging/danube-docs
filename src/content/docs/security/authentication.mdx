@@ -1,118 +1,141 @@
 ---
 title: Authentication (JWT)
-description: Authenticate clients, administrators, and inter-broker connections with HS256 JWT tokens and instant revocation.
+description: Identify every client with an HS256 JWT. Create tokens offline, issue them from the cluster, and revoke a subject instantly.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-When `--auth-mode` is set to `tls` or `auto-tls`, every client and administrative gRPC request must carry a valid **HS256 JSON Web Token (JWT)** in the `authorization: Bearer <token>` metadata header.
+With `--auth tls` or `--auth auto-tls`, every client and admin call must carry a JWT in the `authorization: Bearer <token>` header. This page shows how to get tokens to your apps and how to cut one off in seconds.
 
----
-
-## Principals & Token Claims
-
-Danube decodes every JWT into a `SecurityContext` backed by one of four principal types:
-
-| Principal Type | `principal_type` Claim | How Authenticated | Typical Usage |
-| :--- | :--- | :--- | :--- |
-| `User` | `"user"` | JWT Bearer token | Human operators, `bootstrap-admin` |
-| `ServiceAccount` | `"service_account"` | JWT Bearer token | Microservices, connectors, CI pipelines, MCP agents |
-| `BrokerInternal` | — | mTLS + `x-danube-internal-broker` header | Inter-broker Raft and Replicator calls |
-| `Anonymous` | — | Only when `--auth-mode none` | Unauthenticated local development |
-
-Standard JWT claims validated by Danube (`danube-core`):
-
-* `sub` & `principal_name` — Identity name evaluated by RBAC and `super_admins`
-* `principal_type` — `"user"` or `"service_account"`
-* `iss` — Token issuer (`"danube-cluster"` when generated via `auto-tls`, `"danube-auth"` by default for offline `tokens create`)
-* `exp` — Expiration timestamp (UNIX seconds)
-
-### Caching & Immediate Revocation
-
-To keep hot-path data-plane RPCs (`send_message`, `ack`, `nack`) fast, the broker caches validated tokens for **30 seconds** (`JwtValidationCache`) without recomputing HMAC-SHA256 on every call. However, **revoked subjects are checked on every request**, including cache hits — revoking a subject takes effect immediately without waiting for cache expiry or token `exp`.
-
----
-
-## Broker JWT Configuration
-
-<Aside type="note">
-Under **`--auth-mode auto-tls`**, you do not need to configure a JWT secret manually: the broker generates a 32-byte random base64 secret at `{data_dir}/tls/jwt.secret` (synced across Raft), writes a 1-year `bootstrap-admin` token to `{data_dir}/bootstrap_admin.token`, and enrolls `bootstrap-admin` in `super_admins`.
-</Aside>
-
-Under **`--auth-mode tls`**, pass the shared secret and initial `super_admins` directly to `danube up`:
+## Get a token in one command
 
 ```bash
-danube up --mode standalone \
+# Ask the cluster for a 24h token for a service account (needs ManageCluster)
+danube auth token issue --subject checkout-svc --ttl 24h
+```
+
+The command prints only the token, so you can capture it:
+
+```bash
+CHECKOUT_TOKEN="$(danube auth token issue --subject checkout-svc --ttl 168h)"
+danube produce /payments/orders -r -m '{"id":1}' --token "$CHECKOUT_TOKEN" --endpoint https://broker1:6650 --tls-ca ./ca.pem --tls-domain broker1
+```
+
+## Who can call Danube
+
+Each token maps to a principal. RBAC and the super-admin list match on its type and name.
+
+<CardGrid>
+  <Card title="user" icon="information">
+    A human operator. The auto-generated `bootstrap-admin` is a user.
+  </Card>
+  <Card title="service_account" icon="setting">
+    An app, connector, CI job or AI agent. The default type for new tokens.
+  </Card>
+</CardGrid>
+
+Two more principals exist but never come from your tokens: brokers calling each other over mutual TLS, and the anonymous caller when `--auth none`.
+
+### Token claims
+
+- **`sub`** and **`principal_name`**: the identity RBAC checks. Danube sets both to `--subject`.
+- **`principal_type`**: `user` or `service_account`.
+- **`iss`**: issuer. `danube-auth` by default, `danube-cluster` for `auto-tls` tokens. Informational only.
+- **`exp`**: expiry time. Expired tokens are rejected.
+
+The broker checks the HMAC signature and the expiry. It caches a validated token for 30 seconds to keep hot paths fast, but the revocation list is checked on every call, cache or not.
+
+## Set the signing secret
+
+<Tabs>
+<TabItem label="auto-tls">
+
+Nothing to do. Danube generates `<data-dir>/tls/jwt.secret`, shares it across the cluster through Raft, and writes a 1-year `bootstrap-admin` token to `<data-dir>/bootstrap_admin.token`.
+
+</TabItem>
+<TabItem label="tls">
+
+Pass the secret and your first super-admin on every node:
+
+```bash
+danube up standalone \
   --data-dir ./danube-data \
-  --auth-mode tls \
+  --auth tls \
   --tls-cert /etc/danube/tls/server-cert.pem \
   --tls-key /etc/danube/tls/server-key.pem \
   --ca-cert /etc/danube/tls/ca-cert.pem \
-  --jwt-secret "your-strong-hmac-secret" \
-  --super-admins "platform-admin,break-glass-admin"
+  --jwt-secret "$DANUBE_JWT_SECRET" \
+  --super-admin platform-admin
 ```
 
----
+`--jwt-secret` also reads `DANUBE_JWT_SECRET`. Every node in a cluster must use the same secret.
 
-## Managing Tokens (`danube ctl security tokens`)
+</TabItem>
+</Tabs>
 
-Danube provides both **online cluster-managed** token issuance/revocation (`issue` and `revoke`) and **offline local** token signing/verification (`create` and `validate`).
+## Manage tokens
 
-### Online: Issue & Revoke Tokens via Cluster gRPC
+`danube auth token` has two online commands that go through the cluster and two offline commands that only need the secret.
 
-Calling `issue` or `revoke` invokes the broker's `SecurityAdmin` RPC and requires `ManageCluster` permission (or a `super_admin` token).
+### Online: issue and revoke
 
-```bash title="Issue a token online using the broker's active JWT config"
-# Issue a 24h service-account token (default type: service_account, default ttl: 24h)
-danube ctl security tokens issue \
-  --subject checkout-producer \
-  --type service_account \
-  --ttl 720h
-
-# Issue a user token
-danube ctl security tokens issue \
-  --subject alice \
-  --type user \
-  --ttl 8h
-```
-
-```bash title="Revoke a compromised or decommissioned subject cluster-wide"
-danube ctl security tokens revoke --subject checkout-producer
-```
-
-When revoked, the subject is persisted to Raft metadata at `/auth/revoked/{subject}`, broadcast to all brokers, and rejected with `Unauthenticated ("Token subject has been revoked")` on both new and cached requests.
-
-<Aside type="caution">
-Danube blocks revoking the **last active admin** (`super_admin` or principal with `ManageCluster` at cluster scope) to prevent accidental cluster lockout.
-</Aside>
-
-### Offline: Sign & Validate Tokens Locally
-
-Before the first node starts — or inside air-gapped CI tooling — you can mint and inspect tokens using the shared HMAC secret (`--secret-key` or `DANUBE_JWT_SECRET_KEY`):
+Both need `ManageCluster` or a super-admin token.
 
 ```bash
-export DANUBE_JWT_SECRET_KEY="your-strong-hmac-secret"
+# Service account token (type defaults to service_account, ttl to 24h)
+danube auth token issue --subject checkout-svc --ttl 720h
 
-# Create a 1-year bootstrap token
-danube ctl security tokens create \
-  --subject platform-admin \
-  --type user \
-  --ttl 8760h \
-  --issuer danube-auth \
-  --secret-key "$DANUBE_JWT_SECRET_KEY"
+# User token
+danube auth token issue --subject alice --type user --ttl 8h
 
-# Validate and inspect decoded claims
-danube ctl security tokens validate \
-  --token "<jwt-string>" \
-  --secret-key "$DANUBE_JWT_SECRET_KEY"
+# Revoke every token for a subject, cluster-wide
+danube auth token revoke --subject checkout-svc
 ```
 
-Supported `--ttl` durations accept suffixes such as `s` (seconds), `m` (minutes), `h` (hours), `d` (days), and `w` (weeks), or plain seconds.
+Revoking writes the subject to Raft at `/auth/revoked/{subject}`. Every broker then rejects that subject with `Unauthenticated: Token subject has been revoked`, including tokens it had already cached. Revocation covers the subject, not one token, so tokens issued later for the same subject are rejected too: use a new subject name for the replacement.
 
----
+<Aside type="caution">
+Danube refuses to revoke the last active admin (an unrevoked super-admin or a principal with `ManageCluster` at cluster scope), so you cannot lock yourself out.
+</Aside>
 
-## Using Tokens in CLI & Clients
+### Offline: create and validate
 
-* **Admin CLI (`danube ctl`)**: Set `export DANUBE_ADMIN_TOKEN="<jwt>"`
-* **Messaging CLI (`produce` / `consume`)**: Pass `--token "<jwt>"` or set `export DANUBE_TOKEN="<jwt>"`
-* **SDK Clients (Rust, Go, Java, Python)**: See [Setup & Connection — Authentication](/client-libraries/setup/) for builder methods and token rotation hooks.
+No broker needed. Useful before the first node starts or in air-gapped CI.
+
+```bash
+export DANUBE_JWT_SECRET="your-strong-hmac-secret"
+
+# Create a 1-year token for your first admin
+danube auth token create --subject platform-admin --type user --ttl 8760h
+
+# Check a token and print its claims
+danube auth token validate "$TOKEN" --jwt-secret "$DANUBE_JWT_SECRET"
+```
+
+- **`--subject`**: principal name. Required.
+- **`--jwt-secret`**: must match the broker's secret. Also read from `DANUBE_JWT_SECRET`.
+- **`--type`**: `service_account` (default) or `user`.
+- **`--ttl`**: a number with `h` or `d`, for example `8h` or `30d`. A bare number means seconds. Defaults: `8760h` for `create`, `24h` for `issue`.
+- **`--issuer`**: `create` only, default `danube-auth`.
+
+## Use a token from the CLI
+
+```bash
+# Per command
+danube topic list --namespace default --token "$TOKEN" --endpoint https://broker1:6650 --tls-ca ./ca.pem --tls-domain broker1
+
+# From the environment
+export DANUBE_TOKEN="$TOKEN"
+
+# Saved in a context (stored with 0600 permissions)
+danube context add prod --endpoint https://broker1:6650 --tls-ca ./ca.pem --tls-domain broker1 --token "$TOKEN" --use
+```
+
+The CLI picks a flag first, then the environment, then the current context. `--tls-domain` must match a name in the broker certificate; it defaults to `localhost`.
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Authorization" href="/security/authorization/" description="Decide what each principal may do." />
+  <LinkCard title="Securing a cluster" href="/security/securing-a-cluster/" description="Put TLS, tokens and RBAC together." />
+</CardGrid>

@@ -1,171 +1,161 @@
 ---
 title: Messages & Schemas
-description: Message structure, fields, and schema integration for type-safe messaging.
+description: What a Danube message contains, how to add attributes and keys, and how schemas keep producers and consumers in agreement.
 ---
 
-Messages are the fundamental unit of data in Danube. Each message contains a binary payload plus metadata for routing, tracking, acknowledgment, and schema validation.
+import { Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
 
----
+A message is a payload of bytes plus a small envelope: where it came from, where it sits in the topic, and any labels you add. Add a schema and Danube can check every message against a shared contract before it reaches a consumer.
 
-## Message Structure
+## The idea in plain words
 
-Every message delivered to a consumer is a `StreamMessage` with the following fields:
+Think of a parcel. The payload is what is inside the box. The envelope carries the sender, a tracking number, and optional stickers (attributes). A schema is the packing list that says what the box must contain.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `request_id` | `u64` | Unique identifier for tracking the message request across the system |
-| `msg_id` | `MessageID` | Composite identifier containing routing and location information |
-| `payload` | `Bytes` (`bytes::Bytes`) | The actual message content in binary format (`Vec<u8>` input on `producer.send()`) |
-| `publish_time` | `u64` | Unix timestamp (milliseconds) when the message was published |
-| `producer_name` | `String` | Name of the producer that sent this message |
-| `subscription_name` | `Option<String>` | Name of the subscription (set by broker for consumer delivery) |
-| `attributes` | `HashMap<String, String>` | User-defined key-value pairs for custom metadata |
-| `schema_id` | `Option<u64>` | Schema Registry ID for message validation |
-| `schema_version` | `Option<u32>` | Version of the schema used to serialize this message |
-| `routing_key` | `Option<String>` | Routing key for [Key-Shared](/concepts/subscriptions/#key-shared) dispatch |
-
----
-
-## Message ID
-
-The `MessageID` is a composite identifier that enables efficient routing and acknowledgment:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `producer_id` | `u64` | Unique identifier for the producer within this topic |
-| `topic_name` | `String` | Full topic name (e.g., `/default/events`) |
-| `broker_addr` | `String` | Address of the broker that delivered this message |
-| `topic_offset` | `u64` | Monotonic position of the message within the topic |
-
-The message ID serves multiple purposes:
-
-- **Routing**: broker address enables consumers to send acknowledgments to the correct broker
-- **Ordering**: topic offset provides strict ordering guarantees within a topic
-- **Deduplication**: combination of `producer_id` + `topic_offset` creates a unique message identifier
-- **Tracking**: request ID links messages across distributed tracing systems
-
----
-
-## Attributes
-
-Messages can carry user-defined key-value attributes for routing hints, custom headers, or tracing context:
-
-```rust title="Sending a message with attributes"
-use std::collections::HashMap;
-
-let mut attributes = HashMap::new();
-attributes.insert("source".to_string(), "app-1".to_string());
-attributes.insert("priority".to_string(), "high".to_string());
-
-let message_id = producer
-    .send(b"Important message".to_vec(), Some(attributes))
-    .await?;
+```text
+┌──────────────── message ─────────────────┐
+│ msg_id      /default/orders @ offset 42  │  tracking number
+│ producer    orders-api                   │  sender
+│ attributes  source=web, priority=high    │  stickers
+│ routing_key customer-42                  │  delivery hint
+│ schema      orders-value v3              │  packing list
+│ payload     {"id":1,"item":"book"}       │  contents
+└──────────────────────────────────────────┘
 ```
 
-### Standard System Attributes (`x-danube-*` & DLQ Headers)
+## Send a message with attributes and a key
 
-Danube reserves `x-danube-*` and `x-*` metadata keys in `attributes` (`HashMap<String, String>`) for correlation, agent task trees, checkpoints, and dead-letter diagnostics:
+```bash
+# Terminal 1: start a consumer first, printing JSON lines to see the envelope
+danube consume /default/orders -s inspect --limit 1 -o jsonl
 
-| Attribute Key | Constant / Origin | Purpose |
-|---------------|-------------------|---------|
-| `x-danube-correlation-id` | `ATTR_CORRELATION_ID` | Correlates replies with requests in `request_reply` flows |
-| `x-danube-reply-to` | `ATTR_REPLY_TO` | Target reply topic attached on request messages |
-| `x-danube-parent-msg-id` | `ATTR_PARENT_MSG_ID` | Immediate parent message ID for hierarchical subtasks |
-| `x-danube-root-msg-id` | `ATTR_ROOT_MSG_ID` | Root task identifier used by `cancel_task_tree` propagation |
-| `x-danube-deadline-ms` | `ATTR_DEADLINE_MS` | Absolute Unix timestamp deadline (milliseconds) for work execution |
-| `x-danube-compute-cost-units` | `ATTR_COMPUTE_COST_UNITS` | Optional compute/token cost accounting metadata |
-| `x-danube-checkpoint-b64` | `ATTR_CHECKPOINT_B64` | Base64-encoded progress checkpoint saved via `report_progress` |
-| `x-original-topic`, `x-original-subscription`, `x-original-topic-offset`, `x-original-producer-id`, `x-original-broker-addr` | DLQ poison handler | Source coordinates stamped when a message moves to `<topic>-dlq` |
-| `x-poison-policy`, `x-delivery-attempt`, `x-failure-reason` | DLQ poison handler | Applied poison policy, total delivery attempts, and last failure reason |
-| `x-danube-replayed-from-dlq`, `x-danube-replayed-subscription` | `danube ctl topics replay-dlq` | Added when replaying messages from a DLQ back to the source topic (strips the 8 `x-original-*` / `x-poison-policy` / `x-delivery-attempt` / `x-failure-reason` keys) |
-
----
-
-## Inspecting Messages & Inferring Schemas
-
-Inspect stored payloads non-destructively or generate a JSON Schema directly from live topic traffic using `danube ctl`:
-
-```bash title="Peek payloads and infer JSON Schema"
-# Read up to 10 messages from offset 0 without moving any subscription cursor
-danube ctl topics peek /default/events --start-offset 0 --count 10
-
-# Sample JSON payloads and synthesize a Draft-07 schema
-danube ctl topics infer-schema /default/events --sample-size 100
+# Terminal 2: send one message with attributes and a key
+danube produce /default/orders \
+  -m '{"id":1,"item":"book"}' \
+  --attr source:web,priority:high \
+  --key customer-42
 ```
 
----
+```rust title="Rust client"
+let mut attrs = HashMap::new();
+attrs.insert("source".to_string(), "web".to_string());
 
-## Schema Integration
-
-Danube integrates with the Schema Registry to provide type-safe messaging with validation.
-
-### How It Works
-
-Two fields in every message enable schema validation without sending the full schema definition on each message:
-
-- **`schema_id`**: globally unique ID assigned by the Schema Registry when a schema is registered. Consumers use this to fetch the schema definition (8-byte overhead vs. sending the full schema per message)
-- **`schema_version`**: version number within the schema subject. Starts at 1 and auto-increments with each schema update
-
-### Validation Flow
-
-**Producer side:**
-
-1. Register or look up a schema subject with the Schema Registry
-2. Receive `schema_id` and `schema_version`
-3. Serialize the message payload according to the schema
-4. Set `schema_id` and `schema_version` on the message
-5. Send to the broker
-
-**Broker validation:**
-
-The broker validates schema fields based on the topic's validation policy:
-
-| Policy | Behavior |
-|--------|----------|
-| **None** | No validation; schema fields optional |
-| **Warn** | Logs warning if `schema_id` missing or invalid; allows message |
-| **Enforce** | Rejects message if `schema_id` missing, invalid, or doesn't match topic requirements |
-
-**Consumer side:**
-
-1. Receive the message with `schema_id` and `schema_version`
-2. Fetch the schema definition from the Schema Registry (cached locally)
-3. Deserialize and validate the payload against the schema
-
-### Benefits
-
-- **Type safety**: messages are validated against a contract, preventing data corruption
-- **Bandwidth efficiency**: only 8-12 bytes overhead per message instead of the full schema definition
-- **Schema evolution**: consumers handle multiple schema versions using the `schema_version` field
-- **Debugging**: knowing which schema version produced a message simplifies troubleshooting
-- **Governance**: centralized schema management with compatibility checking and audit trails
-
----
-
-## Subject vs. Topic Policies
-
-Schema governance in Danube operates at two independent levels. Understanding the distinction is essential for configuring validation correctly.
-
-**Subject level** controls how schemas can *evolve*. Compatibility mode is set per subject by an administrator and applies to all topics that share that subject. When a new schema version is registered, the registry checks it against the existing versions using the subject's compatibility mode (`backward`, `forward`, `full`, or `none`).
-
-**Topic level** controls how strictly the broker *enforces* validation on incoming messages. Each topic has its own validation policy (`none`, `warn`, or `enforce`) and can enable or disable payload validation independently. This means two topics can reference the same schema subject but apply different levels of strictness.
-
-| Setting | Level | Set By | Shared Across Topics? |
-|---------|-------|--------|-----------------------|
-| Compatibility mode | Subject | Administrator | Yes (inherited by all topics using the subject) |
-| Validation policy | Topic | Administrator | No (independent per topic) |
-| Payload validation | Topic | Administrator | No (independent per topic) |
-| Schema subject | Topic | First producer or administrator | No (one per topic) |
-| Schema version | Producer | Developer | No (each producer chooses) |
-
-A typical multi-environment setup uses the same subject with different topic-level policies:
-
-```text title="Same subject, different strictness"
-Subject: "order-events" (compatibility: backward)
-  ├── /dev/order-events       → validation: none
-  ├── /staging/order-events   → validation: warn, payload validation on
-  └── /production/order-events → validation: enforce, payload validation on
+producer.send(payload, Some(attrs.clone())).await?;                  // no key
+producer.send_with_key(payload2, Some(attrs), "customer-42").await?; // with key
 ```
 
-For configuring these settings, see the [Admin CLI: Resources](/admin/cli-resources/#schema-configuration-admin-only) and [CLI: Messaging & Topics](/admin/cli-messaging/) references. For the internal storage model, see [Schema Registry Architecture](/architecture/schema-registry/).
+## What a message contains
 
+Every delivered message (`StreamMessage`) has these fields:
+
+- **`payload`**: the content, as raw bytes.
+- **`msg_id`**: where the message lives (see below).
+- **`publish_time`**: when the producer sent it, in Unix milliseconds.
+- **`producer_name`**: the producer that sent it.
+- **`attributes`**: your key-value labels (string to string).
+- **`routing_key`**: optional key used by [Key-Shared](/concepts/subscriptions/#key-shared) subscriptions and partition routing. If missing, the producer name is used.
+- **`schema_id`** and **`schema_version`**: which schema the payload follows, if any.
+- **`subscription_name`**: set by the broker on delivery, so acks go to the right subscription.
+- **`request_id`**: an id for tracking the publish request.
+
+### Message ID
+
+The `msg_id` works like a tracking number:
+
+- **`topic_name`**: the topic (or partition) it was written to.
+- **`topic_offset`**: its position in that topic. Offsets only grow, which gives you order.
+- **`producer_id`**: the producer within that topic.
+- **`broker_addr`**: the broker that delivered it, so acks go back to the right place.
+
+## Reserved attributes
+
+Danube uses attribute keys starting with `x-` for its own features. Avoid these names for your own data.
+
+- **Request and reply**: `x-danube-correlation-id`, `x-danube-reply-to`.
+- **Task trees**: `x-danube-parent-msg-id`, `x-danube-root-msg-id` (used by `cancel_task_tree`).
+- **Work hints**: `x-danube-deadline-ms` (absolute Unix ms), `x-danube-compute-cost-units`.
+- **Checkpoints**: `x-danube-checkpoint-b64`, written by `report_progress`.
+- **Dead-letter diagnostics**: `x-original-topic`, `x-original-subscription`, `x-original-topic-offset`, `x-original-producer-id`, `x-original-broker-addr`, `x-poison-policy`, `x-delivery-attempt`, `x-failure-reason`.
+- **DLQ replay**: `x-danube-replayed-from-dlq`, `x-danube-replayed-subscription`, added by `danube topic dlq replay`.
+
+## Look inside a topic
+
+```bash
+# Read stored messages without moving any subscription cursor
+danube topic peek /default/orders --start-offset 0 --count 10
+
+# Guess a JSON Schema from recent payloads
+danube topic schema infer /default/orders --sample-size 100
+```
+
+## Add a schema
+
+Instead of sending the full schema with each message, the producer sends a small `schema_id` and `schema_version`. The broker and consumers look up the definition in the [schema registry](/client-libraries/schema-registry/) and cache it.
+
+<Steps>
+1. **Register a schema** under a subject:
+
+   ```bash
+   danube schema register orders-value --schema-type json_schema --file ./orders.schema.json
+   ```
+
+2. **Attach it to a topic** and choose how strict the broker should be:
+
+   ```bash
+   danube topic schema configure /default/orders --subject orders-value --validation-policy enforce
+   ```
+
+3. **Publish with the schema**:
+
+   ```bash
+   danube produce /default/orders -f ./order.json --schema-subject orders-value
+   ```
+
+4. **Check the result**:
+
+   ```bash
+   danube topic schema show /default/orders
+   ```
+</Steps>
+
+### Choose a validation policy
+
+<CardGrid>
+  <Card title="none" icon="information">
+    No checks. Schema fields are optional. Good for development.
+  </Card>
+  <Card title="warn" icon="warning">
+    Logs a warning when the schema id is missing or wrong, but accepts the message.
+  </Card>
+  <Card title="enforce" icon="approve-check">
+    Rejects messages with a missing, unknown, or mismatched schema.
+  </Card>
+</CardGrid>
+
+Add `--enable-payload-validation` to also check the payload itself against the schema, not only the schema id.
+
+```bash
+danube topic schema validation-policy /default/orders --policy warn --enable-payload-validation
+```
+
+## Subject rules vs topic rules
+
+Schema settings live at two levels:
+
+- **Subject level: how a schema may change.** The compatibility mode (`backward`, `forward`, `full`, `none`) is set per subject and applies to every topic using it. Set it with `danube schema set-compatibility orders-value --mode backward`.
+- **Topic level: how strictly messages are checked.** Validation policy and payload validation are set per topic. Two topics can share a subject and still enforce it differently.
+- **Producer level: which version to send.** Producers pick a version with `--schema-version` or `--schema-min-version` (or the matching client builder methods).
+
+```text
+Subject "order-events" (compatibility: backward)
+  ├── /dev/order-events         validation: none
+  ├── /staging/order-events     validation: warn, payload validation on
+  └── /production/order-events  validation: enforce, payload validation on
+```
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Schema registry guide" href="/client-libraries/schema-registry/" description="Register, evolve, and use schemas from code." />
+  <LinkCard title="Producer guide" href="/client-libraries/producer/" description="Send messages, keys, and attributes from Rust and Go." />
+  <LinkCard title="Schema registry architecture" href="/architecture/schema-registry/" description="How schemas are stored and cached." />
+</CardGrid>

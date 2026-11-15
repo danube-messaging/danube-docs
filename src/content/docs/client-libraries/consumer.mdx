@@ -1,18 +1,18 @@
 ---
 title: Consumer Guide
-description: Receive messages, acknowledge processing, handle failures, and work with partitioned topics.
+description: Receive messages, acknowledge or reject them, consume partitioned and intent topics, and keep long tasks alive.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Consumers receive messages from Danube topics via subscriptions. This guide covers creating consumers, the message loop, acknowledgment, and negative acknowledgment.
+A consumer reads a topic through a named subscription. Build it, `subscribe()`, then loop over `receive()` and `ack()` each message once you have processed it.
 
-## Creating a Consumer
+## Receive your first messages
 
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="Create a consumer"
+```rust title="Subscribe and process"
 use danube_client::{DanubeClient, SubType};
 
 #[tokio::main]
@@ -31,7 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     consumer.subscribe().await?;
+    let mut stream = consumer.receive().await?;
 
+    while let Some(message) = stream.recv().await {
+        println!("received: {}", String::from_utf8_lossy(&message.payload));
+        consumer.ack(&message).await?;
+    }
     Ok(())
 }
 ```
@@ -39,12 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 </TabItem>
 <TabItem label="Go">
 
-```go title="Create a consumer"
+```go title="Subscribe and process"
 client, err := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
 if err != nil {
     log.Fatalf("Failed to create client: %v", err)
 }
-
 ctx := context.Background()
 
 consumer, err := client.NewConsumer().
@@ -56,16 +60,21 @@ consumer, err := client.NewConsumer().
 if err != nil {
     log.Fatalf("Failed to build consumer: %v", err)
 }
-
 if err := consumer.Subscribe(ctx); err != nil {
     log.Fatalf("Failed to subscribe: %v", err)
+}
+
+stream, err := consumer.Receive(ctx)
+for msg := range stream {
+    fmt.Printf("received: %s\n", string(msg.GetPayload()))
+    consumer.Ack(ctx, msg)
 }
 ```
 
 </TabItem>
 <TabItem label="Java">
 
-```java title="Create a consumer"
+```java title="Subscribe and process"
 DanubeClient client = DanubeClient.builder()
         .serviceUrl("http://127.0.0.1:6650")
         .build();
@@ -76,14 +85,26 @@ Consumer consumer = client.newConsumer()
         .withSubscription("my-subscription")
         .withSubscriptionType(SubType.EXCLUSIVE)
         .build();
-
 consumer.subscribe();
+
+consumer.receive().subscribe(new Flow.Subscriber<>() {
+    @Override public void onSubscribe(Flow.Subscription s) { s.request(Long.MAX_VALUE); }
+
+    @Override
+    public void onNext(StreamMessage msg) {
+        System.out.println("received: " + new String(msg.payload()));
+        consumer.ack(msg);
+    }
+
+    @Override public void onError(Throwable t) { t.printStackTrace(); }
+    @Override public void onComplete() {}
+});
 ```
 
 </TabItem>
 <TabItem label="Python">
 
-```python title="Create a consumer"
+```python title="Subscribe and process"
 client = await (
     DanubeClientBuilder()
     .service_url("http://127.0.0.1:6650")
@@ -98,137 +119,97 @@ consumer = (
     .with_subscription_type(SubType.EXCLUSIVE)
     .build()
 )
-
-await consumer.subscribe()
-```
-
-</TabItem>
-</Tabs>
-
-- **Consumer Name**: unique identifier for this consumer instance
-- **Subscription**: logical grouping of consumers (multiple consumers can share a subscription)
-- **Subscription Type**: controls message distribution. See [Subscriptions](/concepts/subscriptions/)
-
----
-
-## Receiving Messages
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Message loop"
-consumer.subscribe().await?;
-
-let mut stream = consumer.receive().await?;
-
-while let Some(message) = stream.recv().await {
-    let payload = String::from_utf8_lossy(&message.payload);
-    println!("Received: {}", payload);
-
-    consumer.ack(&message).await?;
-}
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go title="Message loop"
-consumer.Subscribe(ctx)
-
-stream, err := consumer.Receive(ctx)
-if err != nil {
-    log.Fatalf("Failed to receive: %v", err)
-}
-
-for msg := range stream {
-    payload := string(msg.GetPayload())
-    fmt.Printf("Received: %s\n", payload)
-
-    consumer.Ack(ctx, msg)
-}
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="Message loop"
-consumer.subscribe();
-
-consumer.receive().subscribe(new Flow.Subscriber<>() {
-    @Override
-    public void onSubscribe(Flow.Subscription s) {
-        s.request(Long.MAX_VALUE);
-    }
-
-    @Override
-    public void onNext(StreamMessage msg) {
-        String payload = new String(msg.payload());
-        System.out.println("Received: " + payload);
-
-        consumer.ack(msg);
-    }
-
-    @Override public void onError(Throwable t) { t.printStackTrace(); }
-    @Override public void onComplete() {}
-});
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Message loop"
 await consumer.subscribe()
 
 queue = await consumer.receive()
-
 while True:
     message = await queue.get()
-    payload = message.payload.decode()
-    print(f"Received: {payload}")
-
+    print(f"received: {message.payload.decode()}")
     await consumer.ack(message)
 ```
 
 </TabItem>
 </Tabs>
 
-:::tip
-Only acknowledge after successful processing. Unacknowledged messages are redelivered when using reliable dispatch.
-:::
+<Aside type="tip">
+Ack only after processing succeeds. On reliable topics, unacked messages are redelivered. A brand-new subscription on a reliable topic starts at the end of the topic, so subscribe before you start producing.
+</Aside>
 
----
+## Rust builder methods
 
-## Accessing Message Fields
+Required:
 
-Each message exposes payload, attributes, and metadata:
+- **with_topic(name)**: topic to read. For partitioned topics use the base name.
+- **with_consumer_name(name)**: identifies this consumer instance.
+- **with_subscription(name)**: subscription to join. Consumers with the same subscription share its cursor.
 
-<Tabs>
+Optional:
+
+- **with_subscription_type(SubType)**: `Exclusive`, `Shared`, `FailOver` or `KeyShared`. Defaults to `Shared`.
+- **with_key_filter(glob)** / **with_key_filters(vec)**: only for `KeyShared`, see [Key-Shared](/client-libraries/key-shared/).
+- **with_options(ConsumerOptions)**: retry and backoff settings.
+
+Consumer methods:
+
+- **subscribe()**: attach to the topic (all partitions).
+- **receive()**: returns a `tokio::sync::mpsc::Receiver` that yields messages.
+- **ack(&msg)**: confirm processing.
+- **nack(&msg, delay_ms, reason)**: reject and ask for redelivery.
+- **extend_lease**, **report_progress**, **cancel_task_tree**: agent primitives, see [below](#keep-long-tasks-alive-rust).
+- **close()**: stop background tasks and health checks.
+
+## Pick a subscription type
+
+<CardGrid>
+  <Card title="Exclusive" icon="approve-check">
+    One consumer, strict order. Sequential workflows.
+  </Card>
+  <Card title="Shared" icon="random">
+    Many consumers, round-robin, no ordering. Parallel work queues.
+  </Card>
+  <Card title="Failover" icon="warning">
+    One active consumer plus standbys, strict order. HA pipelines.
+  </Card>
+  <Card title="Key-Shared" icon="puzzle">
+    Many consumers, ordered per routing key. Per-entity processing.
+  </Card>
+</CardGrid>
+
+Details and diagrams: [Subscriptions](/concepts/subscriptions/).
+
+## Common tasks
+
+### Read message fields
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Message fields"
 while let Some(message) = stream.recv().await {
-    let payload = String::from_utf8_lossy(&message.payload);
-    println!("Payload: {}", payload);
+    println!("payload:  {}", String::from_utf8_lossy(&message.payload));
+    println!("topic:    {}", message.msg_id.topic_name);
+    println!("offset:   {}", message.msg_id.topic_offset);
+    println!("producer: {}", message.producer_name);
+    println!("key:      {:?}", message.routing_key);
 
     for (key, value) in &message.attributes {
-        println!("  {}: {}", key, value);
+        println!("  {key}: {value}");
     }
-
     consumer.ack(&message).await?;
 }
 ```
+
+Other fields: `publish_time`, `schema_id`, `schema_version`. Helpers such as `correlation_id()`, `reply_to()`, `root_msg_id()` and `checkpoint_b64()` read the standard `x-danube-*` attributes.
 
 </TabItem>
 <TabItem label="Go">
 
 ```go title="Message fields"
 for msg := range stream {
-    fmt.Printf("Payload: %s\n", string(msg.GetPayload()))
-
+    fmt.Printf("payload: %s\n", string(msg.GetPayload()))
     for key, value := range msg.GetAttributes() {
         fmt.Printf("  %s: %s\n", key, value)
     }
-
     consumer.Ack(ctx, msg)
 }
 ```
@@ -238,12 +219,8 @@ for msg := range stream {
 
 ```java title="Message fields"
 // Inside onNext(StreamMessage msg):
-String payload = new String(msg.payload());
-System.out.println("Payload: " + payload);
-
-Map<String, String> attributes = msg.attributes();
-attributes.forEach((k, v) -> System.out.printf("  %s: %s%n", k, v));
-
+System.out.println("payload: " + new String(msg.payload()));
+msg.attributes().forEach((k, v) -> System.out.printf("  %s: %s%n", k, v));
 consumer.ack(msg);
 ```
 
@@ -253,33 +230,28 @@ consumer.ack(msg);
 ```python title="Message fields"
 while True:
     message = await queue.get()
-    print(f"Payload: {message.payload.decode()}")
-
+    print(f"payload: {message.payload.decode()}")
     await consumer.ack(message)
 ```
 
 </TabItem>
 </Tabs>
 
----
+### Reject a message (nack)
 
-## Negative Acknowledgment (NACK)
+When processing fails, `nack()` hands the message back to the broker for a later retry.
 
-When a consumer cannot process a message, it can reject it with `nack()`. The broker schedules redelivery based on the subscription's failure policy.
-
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="NACK with retry"
+```rust title="Nack on failure"
 while let Some(message) = stream.recv().await {
     match process(&message) {
         Ok(_) => consumer.ack(&message).await?,
         Err(e) => {
-            consumer.nack(
-                &message,
-                Some(1000),                           // retry after 1s minimum
-                Some(format!("processing failed: {}", e)),
-            ).await?;
+            consumer
+                .nack(&message, Some(1000), Some(format!("processing failed: {e}")))
+                .await?;
         }
     }
 }
@@ -288,7 +260,7 @@ while let Some(message) = stream.recv().await {
 </TabItem>
 <TabItem label="Go">
 
-```go title="NACK with retry"
+```go title="Nack on failure"
 for msg := range stream {
     if err := process(msg); err != nil {
         consumer.Nack(ctx, msg, 1000, fmt.Sprintf("processing failed: %v", err))
@@ -301,7 +273,7 @@ for msg := range stream {
 </TabItem>
 <TabItem label="Java">
 
-```java title="NACK with retry"
+```java title="Nack on failure"
 // Inside onNext(StreamMessage msg):
 try {
     process(msg);
@@ -314,7 +286,7 @@ try {
 </TabItem>
 <TabItem label="Python">
 
-```python title="NACK with retry"
+```python title="Nack on failure"
 while True:
     message = await queue.get()
     try:
@@ -327,155 +299,107 @@ while True:
 </TabItem>
 </Tabs>
 
-**Parameters:**
+- **delay_ms** (optional): minimum wait before redelivery. The broker uses the larger of this and the subscription's backoff, capped at its maximum redelivery delay.
+- **reason** (optional): free text, recorded in metrics and copied into the dead-letter message as `x-failure-reason`.
 
-- **`delay_ms`** (optional): minimum delay before redelivery. The broker uses the larger of this value and the subscription's configured backoff delay
-- **`reason`** (optional): human-readable failure reason, attached to metrics and dead-letter metadata
+What happens next depends on the subscription's failure policy: retry after backoff while attempts remain, then apply the poison policy (dead-letter, drop or block). See [Dispatch Strategies](/concepts/dispatch-strategies/).
 
-**What happens after NACK:** the broker applies the subscription's failure policy. If delivery attempts remain, the message is redelivered after the backoff delay. If `max_redelivery_count` is exceeded, the poison policy (`dead_letter`, `drop`, or `block`) takes effect. See [Dispatch Strategies](/concepts/dispatch-strategies/).
+### Consume a partitioned topic
 
----
+Nothing changes in your code. Use the base topic name and the client subscribes to every partition, merging them into one stream.
 
-## Partitioned Topics
-
-When a topic has partitions, consumers automatically receive from all partitions. Use the parent topic name:
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Partitioned consumer"
-// Topic has 3 partitions: my-topic-part-0, my-topic-part-1, my-topic-part-2
+```rust
+// /default/my-topic has partitions -part-0, -part-1, -part-2
 let mut consumer = client
     .new_consumer()
-    .with_topic("/default/my-topic")  // Parent topic name
+    .with_topic("/default/my-topic")
     .with_consumer_name("partition-consumer")
     .with_subscription("partition-sub")
-    .with_subscription_type(SubType::Exclusive)
     .build()?;
-
-consumer.subscribe().await?;
-
-// Automatically receives from all 3 partitions
-let mut stream = consumer.receive().await?;
-while let Some(message) = stream.recv().await {
-    consumer.ack(&message).await?;
-}
 ```
 
-</TabItem>
-<TabItem label="Go">
+Order is kept within each partition, not across partitions. Use a routing key if related messages must stay in order (see [Key-Shared](/client-libraries/key-shared/)).
 
-```go title="Partitioned consumer"
-consumer, _ := client.NewConsumer().
-    WithConsumerName("partition-consumer").
-    WithTopic("/default/my-topic").
-    WithSubscription("partition-sub").
-    WithSubscriptionType(danube.Exclusive).
-    Build()
+### Consume an intent topic
 
-consumer.Subscribe(ctx)
-stream, _ := consumer.Receive(ctx)
+Topics created with `--intent` give every subscription a retry and poison-message policy out of the box:
 
-for msg := range stream {
-    consumer.Ack(ctx, msg)
-}
+- **event_stream**: 3 retries, 500 ms base backoff, then the message moves to `<topic>-dlq`.
+- **task_queue**: 5 retries, 1000 ms base backoff, then `<topic>-dlq`.
+- **audit_log**: 10 retries, 500 ms base backoff, then delivery **blocks** on that message. No DLQ, nothing is skipped.
+- **realtime**: non-reliable, no redelivery.
+
+Dead-lettered messages carry `x-original-topic`, `x-original-subscription`, `x-original-topic-offset`, `x-failure-reason` and `x-delivery-attempt`. Inspect and recover them from the CLI:
+
+```bash
+# List the subscriptions on a topic
+danube topic subscription list /default/orders
+
+# Show the retry and DLQ policy of a subscription
+danube topic subscription failure-policy get /default/orders --subscription workers
+
+# Send dead-lettered messages back to the source topic
+danube topic dlq replay /default/orders --subscription workers
 ```
 
-</TabItem>
-<TabItem label="Java">
+See [Stream Intents](/concepts/stream-intents/) for the full profiles.
 
-```java title="Partitioned consumer"
-Consumer consumer = client.newConsumer()
-        .withTopic("/default/my-topic")  // Parent topic name
-        .withConsumerName("partition-consumer")
-        .withSubscription("partition-sub")
-        .withSubscriptionType(SubType.EXCLUSIVE)
-        .build();
+### Tune reconnects (Rust)
 
-consumer.subscribe();
-// Automatically receives from all partitions via Flow.Publisher
+If the receive stream hits a transient error, the consumer retries with exponential backoff and resubscribes after `max_retries`. Adjust it with `ConsumerOptions`:
+
+```rust title="Consumer retries and backoff"
+use danube_client::ConsumerOptions;
+
+let mut consumer = client
+    .new_consumer()
+    .with_topic("/default/orders")
+    .with_consumer_name("worker-1")
+    .with_subscription("workers")
+    .with_subscription_type(SubType::Shared)
+    .with_options(ConsumerOptions::new(5, 200, 10_000)) // retries, base ms, max ms
+    .build()?;
 ```
 
-</TabItem>
-<TabItem label="Python">
+### Keep long tasks alive (Rust)
 
-```python title="Partitioned consumer"
-consumer = (
-    client.new_consumer()
-    .with_topic("/default/my-topic")  # Parent topic name
-    .with_consumer_name("partition-consumer")
-    .with_subscription("partition-sub")
-    .with_subscription_type(SubType.EXCLUSIVE)
-    .build()
-)
+Long-running workers and AI agents can hold a message past its ack timeout, save progress, and cancel related subtasks.
 
-await consumer.subscribe()
-queue = await consumer.receive()
-```
-
-</TabItem>
-</Tabs>
-
-- Client discovers all partitions automatically
-- Messages from all partitions are merged into a single stream
-- Ordering is preserved per-partition, not cross-partition
-
----
-
-## Retry & DLQ Interaction with `--intent`
-
-When consuming from a reliable topic created with `--intent`, your subscription automatically inherits retry limits, backoff delays, and poison-message behavior from `/topics/{ns}/{topic}/intent` (stored under `/topics/{ns}/{topic}/subscriptions/{sub}/failure_policy`):
-
-- **`event_stream`** (`3` retries, `500 ms` base delay) and **`task_queue`** (`5` retries, `1000 ms` base delay): after exceeding retries via `nack()` or `ack_timeout_ms`, the broker moves the message to `<topic>-dlq` with diagnostic headers (`x-original-topic`, `x-original-subscription`, `x-failure-reason`, `x-delivery-attempt`) and advances past it.
-- **`audit_log`** (`10` retries, `500 ms` base delay): uses `poison_policy = block`, halting delivery at the unacknowledged slot rather than skipping or moving it to a DLQ.
-
-See [Stream Intents](/concepts/stream-intents/) and [Dispatch Strategies](/concepts/dispatch-strategies/) for inspecting, overriding, or replaying DLQs (`danube ctl topics replay-dlq`).
-
----
-
-## Agent Lease, Checkpoints, Cancellation & Graceful Close
-
-Long-running workers and AI agent consumers in Rust (`danube-client`) can extend leases mid-flight, checkpoint incremental progress across retries, cancel subtask trees, and shut down cleanly:
-
-```rust title="Extend lease, checkpoint progress, cancel task tree, and close"
-// 1. Extend visibility timeout before ack_timeout_ms expires
+```rust title="Lease, checkpoint, cancel"
+// Push the ack deadline 30 s further out
 let lease = consumer.extend_lease(&message, 30_000).await?;
-println!("Lease extended={} deadline={}ms", lease.success, lease.new_deadline_ms);
+println!("extended={} deadline={}ms", lease.success, lease.new_deadline_ms);
 
-// 2. Save a checkpoint (<= 64 KiB) while extending the lease.
-//    If this delivery is nacked or times out, the redelivered message carries
-//    the checkpoint in message.checkpoint_b64() (attribute x-danube-checkpoint-b64).
+// Save a checkpoint (max 64 KiB) and extend the lease in one call.
+// If this delivery fails, the redelivered message carries it in
+// message.checkpoint_b64() (attribute x-danube-checkpoint-b64).
 let checkpoint = br#"{"step":3,"cursor":"page-42"}"#.to_vec();
 let progress = consumer.report_progress(&message, checkpoint, 30_000).await?;
 assert!(progress.accepted);
 
-// 3. Abort correlated subtasks sharing x-danube-root-msg-id
+// Cancel every subtask that shares this message's x-danube-root-msg-id
 if let Some(root_id) = message.root_msg_id() {
     let cancel = consumer
-        .cancel_task_tree(
-            "/agents/subtasks",
-            root_id,
-            Some("parent workflow cancelled".to_string()),
-        )
+        .cancel_task_tree("/agents/subtasks", root_id, Some("parent cancelled".into()))
         .await?;
-    println!("Cancelled descendants: {}", cancel.cancelled);
+    println!("cancelled={} evicted_in_flight={}", cancel.cancelled, cancel.evicted_in_flight);
 }
+```
 
-// 4. Gracefully stop background consumer streams on shutdown
+`cancel_task_tree` takes the topic the subtasks live on. The consumer must be subscribed to it. Patterns and attribute conventions: [Danube for AI Agents](/ai-agents/overview/).
+
+### Shut down cleanly
+
+```rust
 consumer.close().await;
 ```
 
-See [Danube for AI Agents](/ai-agents/overview/) for full task-tree correlation and checkpoint recovery patterns.
+`close()` stops the background receive tasks and health checks for every partition.
 
----
+## Next steps
 
-## Subscription Types Quick Reference
-
-| Type | Consumers | Ordering | Use Case |
-|------|-----------|----------|----------|
-| **Exclusive** | 1 | Guaranteed | Sequential workflows |
-| **Shared** | N (round-robin) | None | Parallel processing |
-| **Failover** | 1 active + standby | Guaranteed | HA with ordering |
-| **Key-Shared** | N (by routing key) | Per-key | Per-entity processing |
-
-For Key-Shared details (routing keys, key filtering, glob patterns), see [Subscriptions](/concepts/subscriptions/#key-shared).
+<CardGrid>
+  <LinkCard title="Key-Shared subscriptions" href="/client-libraries/key-shared/" description="Ordered per key, parallel across keys." />
+  <LinkCard title="Schema Registry" href="/client-libraries/schema-registry/" description="Decode typed messages safely." />
+  <LinkCard title="Subscriptions" href="/concepts/subscriptions/" description="How each subscription type dispatches." />
+</CardGrid>

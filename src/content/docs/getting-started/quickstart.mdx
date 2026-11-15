@@ -1,326 +1,96 @@
 ---
 title: Quickstart
-description: Start a Danube broker and send your first message in under a minute.
+description: Run Danube, create a topic, send and read messages, then hand the cluster to an AI agent. Five minutes.
 ---
 
-import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Steps, Tabs, TabItem, Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
 
-This guide gets you from zero to producing and consuming messages in under a minute.
-
-## Prerequisites
-
-Download the single `danube` binary from the [releases page](https://github.com/danube-messaging/danube/releases) (it includes broker, CLI, admin, and MCP server), or pull the [container image](https://github.com/danube-messaging/danube/pkgs/container/danube).
-
-<Tabs>
-<TabItem label="Binary">
+Five minutes from nothing to a working broker, a durable topic and your first messages. At the end you connect an AI agent to it.
 
 <Steps>
-1. **Start the broker**
 
-   ```bash title="Terminal 1"
-   danube up --mode standalone --data-dir ./danube-data
+1. **Get the `danube` binary**
+
+   <Tabs>
+   <TabItem label="Download">
+   Grab the latest build for your platform from the [releases page](https://github.com/danube-messaging/danube/releases) and put `danube` on your `PATH`.
+   </TabItem>
+   <TabItem label="Build from source">
+   ```bash
+   git clone https://github.com/danube-messaging/danube.git
+   cd danube
+   cargo build --release        # binary at target/release/danube
    ```
-
-   Broker ready on `127.0.0.1:6650` (Client gRPC, Schema Registry, and Admin gRPC multiplex on this single port). No YAML config file needed.
-
-2. **Produce messages**
-
-   ```bash title="Terminal 2"
-   danube ctl produce \
-     -s http://127.0.0.1:6650 \
-     -t /default/quickstart \
-     -c 10 \
-     -m "Hello, Danube!"
-   ```
-
-3. **Consume messages**
-
-   ```bash title="Terminal 3"
-   danube ctl consume \
-     -s http://127.0.0.1:6650 \
-     -t /default/quickstart \
-     --subscription my-subscription
-   ```
-
-   You should see the 10 messages arrive at the consumer.
-</Steps>
-
-</TabItem>
-<TabItem label="Docker">
-
-<Steps>
-1. **Start the broker**
-
-   ```bash title="Terminal 1"
-   docker run -d --name danube \
-     -p 6650:6650 -p 9040:9040 \
+   </TabItem>
+   <TabItem label="Docker">
+   ```bash
+   docker run -d --name danube -p 6650:6650 \
      ghcr.io/danube-messaging/danube:latest \
-     up --mode standalone --data-dir /danube-data \
-     --broker-addr 0.0.0.0:6650 --prom-exporter 0.0.0.0:9040
+     up standalone --data-dir /danube-data \
+     --listen 0.0.0.0:6650 --advertised-addr 127.0.0.1:6650
+   ```
+   Skip step 2. Run the client commands below on your host with a local `danube`, or prefix them with `docker exec danube`.
+   </TabItem>
+   </Tabs>
+
+2. **Start a node**
+
+   ```bash title="Terminal 1"
+   danube up standalone
    ```
 
-2. **Produce messages**
+   Danube listens on `127.0.0.1:6650` and stores data in `./danube-data`. Clients, schema registry and admin all share that one port.
+
+3. **Create a topic with an intent**
 
    ```bash title="Terminal 2"
-   docker exec danube danube ctl produce \
-     -s http://127.0.0.1:6650 \
-     -t /default/quickstart \
-     -c 10 \
-     -m "Hello, Danube!"
+   danube topic create /default/orders --intent task_queue
    ```
 
-3. **Consume messages**
+   `task_queue` makes the topic durable, with 5 retries and a dead-letter queue at `/default/orders-dlq`. See [Stream intents](/concepts/stream-intents/) for the other three.
+
+4. **Start a consumer**
 
    ```bash title="Terminal 3"
-   docker exec danube danube ctl consume \
-     -s http://127.0.0.1:6650 \
-     -t /default/quickstart \
-     --subscription my-subscription
+   danube consume /default/orders -s workers
    ```
+
+   This creates the `workers` subscription and waits. A new subscription starts at the end of the topic, so start it before producing. Add `--limit 5 -o jsonl` for scripts.
+
+5. **Produce messages**
+
+   ```bash title="Terminal 2"
+   danube produce /default/orders -m 'order #1' -c 5 -r
+   ```
+
+   `-c 5` sends five messages and they show up in Terminal 3. `-r` asks for reliable delivery, which durable topics need from the CLI. Press Ctrl-C in Terminal 3 when done.
+
+6. **Inspect the topic**
+
+   ```bash
+   danube topic describe /default/orders
+   ```
+
+   You see the topic's delivery settings, schema and the `workers` subscription.
+
+7. **Connect an AI agent**
+
+   ```bash
+   danube mcp
+   ```
+
+   This runs an MCP server over stdio against your local node. Add it to Claude Code, Cursor or Antigravity and ask things like "which subscriptions are lagging?". See [Danube for AI agents](/ai-agents/overview/#connect-your-agent-with-mcp) for the config snippet.
+
 </Steps>
 
-</TabItem>
-</Tabs>
+<Aside type="tip">
+Want a clean slate? Stop the node and delete `./danube-data`.
+</Aside>
 
-:::tip
-Data persists across restarts in the `./danube-data` directory. To start fresh, remove it and restart the broker.
-:::
+## Next steps
 
-## What Just Happened?
-
-1. `danube up --mode standalone` started a single-node broker with zero configuration and multiplexed Client, Schema, and Admin services on port `6650`.
-2. `danube ctl produce` auto-created `/default/quickstart` and published 10 messages.
-3. `danube ctl consume` created a subscription `my-subscription` and received the messages.
-
-:::tip[Create Intent-Driven Durable Topics]
-To enable WAL durability, automatic retry backoff, and dead-letter queues without manually configuring low-level flags, provision topics with `--intent`:
-
-```bash
-danube ctl topics create /default/tasks --intent task_queue
-```
-
-See [Stream Intents](/concepts/stream-intents/) and [Danube for AI Agents](/ai-agents/overview/) for all four workload profiles (`realtime`, `event_stream`, `task_queue`, `audit_log`).
-:::
-
-## Try With a Client Library
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="examples/quickstart.rs"
-use danube_client::{DanubeClient, SubType};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = DanubeClient::builder()
-        .service_url("http://127.0.0.1:6650")
-        .build()
-        .await?;
-
-    // Producer
-    let mut producer = client
-        .new_producer()
-        .with_topic("/default/quickstart")
-        .with_name("my-producer")
-        .build()?;
-
-    producer.create().await?;
-    producer.send("Hello from Rust!".as_bytes().to_vec(), None).await?;
-
-    // Consumer
-    let mut consumer = client
-        .new_consumer()
-        .with_topic("/default/quickstart")
-        .with_consumer_name("my-consumer")
-        .with_subscription("my-sub")
-        .with_subscription_type(SubType::Exclusive)
-        .build()?;
-
-    consumer.subscribe().await?;
-
-    let mut stream = consumer.receive().await?;
-    while let Some(message) = stream.recv().await {
-        println!("Received: {}", String::from_utf8_lossy(&message.payload));
-        consumer.ack(&message).await?;
-    }
-
-    Ok(())
-}
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go title="examples/quickstart.go"
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-
-    "github.com/danube-messaging/danube-go"
-)
-
-func main() {
-    client, err := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
-    if err != nil {
-        log.Fatalf("Failed to create client: %v", err)
-    }
-
-    ctx := context.Background()
-
-    // Producer
-    producer, err := client.NewProducer().
-        WithName("my-producer").
-        WithTopic("/default/quickstart").
-        Build()
-    if err != nil {
-        log.Fatalf("Failed to build producer: %v", err)
-    }
-
-    if err := producer.Create(ctx); err != nil {
-        log.Fatalf("Failed to create producer: %v", err)
-    }
-
-    producer.Send(ctx, []byte("Hello from Go!"), nil)
-
-    // Consumer
-    consumer, err := client.NewConsumer().
-        WithConsumerName("my-consumer").
-        WithTopic("/default/quickstart").
-        WithSubscription("my-sub").
-        WithSubscriptionType(danube.Exclusive).
-        Build()
-    if err != nil {
-        log.Fatalf("Failed to build consumer: %v", err)
-    }
-
-    if err := consumer.Subscribe(ctx); err != nil {
-        log.Fatalf("Failed to subscribe: %v", err)
-    }
-
-    stream, err := consumer.Receive(ctx)
-    if err != nil {
-        log.Fatalf("Failed to receive: %v", err)
-    }
-
-    for msg := range stream {
-        fmt.Printf("Received: %s\n", string(msg.GetPayload()))
-        consumer.Ack(ctx, msg)
-    }
-}
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="examples/Quickstart.java"
-import com.danubemessaging.client.DanubeClient;
-import com.danubemessaging.client.Producer;
-import com.danubemessaging.client.Consumer;
-import com.danubemessaging.client.SubType;
-import com.danubemessaging.client.model.StreamMessage;
-import java.util.Map;
-import java.util.concurrent.Flow;
-
-public class Quickstart {
-    public static void main(String[] args) throws Exception {
-        DanubeClient client = DanubeClient.builder()
-                .serviceUrl("http://127.0.0.1:6650")
-                .build();
-
-        // Producer
-        Producer producer = client.newProducer()
-                .withTopic("/default/quickstart")
-                .withName("my-producer")
-                .build();
-
-        producer.create();
-        producer.send("Hello from Java!".getBytes(), Map.of());
-
-        // Consumer
-        Consumer consumer = client.newConsumer()
-                .withTopic("/default/quickstart")
-                .withConsumerName("my-consumer")
-                .withSubscription("my-sub")
-                .withSubscriptionType(SubType.EXCLUSIVE)
-                .build();
-
-        consumer.subscribe();
-
-        consumer.receive().subscribe(new Flow.Subscriber<>() {
-            @Override public void onSubscribe(Flow.Subscription s) { s.request(Long.MAX_VALUE); }
-
-            @Override
-            public void onNext(StreamMessage msg) {
-                System.out.println("Received: " + new String(msg.payload()));
-                consumer.ack(msg);
-            }
-
-            @Override public void onError(Throwable t) { t.printStackTrace(); }
-            @Override public void onComplete() {}
-        });
-
-        Thread.sleep(5000); // Wait for messages
-        client.close();
-    }
-}
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="examples/quickstart.py"
-import asyncio
-from danube import DanubeClientBuilder, SubType
-
-async def main():
-    client = await (
-        DanubeClientBuilder()
-        .service_url("http://127.0.0.1:6650")
-        .build()
-    )
-
-    # Producer
-    producer = (
-        client.new_producer()
-        .with_topic("/default/quickstart")
-        .with_name("my-producer")
-        .build()
-    )
-
-    await producer.create()
-    await producer.send("Hello from Python!".encode())
-
-    # Consumer
-    consumer = (
-        client.new_consumer()
-        .with_topic("/default/quickstart")
-        .with_consumer_name("my-consumer")
-        .with_subscription("my-sub")
-        .with_subscription_type(SubType.EXCLUSIVE)
-        .build()
-    )
-
-    await consumer.subscribe()
-
-    queue = await consumer.receive()
-    while True:
-        message = await queue.get()
-        print(f"Received: {message.payload.decode()}")
-        await consumer.ack(message)
-
-asyncio.run(main())
-```
-
-</TabItem>
-</Tabs>
-
-## Next Steps
-
-- **[Configuration Workflow](/getting-started/configuration-workflow/)**: Learn the 4-layer model for node flags, Raft policies, GitOps apply, and topic intents.
-- **[Broker Modes](/getting-started/broker-modes/)**: Compare `standalone`, `cluster`, and zero-YAML `edge` modes.
-- **[CLI Messaging & Operations](/admin/cli-messaging/)**: Explore `danube ctl` commands for producing, consuming, peeking, branching, and DLQ replay.
-- **[Danube for AI Agents](/ai-agents/overview/)**: Workload intents, agentic primitives, time-travel branching, and the 71-tool `danube mcp` server.
-- **[Topics & Partitions](/concepts/topics/)** and **[Subscriptions](/concepts/subscriptions/)**: Core messaging patterns.
+<CardGrid>
+	<LinkCard title="The danube CLI" description="Tour every command, contexts and connection flags." href="/getting-started/the-danube-cli/" />
+	<LinkCard title="Client libraries" description="Produce and consume from Rust, Go, Java or Python." href="/client-libraries/overview/" />
+	<LinkCard title="Broker modes" description="Grow from standalone to a Raft cluster, or run at the edge." href="/getting-started/broker-modes/" />
+</CardGrid>

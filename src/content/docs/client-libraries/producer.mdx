@@ -1,18 +1,18 @@
 ---
 title: Producer Guide
-description: Send messages to Danube topics, with partitions, reliable dispatch, and schema integration.
+description: Send messages to Danube topics, with attributes, partitions, reliable dispatch, schemas and retries.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Producers send messages to Danube topics. This guide covers creating producers, sending messages, partitions, and reliable dispatch.
+A producer publishes messages to one topic. Build it, call `create()` once to register with the broker, then `send()` as often as you like.
 
-## Creating a Producer
+## Send your first message
 
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="Create a producer"
+```rust title="Create a producer and send"
 use danube_client::DanubeClient;
 
 #[tokio::main]
@@ -30,6 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     producer.create().await?;
 
+    let seq = producer.send(b"Hello Danube!".to_vec(), None).await?;
+    println!("sent, sequence id {seq}");
+
     Ok(())
 }
 ```
@@ -37,12 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 </TabItem>
 <TabItem label="Go">
 
-```go title="Create a producer"
+```go title="Create a producer and send"
 client, err := danube.NewClient().ServiceURL("127.0.0.1:6650").Build()
 if err != nil {
     log.Fatalf("Failed to create client: %v", err)
 }
-
 ctx := context.Background()
 
 producer, err := client.NewProducer().
@@ -52,16 +54,18 @@ producer, err := client.NewProducer().
 if err != nil {
     log.Fatalf("Failed to build producer: %v", err)
 }
-
 if err := producer.Create(ctx); err != nil {
     log.Fatalf("Failed to create producer: %v", err)
 }
+
+messageID, err := producer.Send(ctx, []byte("Hello Danube!"), nil)
+fmt.Printf("sent: %v\n", messageID)
 ```
 
 </TabItem>
 <TabItem label="Java">
 
-```java title="Create a producer"
+```java title="Create a producer and send"
 DanubeClient client = DanubeClient.builder()
         .serviceUrl("http://127.0.0.1:6650")
         .build();
@@ -70,14 +74,16 @@ Producer producer = client.newProducer()
         .withTopic("/default/my-topic")
         .withName("my-producer")
         .build();
-
 producer.create();
+
+long messageId = producer.send("Hello Danube!".getBytes(), Map.of());
+System.out.printf("sent: %d%n", messageId);
 ```
 
 </TabItem>
 <TabItem label="Python">
 
-```python title="Create a producer"
+```python title="Create a producer and send"
 client = await (
     DanubeClientBuilder()
     .service_url("http://127.0.0.1:6650")
@@ -90,84 +96,58 @@ producer = (
     .with_name("my-producer")
     .build()
 )
-
 await producer.create()
+
+message_id = await producer.send(b"Hello Danube!")
+print(f"sent: {message_id}")
 ```
 
 </TabItem>
 </Tabs>
 
-- **Topic**: destination for messages (e.g., `/default/my-topic`)
-- **Name**: unique producer identifier within the topic
-- **Create**: registers the producer with the broker before sending
+If the topic does not exist yet, `create()` auto-creates it (on by default): non-reliable unless the producer asks for reliable dispatch. For anything that must not lose data, create the topic first with an intent (see [Publish to an intent topic](#publish-to-an-intent-topic)).
 
----
+## Rust builder methods
 
-## Sending Messages
+Required:
 
-### Byte Messages
+- **with_topic(name)**: target topic, for example `/default/orders`.
+- **with_name(name)**: producer name, unique within the topic.
 
-<Tabs>
-<TabItem label="Rust">
+Optional:
 
-```rust title="Send a message"
-let message_id = producer
-    .send("Hello Danube!".as_bytes().to_vec(), None)
-    .await?;
+- **with_reliable_dispatch()**: ask for a reliable topic. Must match the topic's strategy.
+- **with_partitions(n)**: create the topic with `n` partitions if it does not exist yet. `0` is rejected.
+- **with_schema_subject(subject)**: use the latest version of a registered schema.
+- **with_schema_version(subject, v)**: pin to schema version `v`.
+- **with_schema_min_version(subject, v)**: use version `v` or newer.
+- **with_schema_reference(SchemaReference)**: low-level form of the three schema methods above.
+- **with_options(ProducerOptions)**: retry and backoff settings.
 
-println!("Sent message ID: {}", message_id);
-```
+Producer methods:
 
-</TabItem>
-<TabItem label="Go">
+- **create()**: register with the broker. Discovers partitions of existing topics.
+- **send(payload, attributes)**: publish bytes, returns the message sequence id (`u64`).
+- **send_with_key(payload, attributes, key)**: publish with a routing key.
 
-```go title="Send a message"
-messageID, err := producer.Send(ctx, []byte("Hello Danube!"), nil)
-if err != nil {
-    log.Fatalf("Failed to send: %v", err)
-}
+## Common tasks
 
-fmt.Printf("Sent message ID: %v\n", messageID)
-```
+### Add attributes
 
-</TabItem>
-<TabItem label="Java">
+Attributes are string key-value pairs that travel with the message: trace ids, content types, routing hints.
 
-```java title="Send a message"
-long messageId = producer.send("Hello Danube!".getBytes(), Map.of());
-
-System.out.printf("Sent message ID: %d%n", messageId);
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Send a message"
-message_id = await producer.send("Hello Danube!".encode())
-
-print(f"Sent message ID: {message_id}")
-```
-
-</TabItem>
-</Tabs>
-
-### Messages with Attributes
-
-Attach key-value metadata to messages for routing hints, custom headers, or tracing context:
-
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Send with attributes"
 use std::collections::HashMap;
 
-let mut attributes = HashMap::new();
-attributes.insert("source".to_string(), "app-1".to_string());
-attributes.insert("priority".to_string(), "high".to_string());
+let attributes = HashMap::from([
+    ("source".to_string(), "app-1".to_string()),
+    ("priority".to_string(), "high".to_string()),
+]);
 
-let message_id = producer
-    .send(b"Important message".to_vec(), Some(attributes))
-    .await?;
+producer.send(b"Important message".to_vec(), Some(attributes)).await?;
 ```
 
 </TabItem>
@@ -198,10 +178,7 @@ long messageId = producer.send("Important message".getBytes(), attributes);
 <TabItem label="Python">
 
 ```python title="Send with attributes"
-attributes = {
-    "source": "app-1",
-    "priority": "high",
-}
+attributes = {"source": "app-1", "priority": "high"}
 
 message_id = await producer.send(b"Important message", attributes)
 ```
@@ -209,13 +186,96 @@ message_id = await producer.send(b"Important message", attributes)
 </TabItem>
 </Tabs>
 
----
+### Publish to an intent topic
 
-## Partitioned Topics
+Stream intents pick delivery, durability and retry settings for you. Create the topic once with the CLI:
 
-Partitions enable horizontal scaling by distributing messages across multiple brokers. Add `.with_partitions(N)` to the producer builder:
+```bash
+danube topic create /default/orders --intent event_stream --partitions 3
+```
 
-<Tabs>
+`event_stream`, `task_queue` and `audit_log` create **reliable** topics, so the producer must call `with_reliable_dispatch()`. Leave out `with_partitions()`: `create()` looks up the existing partitions and attaches to all of them.
+
+<Tabs syncKey="client-lang">
+<TabItem label="Rust">
+
+```rust title="Producer for a reliable intent topic"
+let mut producer = client
+    .new_producer()
+    .with_topic("/default/orders")
+    .with_name("orders-producer")
+    .with_reliable_dispatch()
+    .build()?;
+
+producer.create().await?;
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go title="Producer for a reliable intent topic"
+producer, err := client.NewProducer().
+    WithName("orders-producer").
+    WithTopic("/default/orders").
+    WithDispatchStrategy(danube.NewReliableDispatchStrategy()).
+    Build()
+
+producer.Create(ctx)
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="Producer for a reliable intent topic"
+Producer producer = client.newProducer()
+        .withTopic("/default/orders")
+        .withName("orders-producer")
+        .withDispatchStrategy(DispatchStrategy.RELIABLE)
+        .build();
+
+producer.create();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="Producer for a reliable intent topic"
+from danube import DispatchStrategy
+
+producer = (
+    client.new_producer()
+    .with_topic("/default/orders")
+    .with_name("orders-producer")
+    .with_dispatch_strategy(DispatchStrategy.RELIABLE)
+    .build()
+)
+await producer.create()
+```
+
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="Strategy mismatch">
+If the producer's dispatch strategy differs from the topic's, `create()` fails with `FailedPrecondition: Producer requested dispatch strategy does not match topic strategy`. For `realtime` topics, leave `with_reliable_dispatch()` out.
+</Aside>
+
+Check the topic end to end from two terminals. Start the consumer first: a new subscription on a reliable topic starts at the end.
+
+```bash
+# terminal 1
+danube consume /default/orders -s smoke-test
+
+# terminal 2 (-r is required for reliable topics)
+danube produce /default/orders -m "order 1001" -r
+```
+
+See [Stream Intents](/concepts/stream-intents/) for what each intent configures and [Dispatch Strategies](/concepts/dispatch-strategies/) for reliable versus non-reliable delivery.
+
+### Create a partitioned topic from code
+
+Partitions spread one topic over several brokers. If you are not pre-creating the topic with the CLI, ask the producer to create it with `n` partitions:
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Partitioned producer"
@@ -266,182 +326,47 @@ producer = (
     .with_partitions(3)
     .build()
 )
-
 await producer.create()
 ```
 
 </TabItem>
 </Tabs>
 
-The topic splits into N internal partitions (e.g., `-part-0`, `-part-1`, `-part-2`). Messages without a routing key are distributed round-robin across partitions; `send_with_key()` uses deterministic FNV-1a hashing on the routing key.
+The topic becomes `-part-0`, `-part-1` and `-part-2` internally. How messages are spread:
 
-### Automatic Partition Discovery & `--intent` Topics
+- **send()**: round-robin across partitions.
+- **send_with_key()**: FNV-1a hash of the key picks the partition, so one key always lands on the same partition.
 
-You only need `.with_partitions(N)` when implicitly creating a brand-new partitioned topic from the producer. When connecting to an existing partitioned topic — such as one pre-created via `danube ctl topics create /default/high-throughput --intent event_stream --partitions 3` — **omit `.with_partitions(...)`**: calling `producer.create().await?` automatically queries the cluster lookup service (`topic_partitions`) and attaches internal producers for every partition.
+### Route messages by key
 
-:::important
-When publishing to a topic pre-created with `--intent`, match its resolved dispatch strategy on the producer builder. `event_stream`, `task_queue`, and `audit_log` create **Reliable** topics, so producers must call `.with_reliable_dispatch()` — otherwise the broker rejects `producer.create()` with `FailedPrecondition` (`Producer requested dispatch strategy does not match topic strategy`). For `realtime` topics (`NonReliable`), omit `.with_reliable_dispatch()`.
-:::
+`send_with_key()` keeps all messages for one key (an order, a user, a device) in order and on the same consumer of a Key-Shared subscription:
 
----
+```rust
+producer.send_with_key(data, None, &format!("order-{order_id}")).await?;
+```
 
-## Reliable Dispatch
+The [Key-Shared guide](/client-libraries/key-shared/) covers the consumer side and key filters in every language.
 
-Reliable dispatch persists messages before acknowledging sends. Use it for critical events that must not be lost.
+### Attach a schema
 
-<Tabs>
-<TabItem label="Rust">
+Link the producer to a registered schema subject and the broker can validate every message:
 
-```rust title="Reliable producer"
+```rust
 let mut producer = client
     .new_producer()
-    .with_topic("/default/critical-events")
-    .with_name("reliable-producer")
-    .with_reliable_dispatch()
+    .with_topic("/default/user-events")
+    .with_name("events-producer")
+    .with_schema_subject("user-events")
     .build()?;
-
-producer.create().await?;
 ```
 
-</TabItem>
-<TabItem label="Go">
+Registration, version pinning and validation policies are in the [Schema Registry guide](/client-libraries/schema-registry/).
 
-```go title="Reliable producer"
-reliableStrategy := danube.NewReliableDispatchStrategy()
+### Tune retries (Rust)
 
-producer, err := client.NewProducer().
-    WithName("reliable-producer").
-    WithTopic("/default/critical-events").
-    WithDispatchStrategy(reliableStrategy).
-    Build()
+`create()` and `send()` retry transient failures with exponential backoff. When `send()` runs out of retries, the client looks up the topic owner again and recreates the producer, which handles topics moving between brokers.
 
-producer.Create(ctx)
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="Reliable producer"
-Producer producer = client.newProducer()
-        .withTopic("/default/critical-events")
-        .withName("reliable-producer")
-        .withDispatchStrategy(DispatchStrategy.RELIABLE)
-        .build();
-
-producer.create();
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Reliable producer"
-from danube import DispatchStrategy
-
-producer = (
-    client.new_producer()
-    .with_topic("/default/critical-events")
-    .with_name("reliable-producer")
-    .with_dispatch_strategy(DispatchStrategy.RELIABLE)
-    .build()
-)
-
-await producer.create()
-```
-
-</TabItem>
-</Tabs>
-
-See [Dispatch Strategies](/concepts/dispatch-strategies/) for details on reliable vs. non-reliable delivery.
-
----
-
-## Schema Integration
-
-Link producers to a schema subject for type-safe messaging:
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Schema-linked producer"
-let mut producer = client
-    .new_producer()
-    .with_topic("/default/events")
-    .with_name("schema-producer")
-    .with_schema_subject("event-schema")
-    .build()?;
-
-producer.create().await?;
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go title="Schema-linked producer"
-producer, err := client.NewProducer().
-    WithTopic("/default/events").
-    WithName("schema-producer").
-    WithSchemaSubject("event-schema").
-    Build()
-
-producer.Create(ctx)
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java title="Schema-linked producer"
-Producer producer = client.newProducer()
-        .withTopic("/default/events")
-        .withName("schema-producer")
-        .withSchemaLatest("event-schema")
-        .build();
-
-producer.create();
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python title="Schema-linked producer"
-producer = (
-    client.new_producer()
-    .with_topic("/default/events")
-    .with_name("schema-producer")
-    .with_schema_subject("event-schema")
-    .build()
-)
-
-await producer.create()
-```
-
-</TabItem>
-</Tabs>
-
-For schema registration and versioning, see the [Schema Registry guide](/client-libraries/schema-registry/).
-
----
-
-## Topic Naming
-
-Topics follow a namespace structure (and optionally multi-segment paths within a namespace):
-
-```text
-/{namespace}/{topic-name}
-```
-
-Examples:
-
-- `/default/orders`: orders in the default namespace
-- `/production/user-events`: user events in a production namespace
-- `/agents/team-a/tasks`: hierarchical topic inside the `agents` namespace
-
----
-
-## Retry Configuration (`ProducerOptions`)
-
-Configure automatic retry and exponential backoff behavior for transient `create()` and `send()` failures in Rust via `ProducerOptions`:
-
-```rust title="Configure producer retries and backoff"
+```rust title="Producer retries and backoff"
 use danube_client::ProducerOptions;
 
 let options = ProducerOptions::new(
@@ -457,22 +382,17 @@ let mut producer = client
     .with_reliable_dispatch()
     .with_options(options)
     .build()?;
-
-producer.create().await?;
 ```
 
----
+### Send a request and wait for the reply (Rust)
 
-## Correlated Request-Reply (`request_reply`)
+`DanubeClient::request_reply` handles RPC over topics: it stamps the request with `x-danube-correlation-id` and `x-danube-reply-to`, listens on the reply topic and returns the matching reply or a timeout error.
 
-For synchronous RPC patterns (such as agent tool invocation), `DanubeClient::request_reply` publishes a request stamped with `x-danube-correlation-id` and `x-danube-reply-to`, subscribes to the reply topic, and waits up to `timeout` for the matching correlated reply:
-
-```rust title="Send a correlated request and await reply"
+```rust title="Correlated request-reply"
 use std::collections::HashMap;
 use std::time::Duration;
 
-let mut attrs = HashMap::new();
-attrs.insert("tool".to_string(), "sql_query".to_string());
+let attrs = HashMap::from([("tool".to_string(), "sql_query".to_string())]);
 
 let reply = client
     .request_reply(
@@ -484,7 +404,23 @@ let reply = client
     )
     .await?;
 
-println!("Reply payload: {}", String::from_utf8_lossy(&reply.payload));
+println!("reply: {}", String::from_utf8_lossy(&reply.payload));
 ```
 
-See [Danube for AI Agents](/ai-agents/overview/) for full responder/requester examples and system attributes.
+The reply topic is a non-reliable topic, created on demand. See [Danube for AI Agents](/ai-agents/overview/) for the responder side.
+
+## Topic names
+
+Topics are `/{namespace}/{topic}`. The topic part may contain more `/` segments and dots.
+
+- `/default/orders`: `orders` in the `default` namespace.
+- `/production/user-events.v2`: dots are kept as part of the name.
+- `/agents/team-a/tasks`: namespace `agents`, topic `team-a/tasks`.
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Consumer guide" href="/client-libraries/consumer/" description="Receive, acknowledge and retry messages." />
+  <LinkCard title="Key-Shared subscriptions" href="/client-libraries/key-shared/" description="Per-key ordering with many consumers." />
+  <LinkCard title="Stream intents" href="/concepts/stream-intents/" description="Pick delivery and durability with one flag." />
+</CardGrid>

@@ -1,212 +1,173 @@
 ---
 title: Securing a Cluster
-description: Step-by-step guide to deploying a TLS + JWT + RBAC secured Danube cluster without YAML config files.
+description: From first boot to least-privilege service accounts. Turn on TLS, save an admin context, create roles and bindings, issue tokens, test them and revoke one.
 ---
 
-import { Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-This guide walks through standing up an encrypted, authenticated Danube cluster with zero YAML config files, configuring your operator CLI, creating least-privilege RBAC policies, verifying denial/allow enforcement, and revoking credentials.
-
----
-
-## 1. Start the Secured Cluster
-
-Choose **`auto-tls`** for zero-config PKI with Raft-synced cluster CA and automatic `bootstrap-admin` provisioning, or **`tls`** if you supply your own certificates.
-
-<Tabs>
-  <TabItem label="Path A: Zero-Config auto-tls Cluster">
-Set the same `DANUBE_CLUSTER_SECRET` across every node so joining brokers can decrypt the Raft-synced Cluster CA and mint certificates signed by it:
-
-```bash title="Terminal 1: Seed node (broker 1)"
-export DANUBE_CLUSTER_SECRET="prod-cluster-shared-secret-change-me"
-
-danube up --mode cluster \
-  --data-dir ./node1-data \
-  --broker-addr 127.0.0.1:6650 \
-  --raft-addr 127.0.0.1:7650 \
-  --auth-mode auto-tls
-```
-
-Wait until node 1 elects itself Raft leader and prints `bootstrap_admin.token` path, then start nodes 2 and 3 pointing `--seed-nodes` at node 1:
-
-```bash title="Terminal 2: Joining node (broker 2)"
-export DANUBE_CLUSTER_SECRET="prod-cluster-shared-secret-change-me"
-
-danube up --mode cluster \
-  --data-dir ./node2-data \
-  --broker-addr 127.0.0.1:6660 \
-  --raft-addr 127.0.0.1:7660 \
-  --prom-exporter 127.0.0.1:9050 \
-  --seed-nodes 127.0.0.1:6650 \
-  --auth-mode auto-tls
-```
-
-```bash title="Terminal 3: Joining node (broker 3)"
-export DANUBE_CLUSTER_SECRET="prod-cluster-shared-secret-change-me"
-
-danube up --mode cluster \
-  --data-dir ./node3-data \
-  --broker-addr 127.0.0.1:6670 \
-  --raft-addr 127.0.0.1:7670 \
-  --prom-exporter 127.0.0.1:9060 \
-  --seed-nodes 127.0.0.1:6650 \
-  --auth-mode auto-tls
-```
-  </TabItem>
-  <TabItem label="Path B: Custom PKI (--auth-mode tls)">
-Pass your CA, server/client cert & key, HMAC JWT secret, and bootstrap `--super-admins` directly on `danube up`:
-
-```bash
-# 1. Generate a bootstrap super-admin JWT offline first
-export JWT_SECRET="replace-with-32-plus-char-random-secret"
-danube ctl security tokens create \
-  --subject platform-admin \
-  --type user \
-  --ttl 8760h \
-  --secret-key "$JWT_SECRET" > ./bootstrap_admin.token
-
-# 2. Boot each broker with --auth-mode tls
-danube up --mode cluster \
-  --data-dir ./node1-data \
-  --broker-addr 127.0.0.1:6650 \
-  --raft-addr 127.0.0.1:7650 \
-  --auth-mode tls \
-  --tls-cert /etc/danube/tls/server-cert.pem \
-  --tls-key /etc/danube/tls/server-key.pem \
-  --ca-cert /etc/danube/tls/ca-cert.pem \
-  --jwt-secret "$JWT_SECRET" \
-  --super-admins "platform-admin"
-```
-  </TabItem>
-</Tabs>
-
----
-
-## 2. Configure Your Admin CLI Environment
-
-Point `danube ctl` at the multiplexed TLS endpoint (`6650`) using the CA certificate and bootstrap token:
-
-```bash
-# For auto-tls (seed node generated CA & bootstrap token under ./node1-data):
-export DANUBE_ADMIN_ENDPOINT=https://127.0.0.1:6650
-export DANUBE_ADMIN_TLS=true
-export DANUBE_ADMIN_CA=./node1-data/tls/ca.pem
-export DANUBE_ADMIN_DOMAIN=localhost
-export DANUBE_ADMIN_TOKEN="$(cat ./node1-data/bootstrap_admin.token)"
-
-# Verify cluster health and Raft quorum
-danube ctl cluster status
-danube ctl brokers list
-```
-
----
-
-## 3. Create Namespaces, Roles & Bindings
+In about ten minutes you will have an encrypted, authenticated Danube node where a checkout service can only write orders and a ledger service can only read them. Every step is a copy-pasteable command, and the last one shows how to cut off a leaked token.
 
 <Steps>
-1. **Create an application namespace and topic**:
+
+1. ## Start a secured node
+
+   <Tabs>
+   <TabItem label="auto-tls (quickest)">
+
    ```bash
-   danube ctl namespaces create payments
-   danube ctl topics create /payments/orders --intent audit_log
+   danube up standalone --data-dir ./danube-data --auth auto-tls
    ```
 
-2. **Define least-privilege RBAC roles**:
-   ```bash
-   # Application writer & reader roles
-   danube ctl security roles create order-writer --permissions Lookup,Produce
-   danube ctl security roles create order-reader --permissions Lookup,Consume
+   Danube writes a CA, a node certificate, a JWT secret and a `bootstrap-admin` token into `./danube-data`. See [TLS and certificates](/security/tls/) for the file list.
 
-   # Operator role with topic admin + payload peek access
-   danube ctl security roles create payment-ops \
-     --permissions ManageTopic,ReadPayload,ManageSchema
+   </TabItem>
+   <TabItem label="Your own certificates">
+
+   ```bash
+   # A first admin token, made offline with the same secret the broker uses
+   export DANUBE_JWT_SECRET="replace-with-a-32-plus-character-random-secret"
+   danube auth token create --subject platform-admin --type user --ttl 8760h > ./admin.token
+
+   danube up standalone \
+     --data-dir ./danube-data \
+     --auth tls \
+     --tls-cert /etc/danube/tls/server-cert.pem \
+     --tls-key /etc/danube/tls/server-key.pem \
+     --ca-cert /etc/danube/tls/ca-cert.pem \
+     --super-admin platform-admin
    ```
 
-3. **Bind principals to scoped resources**:
+   `danube up` reads the JWT secret from `DANUBE_JWT_SECRET`. In the next steps, use `/etc/danube/tls/ca-cert.pem` and `./admin.token` instead of the auto-tls files.
+
+   </TabItem>
+   <TabItem label="Three-node cluster">
+
+   Use the same flags on every node with `danube up cluster`, plus membership:
+
    ```bash
-   danube ctl security bindings create checkout-writer-binding \
+   danube up cluster \
+     --data-dir /var/lib/danube \
+     --listen 0.0.0.0:6650 \
+     --advertised-addr broker1.internal:6650 \
+     --seed-nodes broker1.internal:7650,broker2.internal:7650,broker3.internal:7650 \
+     --auth tls \
+     --tls-cert /etc/danube/tls/server-cert.pem \
+     --tls-key /etc/danube/tls/server-key.pem \
+     --ca-cert /etc/danube/tls/ca-cert.pem \
+     --super-admin platform-admin
+   ```
+
+   Every node needs the same `DANUBE_JWT_SECRET`. Add `--tls-domain broker1.internal` to client commands.
+
+   </TabItem>
+   </Tabs>
+
+2. ## Save an admin context
+
+   Store the endpoint, CA and admin token once, so you do not repeat them on every command:
+
+   ```bash
+   danube context add secure-admin \
+     --endpoint https://127.0.0.1:6650 \
+     --tls-ca ./danube-data/tls/ca.pem \
+     --token "$(cat ./danube-data/bootstrap_admin.token)" \
+     --use
+
+   # Should print the node's status over TLS
+   danube cluster status
+   ```
+
+   Contexts live in `~/.config/danube/contexts.toml` with `0600` permissions.
+
+3. ## Create a namespace and a topic
+
+   ```bash
+   danube namespace create payments
+   danube topic create /payments/orders --intent audit_log
+   ```
+
+4. ## Define least-privilege roles
+
+   ```bash
+   danube auth role create order-writer --permissions Lookup,Produce
+   danube auth role create order-reader --permissions Lookup,Consume
+   ```
+
+5. ## Bind the roles to service accounts
+
+   ```bash
+   # checkout-svc may only write /payments/orders
+   danube auth binding create checkout-writer \
      --principal-type service_account \
      --principal-name checkout-svc \
      --roles order-writer \
      --scope topic \
      --resource /payments/orders
 
-   danube ctl security bindings create ledger-reader-binding \
+   # ledger-svc may read
+   danube auth binding create ledger-reader \
      --principal-type service_account \
      --principal-name ledger-svc \
      --roles order-reader \
-     --scope namespace \
-     --resource payments
+     --scope cluster
    ```
+
+   <Aside type="caution">
+   The reader is bound at cluster scope because receiving messages currently checks `Consume` at cluster scope. See [Authorization](/security/authorization/#permissions).
+   </Aside>
+
+6. ## Issue tokens for the services
+
+   `issue` prints only the token, so capture it straight into a variable:
+
+   ```bash
+   CHECKOUT_TOKEN="$(danube auth token issue --subject checkout-svc --ttl 168h)"
+   LEDGER_TOKEN="$(danube auth token issue --subject ledger-svc --ttl 168h)"
+   ```
+
+7. ## Check that access works, and is denied
+
+   The connection flags below override the saved context. Start the consumer first: a new subscription starts at the end of a reliable topic.
+
+   ```bash
+   # Terminal 1, allowed: ledger-svc reads
+   danube consume /payments/orders -s ledger-worker \
+     --endpoint https://127.0.0.1:6650 --tls-ca ./danube-data/tls/ca.pem --token "$LEDGER_TOKEN"
+   ```
+
+   ```bash
+   # Terminal 2, allowed: checkout-svc writes
+   danube produce /payments/orders -r -m '{"order_id":"ord-1","amount":125.00}' \
+     --endpoint https://127.0.0.1:6650 --tls-ca ./danube-data/tls/ca.pem --token "$CHECKOUT_TOKEN"
+
+   # Denied with PERMISSION_DENIED: checkout-svc has no Consume
+   danube consume /payments/orders -s sneaky \
+     --endpoint https://127.0.0.1:6650 --tls-ca ./danube-data/tls/ca.pem --token "$CHECKOUT_TOKEN"
+   ```
+
+   Neither service can run `danube topic peek /payments/orders`: that needs `ReadPayload`.
+
+8. ## Revoke a leaked token
+
+   ```bash
+   danube auth token revoke --subject checkout-svc
+   ```
+
+   Every broker rejects `checkout-svc` from its next request on, even with a cached token, and no restart is needed. Revocation applies to the subject, so issue the replacement under a new name such as `checkout-svc-v2` and bind it again.
+
 </Steps>
 
----
+## Before you go to production
 
-## 4. Issue Service Account Tokens & Verify Enforcement
+- **Guard the secrets**: keep `DANUBE_CLUSTER_SECRET`, `DANUBE_JWT_SECRET`, `ca-key.pem` and `key.pem` in a secrets manager or `0600` files.
+- **Retire the bootstrap token**: create named admins with a `cluster-admin` role, then store `bootstrap_admin.token` offline. Lockout protection keeps at least one admin alive.
+- **Protect the console**: run `danube console` with `--require-auth` and `--http-token`, or behind an authenticating proxy. See [Security overview](/security/overview/#protect-the-web-console).
+- **Keep recovery files safe**: `danube cluster export-config` output includes the JWT secret. See [Crash recovery](/durability/crash-recovery/#break-glass-recover-a-broken-cluster).
 
-Issue dedicated short- or medium-lived tokens using the online `tokens issue` command:
+## Next steps
 
-```bash
-danube ctl security tokens issue --subject checkout-svc --type service_account --ttl 168h
-danube ctl security tokens issue --subject ledger-svc --type service_account --ttl 168h
-```
-
-Export the issued JWTs in your test shell:
-
-```bash
-export CHECKOUT_TOKEN="<checkout-svc-jwt>"
-export LEDGER_TOKEN="<ledger-svc-jwt>"
-```
-
-Test both authorized and unauthorized paths using `danube ctl produce` / `consume`:
-
-```bash
-# Authorized: checkout-svc produces to /payments/orders
-danube ctl produce \
-  --service-addr https://127.0.0.1:6650 \
-  --tls --ca ./node1-data/tls/ca.pem \
-  --token "$CHECKOUT_TOKEN" \
-  --topic /payments/orders \
-  --message '{"order_id":"ord-1","amount":125.00}'
-
-# Authorized: ledger-svc consumes from /payments/orders
-danube ctl consume \
-  --service-addr https://127.0.0.1:6650 \
-  --tls --ca ./node1-data/tls/ca.pem \
-  --token "$LEDGER_TOKEN" \
-  --topic /payments/orders \
-  --subscription ledger-worker \
-  --limit 1
-
-# Denied: checkout-svc does NOT have Consume permission
-danube ctl consume \
-  --service-addr https://127.0.0.1:6650 \
-  --tls --ca ./node1-data/tls/ca.pem \
-  --token "$CHECKOUT_TOKEN" \
-  --topic /payments/orders \
-  --subscription unauthorized-test
-```
-
-Similarly, a principal without `ReadPayload` cannot run `danube ctl topics peek /payments/orders`.
-
----
-
-## 5. Rotate & Revoke Credentials
-
-If a service token leaks or a service is retired, revoke the subject cluster-wide immediately (no broker restart needed):
-
-```bash
-danube ctl security tokens revoke --subject checkout-svc
-```
-
-Any subsequent request presenting a token for `checkout-svc` (even within the 30-second JWT validation cache window) is rejected with `Unauthenticated ("Token subject has been revoked")`.
-
----
-
-## 6. Operational Checklist
-
-<Aside type="tip">
-Before going to production:
-* Store `DANUBE_CLUSTER_SECRET` and private keys (`ca-key.pem`, `key.pem`) in a secrets manager or restricted `0600` files.
-* Move day-to-day administration off `bootstrap-admin` onto named user accounts bound to cluster-admin roles, while retaining at least one active admin binding so last-admin lockout protection never blocks rotation.
-* When exposing `danube ctl serve --mode ui`, protect `/ui/v1/*` and `/mcp` with `DANUBE_HTTP_TOKEN` and `DANUBE_HTTP_REQUIRE_AUTH=true`, or place it behind an authenticating reverse proxy.
-</Aside>
+<CardGrid>
+  <LinkCard title="Authorization" href="/security/authorization/" description="All permissions, scopes and binding commands." />
+  <LinkCard title="Authentication" href="/security/authentication/" description="Token types, TTLs and offline signing." />
+  <LinkCard title="Client setup" href="/client-libraries/setup/" description="Connect your apps with TLS and a token." />
+</CardGrid>

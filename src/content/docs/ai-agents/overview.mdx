@@ -1,181 +1,114 @@
 ---
 title: Danube for AI Agents
-description: Purpose-built messaging primitives, workload intents, time-travel branching, and an AI-native MCP control plane for multi-agent systems.
+description: Why Danube fits agent systems. Intents, task queues with DLQs, audit logs, replay, request/reply and a built-in MCP server.
 ---
 
-import { Tabs, TabItem, Card, CardGrid, Aside } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
 
-Danube v2 is designed from the ground up as a messaging, queuing, and coordination backbone for autonomous AI agents and multi-agent workflows. Rather than retrofitting an enterprise broker with external scripts, Danube embeds agentic runtime primitives, workload-driven durability, zero-copy time-travel debugging, and a 71-tool Model Context Protocol (MCP) control plane directly into the single `danube` binary.
+Agents stream tokens, hand off long tool calls, retry flaky steps and need a record of what they did. Danube gives each of those jobs the right delivery guarantees with one flag, and lets your agents operate the cluster through MCP.
 
----
-
-## Why AI Agents Need a Purpose-Built Messaging Backbone
-
-Conventional pub/sub systems and queues fail in distinct ways when orchestrating LLM pipelines and tool-calling agents:
-
-- **Long-running tool calls vs. sub-millisecond token streaming**: Streaming LLM tokens to a UI should run purely in memory with zero disk I/O overhead, while an agent executing a 10-minute code-sandbox or browser task needs durable persistence and adaptive visibility timeouts so the broker does not falsely redeliver in-flight work.
-- **Poison tasks & cascading failures**: Malformed tool arguments or non-deterministic model outputs can crash workers in tight retry loops, blocking healthy tasks or silently dropping work unless backed by per-workload retry limits and dead-letter queues (DLQs).
-- **Schema drift across autonomous producers**: Agent payloads evolve rapidly across prompt iterations and model upgrades. Operators need live schema inference from topic samples before locking down strict Schema Registry contracts.
-- **Counterfactual replay & incident reproduction**: Debugging why a multi-step agent hallucinated or stalled requires inspecting in-flight offsets, seeking backward, or branching a topic at an exact timestamp—without duplicating terabytes of storage or disrupting live consumers.
-
----
-
-## Mapping Agent Topologies to Workload Intents
-
-Instead of hand-tuning WAL sync modes, dispatch strategies, and retry backoffs per topic, Danube provides four **canonical Workload Intents** (`--intent`). Each intent expands server-side into cohesive durability, retry, and poison-message policies:
-
-| Canonical Intent | Aliases | Dispatch & WAL Sync | Retries & Backoff | Poison Policy | Ideal Agent Workload |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `realtime` | `telemetry_firehose`, `firehose`, `telemetry`, `ephemeral` | `NonReliable` (in-memory, zero disk I/O) | `0` retries | Drop on disconnect | Token streaming, agent heartbeats, UI progress fanout |
-| `event_stream` | `agent_event_mesh`, `event_mesh`, `events`, `lakehouse_feed`, `lakehouse`, `custom` | `Reliable`, `os_cache_flush` | `3` retries, `500ms` exponential backoff | `dead_letter` (`<topic>-dlq`) | Multi-agent event meshes, observation streams, Iceberg feeds |
-| `task_queue` | `agent_task_queue`, `tasks`, `work_queue` | `Reliable`, `fsync_batch` | `5` retries, `1000ms` exponential backoff | `dead_letter` (`<topic>-dlq`) | Delegated agent tasks, tool execution queues, background jobs |
-| `audit_log` | `tool_invocation_log`, `tool_log`, `audit`, `state_log` | `Reliable`, `fsync_batch` | `10` retries, `500ms` exponential backoff | `block` (no DLQ) | Tool invocation ledgers, state journals, compliance audit logs |
-
-Provision agent topics declaratively or from the CLI with a single flag:
+## Set up an agent backbone
 
 ```bash
-# Ephemeral token stream (zero disk I/O)
-danube ctl topics create /agents/tokens --intent realtime
+danube namespace create agents
 
-# Durable task queue with 5 retries -> /agents/tasks-dlq
-danube ctl topics create /agents/tasks --intent task_queue --partitions 4
-
-# Strict tool invocation audit log (blocks on poison message rather than skipping)
-danube ctl topics create /agents/tool-audit --intent audit_log
+danube topic create /agents/tokens    --intent realtime      # UI token stream, in memory
+danube topic create /agents/events    --intent event_stream  # observations between agents
+danube topic create /agents/tasks     --intent task_queue    # tool calls, retries + DLQ
+danube topic create /agents/tool-log  --intent audit_log     # strict, ordered tool ledger
 ```
 
-Learn how intents expand internally in [Stream Intents](/concepts/stream-intents/).
+Four topics, four very different guarantees, zero tuning. See [Stream intents](/concepts/stream-intents/) for what each intent sets.
 
----
+## What agents get
 
-## Agent Runtime Primitives
+<CardGrid>
+	<Card title="Task queues with a safety net" icon="approve-check">
+		`task_queue` topics are durable, retry 5 times with backoff, then park poison tasks in `<topic>-dlq`. Fix the bug, then replay them.
+	</Card>
+	<Card title="Audit logs that never skip" icon="document">
+		`audit_log` topics fsync in batches and block on a bad message instead of dropping it. Good for tool-call ledgers and compliance.
+	</Card>
+	<Card title="Branch and replay" icon="random">
+		Fork a topic at an offset or timestamp without copying data. Test a new prompt against yesterday's real inputs.
+	</Card>
+	<Card title="Agents run the cluster" icon="star">
+		`danube mcp` exposes admin tools, guided prompts and a metrics catalog to Claude Code, Cursor, Antigravity or any MCP client.
+	</Card>
+</CardGrid>
 
-The Danube Rust client (`danube-client`) exposes first-class agentic coordination methods on `Consumer` and `DanubeClient`, backed by standardized message attributes in `danube_core::message`:
+## Long tasks, leases and request/reply
 
-### Standardized Metadata Attributes
+The Rust client (`danube-client`) has primitives for agent workloads:
 
-| Constant (`danube_core::message`) | Header Key | Helper on `StreamMessage` | Purpose |
-| :--- | :--- | :--- | :--- |
-| `ATTR_CORRELATION_ID` | `x-danube-correlation-id` | `correlation_id()` | Matches replies to outstanding RPC requests |
-| `ATTR_REPLY_TO` | `x-danube-reply-to` | `reply_to()` | Target topic where a responder sends its reply |
-| `ATTR_PARENT_MSG_ID` | `x-danube-parent-msg-id` | `parent_msg_id()` | Immediate parent message ID in a task graph |
-| `ATTR_ROOT_MSG_ID` | `x-danube-root-msg-id` | `root_msg_id()` | Root ancestor ID for tree-wide cancellation |
-| `ATTR_DEADLINE_MS` | `x-danube-deadline-ms` | `deadline_ms()` | Epoch deadline (ms) for lease/visibility expiration |
-| `ATTR_CHECKPOINT_B64` | `x-danube-checkpoint-b64` | `checkpoint_b64()` | Base64-encoded worker checkpoint on redelivery |
-| `ATTR_COMPUTE_COST_UNITS` | `x-danube-compute-cost-units` | `attributes` lookup | Accounts compute/token cost metadata per message |
+- **`extend_lease`**: keep a long tool call from being redelivered while it is still running.
+- **`report_progress`**: save a checkpoint (up to 64 KiB) so the next worker resumes after a crash.
+- **`cancel_task_tree`**: cancel every queued subtask under one root message.
+- **`request_reply`**: send a request and wait for the correlated reply on a reply topic.
 
-### SDK Primitives
+```rust
+// Keep a long-running tool call alive and checkpoint it
+consumer.extend_lease(&msg, 30_000).await?;
+consumer.report_progress(&msg, br#"{"step":3}"#.to_vec(), 30_000).await?;
 
-<Tabs>
-  <TabItem label="Lease Extension & Checkpoints">
-    Long-running workers renew visibility leases mid-execution and attach resumable checkpoints (up to 64 KiB). If a worker crashes and another consumer receives the redelivered message, `message.checkpoint_b64()` exposes the last persisted checkpoint.
+// Agent-to-tool RPC with a 10s timeout
+let reply = client
+    .request_reply("/agents/rpc", "/agents/rpc-replies", payload, None, Duration::from_secs(10))
+    .await?;
+```
 
-    ```rust
-    // Extend visibility timeout during a long tool execution
-    let ext = consumer.extend_lease(&msg, 30_000).await?;
-    println!("Lease extended={}; new deadline={}ms", ext.success, ext.new_deadline_ms);
+More in [Consumer](/client-libraries/consumer/).
 
-    // Save a resumable step checkpoint (<= 64 KiB) while extending the lease
-    let checkpoint = br#"{"step":3,"cursor":"page_42"}"#.to_vec();
-    let prog = consumer.report_progress(&msg, checkpoint, 30_000).await?;
-    assert!(prog.accepted);
-
-    // On redelivery after failure, recover from the prior checkpoint
-    if let Some(b64) = msg.checkpoint_b64() {
-        println!("Resuming from checkpoint: {}", b64);
-    }
-    ```
-  </TabItem>
-  <TabItem label="Hierarchical Task Cancellation">
-    Subtasks linked via `x-danube-root-msg-id` (or `StreamMessage::with_root_msg_id(...)`) can be aborted across a topic tree in one call when an orchestrator times out or the user cancels a run.
-
-    ```rust
-    let cancel_res = consumer
-        .cancel_task_tree(
-            "/agents/subtasks",
-            &root_msg_id,
-            Some("parent agent run aborted".to_string()),
-        )
-        .await?;
-
-    println!("Cancelled {} pending subtasks", cancel_res.cancelled);
-    ```
-  </TabItem>
-  <TabItem label="Request-Reply RPC">
-    `DanubeClient::request_reply` automates synchronous agent-to-tool RPC by stamping `x-danube-correlation-id` and `x-danube-reply-to` and waiting up to `timeout` for the correlated response on `reply_topic`.
-
-    ```rust
-    use std::time::Duration;
-
-    let reply = client
-        .request_reply(
-            "/agents/planner-rpc",
-            "/agents/planner-replies",
-            br#"{"tool":"sql_query","args":{"limit":10}}"#.to_vec(),
-            None,
-            Duration::from_secs(10),
-        )
-        .await?;
-
-    println!("Correlated reply: {:?}", String::from_utf8_lossy(&reply.payload));
-    ```
-  </TabItem>
-</Tabs>
-
----
-
-## Time-Travel, Counterfactual Replay & Zero-Copy Branching
-
-Danube includes non-destructive inspection and branching tools directly in `danube ctl topics` so engineers and debugging agents can safely examine history and test alternative prompts:
-
-- **Zero-Copy Topic Branching**: Fork a new topic up to a specific offset or nanosecond timestamp without copying underlying storage segments, allowing a new agent version to replay historical inputs in isolation:
-  ```bash
-  danube ctl topics branch /agents/tasks /agents/tasks-experiment-v2 --at-offset 1500
-  danube ctl topics branch /agents/tasks /agents/tasks-before-incident --at-timestamp-ns 1731600000000000000
-  ```
-- **Subscription Time-Travel (`seek`)**: Rewind a consumer group's cursor to a past offset or timestamp for full replay:
-  ```bash
-  danube ctl topics seek /agents/events --subscription eval-worker --to-offset 0
-  danube ctl topics seek /agents/events --subscription eval-worker --to-timestamp-ns 1731600000000000000
-  ```
-- **Dead-Letter Queue Replay (`replay-dlq`)**: Once a broken tool handler or prompt is fixed, re-drive failed tasks from the DLQ back into the primary topic:
-  ```bash
-  danube ctl topics replay-dlq /agents/tasks --subscription task-workers --max-messages 50
-  ```
-- **Non-Destructive Peek & Schema Inference**: Sample messages without moving any subscription cursor, or infer a JSON Schema from live traffic to catch schema drift:
-  ```bash
-  danube ctl topics peek /agents/tasks --start-offset 0 --count 10
-  danube ctl topics infer-schema /agents/tasks --sample-size 100
-  ```
-
----
-
-## AI Control Plane (`danube mcp`)
-
-Danube ships a built-in **Model Context Protocol (MCP)** server with **71 tools** so coding assistants and autonomous ops agents (Claude Code, Cursor, Antigravity, Codex) can inspect, diagnose, and manage clusters natively:
-
-- **Built-in Telemetry & Log Ring Buffers (Zero External Dependencies)**: Every broker maintains an in-memory **telemetry ring buffer** (`GetMetricsSnapshot`: 360 samples at 10-second intervals, covering 1 full hour) and a **structured log ring buffer** (`GetBrokerLogs`: up to 5,000 recent log entries per broker) served directly over gRPC on port `6650`. AI agents can investigate consumer lag, throughput drops, and errors without running Prometheus or Docker log collectors.
-- **Guided Diagnostic Workflows**: Built-in MCP prompts—including **`explain_consumer_stall`**—walk an AI agent step by step through broker health, subscription cursors, unacked message backlogs, and DLQ growth.
-- **Declarative GitOps & Safety Guardrails**: Tools such as `apply_desired_state` support `dry_run` previews before applying Raft configuration changes, while destructive mutations enforce explicit `confirm_destructive` confirmation flags so agents never accidentally delete topics or namespaces unprompted.
-
-Start the MCP server over stdio or HTTP:
+## Debug with replay
 
 ```bash
-# Stdio MCP server for local IDE / agent clients
-danube mcp --broker-endpoint http://127.0.0.1:6650
+# Fork the task stream up to offset 1500 and replay it in isolation
+danube topic branch /agents/tasks /agents/tasks-exp --at-offset 1500
 
-# Combined HTTP Admin UI + Streamable HTTP MCP endpoint (http://127.0.0.1:8080/mcp)
-danube ctl serve --mode all --listen-addr 0.0.0.0:8080 --broker-endpoint http://127.0.0.1:6650
+# Rewind a subscription to the start
+danube topic subscription seek /agents/events --subscription eval --to-offset 0
+
+# Look at messages without moving any cursor
+danube topic peek /agents/tasks --count 10
+
+# Re-drive failed tasks from the DLQ after a fix
+danube topic dlq replay /agents/tasks --subscription workers --max-messages 50
+
+# Infer a JSON Schema from live traffic
+danube topic schema infer /agents/events --sample-size 100
+```
+
+## Connect your agent with MCP
+
+`danube mcp` speaks MCP over stdio, which is what IDEs expect. Point it at any broker:
+
+```bash
+danube mcp                                    # stdio, broker at http://127.0.0.1:6650
+danube mcp --endpoint http://broker:6650      # a remote broker
+danube mcp --http 0.0.0.0:8080                # streamable HTTP at /mcp
+```
+
+Add it to your IDE or agent config:
+
+```json
+{
+  "mcpServers": {
+    "danube": {
+      "command": "danube",
+      "args": ["mcp", "--endpoint", "http://127.0.0.1:6650"]
+    }
+  }
+}
 ```
 
 <Aside type="tip">
-  Looking to wire MCP and Danube agent skills into your coding assistant? See the [MCP Server Guide](/admin/mcp/) and [AI Agent Setup & Testing](/getting-started/ai-agent-testing/).
+  Secured cluster? Add `--token`, `--tls-ca` and friends to `args`, or reuse a saved profile with `--context prod`. Destructive MCP tools require explicit confirmation and rebalancing tools support dry runs.
 </Aside>
 
----
+## Next steps
 
-## Next Steps
-
-- [Stream Intents](/concepts/stream-intents/) — Deep dive into intent expansion rules and overrides.
-- [Cluster & Topic Configuration Workflow](/getting-started/configuration-workflow/) — Configure clusters cleanly across Raft state, GitOps manifests, and CLI intents.
-- [MCP Server Reference](/admin/mcp/) — Full tool inventory, prompt workflows, and safety controls.
+<CardGrid>
+	<LinkCard title="MCP server" description="Client setup, tools, prompts and safety controls." href="/admin/mcp/" />
+	<LinkCard title="AI agent testing" description="Let your coding assistant set up and test Danube for you." href="/getting-started/ai-agent-testing/" />
+	<LinkCard title="Stream intents" description="Exactly what each intent configures." href="/concepts/stream-intents/" />
+</CardGrid>

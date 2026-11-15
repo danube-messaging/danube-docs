@@ -1,163 +1,152 @@
 ---
 title: Architecture Overview
-description: System architecture of Danube Messaging, covering brokers, Raft consensus, storage, and dispatch strategies.
+description: How Danube is built - brokers, embedded Raft metadata, tiered storage, dispatch modes and topic ownership.
 ---
 
-import { FileTree, LinkCard, CardGrid, Card } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Aside, FileTree } from '@astrojs/starlight/components';
 
-Danube is a distributed streaming / pub-sub messaging system built in Rust. It is designed for high throughput, low latency, and operational simplicity. This page describes the major components and the technical decisions behind them.
+Danube is a distributed pub/sub and streaming system written in Rust, shipped as one `danube` binary. Brokers coordinate through embedded Raft, so there is no ZooKeeper, etcd or external database to run. This page maps the moving parts and the design choices behind them.
 
-:::note
-This section is intended for advanced users and Danube contributors who want to understand the system internals. For usage documentation, see [Getting Started](/getting-started/quickstart/) and [Concepts](/concepts/topics/).
-:::
+```bash
+# Every node runs the same binary; the mode decides the shape
+danube up standalone                                  # one node, everything local
+danube up cluster --data-dir /var/lib/danube --seed-nodes n1:7650,n2:7650,n3:7650
+```
 
----
+<Aside type="note">
+This section is for advanced users and contributors. For usage, start with the [Quickstart](/getting-started/quickstart/) and [Concepts](/concepts/topics/).
+</Aside>
 
-## System Components
-
-A running Danube cluster consists of brokers, an embedded Raft consensus layer, and an optional storage layer. There is no external dependency for metadata: brokers manage their own coordination.
-
-### Brokers
-
-Brokers are the central component. Each broker:
-
-- Accepts client connections (producers and consumers) over gRPC on port `6650`
-- Multiplexes both client pub/sub and admin gRPC APIs (`danube ctl`) onto that single `6650` port by default (`--admin-addr` optional if you want a separate listener)
-- Routes messages from producers to matching subscriptions
-- Manages topic ownership and lifecycle
-- Participates in Raft consensus as a voter or learner (port `7650`)
-
-Every broker can serve any role (leader or follower). The leader coordinates metadata writes, but all brokers serve reads from their local state machine replica.
-
-### Metadata Store (Raft)
-
-Danube embeds a Raft consensus group across all brokers using [openraft](https://github.com/databendlabs/openraft) with [redb](https://github.com/cberner/redb) for durable log storage. The replicated state machine stores:
-
-- Broker registration and health state
-- Topic ownership assignments (which broker owns which topic)
-- Live cluster configuration (`/cluster/config/*` for storage, write buffer, WAL, and load manager)
-- Namespace configuration and policies
-- Schema Registry data (subjects, versions, compatibility settings)
-- Load-balancing state and topic metadata
-- Cluster audit log entries (`/cluster/audit/*`)
-
-**Key design decisions:**
-
-- **No external metadata store.** Unlike systems that depend on ZooKeeper or etcd, Danube embeds consensus directly. This eliminates an operational dependency and simplifies deployment.
-- **Writes through Raft.** All metadata mutations (topic creation, schema registration, broker registration) go through the Raft leader for strong consistency.
-- **Reads from local state.** Every broker maintains an in-memory replica of the full state machine. Read operations (topic lookup, schema fetch, broker list) are served locally with zero network hops.
-
-### Storage Layer
-
-The storage layer handles message durability for reliable dispatch. It is not used for non-reliable topics.
-
-**Write-Ahead Log (WAL):** Low-latency append-only log for the hot path. Messages are written to WAL segments on the local broker before acknowledgment.
-
-**Valkey Write Buffer (optional):** When configured, messages are double-written to Valkey Redis Streams for crash recovery. This provides RPO=0 durability without making brokers stateful.
-
-**Durable Segments:** Immutable files created when WAL segments are sealed. Used for historical replay, broker recovery, and topic movement.
-
-**Storage backends** are configurable per deployment:
-
-| Backend | WAL | Write Buffer | Durable Segments | Use Case |
-|---------|-----|-------------|------------------|----------|
-| `local` | Local filesystem | Optional (Valkey) | Local filesystem | Single-node, development |
-| `shared_fs` | Local staging | Optional (Valkey) | Shared filesystem (NFS, EFS) | Multi-node with shared storage |
-| `object_store` | Local staging | Optional (Valkey) | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native deployments |
-
-**Tiered reads:** Consumers read from the local WAL when data is recent. For older data, the broker reads from Valkey (warm cache) and/or durable segments (cold storage) and chains them seamlessly into the WAL tail.
-
-For details, see [Persistence & Storage](/concepts/persistence/) and [Durability & Storage](/durability/overview/).
-
----
-
-## Dispatch Strategies
-
-Danube supports two dispatch strategies per topic, chosen at topic creation time:
-
-### Non-Reliable
-
-Messages flow directly from producers to consumers with no intermediate persistence. This mode offers:
-
-- Zero storage overhead
-- Lowest possible latency
-- At-most-once delivery semantics
-
-Use for real-time metrics, live telemetry, or any workload where occasional message loss is acceptable.
-
-### Reliable
-
-Messages are persisted before acknowledgment. The pipeline is:
-
-1. Producer sends message to the owning broker
-2. Broker appends to local WAL
-3. Broker acknowledges to producer
-4. WAL segment is sealed and flushed to durable storage
-5. Consumers read from WAL (recent) or durable segments (historical)
-
-This mode provides at-least-once delivery with replay capability. Raft-replicated metadata tracks segment descriptors, durable frontiers, and sealed topic state for correct recovery after broker failures.
-
-For details, see [Dispatch Strategies](/concepts/dispatch-strategies/).
-
----
-
-## Topic Ownership and Load Balancing
-
-Each topic is assigned to exactly one broker at a time. The assignment is stored in the Raft metadata. When a client connects to any broker, the broker either serves the topic directly (if it owns it) or redirects the client to the owning broker.
-
-The load manager tracks topic count and activity per broker and computes a Coefficient of Variation (CV) to measure distribution uniformity. Rebalancing can be triggered manually or by the system when the CV exceeds a threshold.
-
-Topic movement between brokers is coordinated: the source broker seals WAL segments, flushes durable storage, and the target broker replays from durable segments to catch up. This ensures no message loss during reassignment.
-
-For operational commands, see [CLI: Cluster & Brokers](/admin/cli-cluster/).
-
----
-
-## Data Layout
-
-<FileTree>
-- danube-data/
-  - raft/
-    - log/ (Raft log entries, redb)
-    - snapshot/ (state machine snapshots)
-  - wal/ (per-topic active `wal.log` and rotated `wal.<seq>.log` files; overridable via `--wal-dir`)
-</FileTree>
-
-When `shared_fs` or `object_store` is configured via `danube ctl cluster storage`, sealed durable segments are exported outside the local node WAL to `{root}/storage/topics/{namespace}/{topic}/segments/`.
-
----
-
-## Deep Dives
+## The big picture
 
 <CardGrid>
-  <LinkCard
-    title="Durability & Tiered Storage"
-    description="How Danube achieves enterprise-grade durability with stateless brokers using Hot/Warm/Cold tiered storage."
-    href="/durability/overview/"
-  />
-  <LinkCard
-    title="Schema Registry Architecture"
-    description="Storage model, Raft replication, caching, and validation layers."
-    href="/architecture/schema-registry/"
-  />
-  <LinkCard
-    title="Load Manager Architecture"
-    description="Topic assignment, broker rankings, automated rebalancing, and safety mechanisms."
-    href="/architecture/load-manager/"
-  />
-  <LinkCard
-    title="Key-Shared Dispatch Architecture"
-    description="Consistent hashing, in-flight tracking, cursor safety, and poison handling."
-    href="/architecture/key-shared/"
-  />
-  <LinkCard
-    title="Reliable Topic Move"
-    description="Offset continuity during broker-to-broker topic handoff."
-    href="/architecture/reliable-topic-move/"
-  />
-  <LinkCard
-    title="Metadata Paths"
-    description="Complete reference of key paths in the Raft state machine."
-    href="/architecture/metadata-paths/"
-  />
+  <Card title="Brokers" icon="rocket">
+    Serve producers and consumers, own topics and route messages.
+  </Card>
+  <Card title="Raft metadata" icon="document">
+    Embedded consensus replicates all cluster state to every broker.
+  </Card>
+  <Card title="Storage" icon="setting">
+    WAL on the hot path, optional Valkey warm buffer, durable segments for history.
+  </Card>
+  <Card title="Load Manager" icon="random">
+    Places topics on brokers and keeps the cluster balanced.
+  </Card>
+</CardGrid>
+
+## Brokers
+
+Brokers are the core component. Each broker:
+
+- Accepts client gRPC connections on `--listen` (default `127.0.0.1:6650`).
+- Serves client pub/sub, the Schema Registry and the admin gRPC API on that same port, unless you split admin out with `--admin-listen`.
+- Routes messages from producers to matching subscriptions.
+- Owns topics and manages their lifecycle.
+- Takes part in Raft as a voter or learner on `--raft-port` (default `7650`).
+
+Any broker can become the Raft leader. The leader coordinates metadata writes, while every broker serves reads from its local replica.
+
+## Metadata store (Raft)
+
+Danube embeds a Raft group across all brokers using [openraft](https://github.com/databendlabs/openraft), with [redb](https://github.com/cberner/redb) for the durable log. The replicated state machine holds:
+
+- Broker registration and health
+- Topic ownership (which broker owns which topic)
+- Live cluster configuration under `/cluster/config/*` (storage, write buffer, WAL, load manager)
+- Namespaces and their policies
+- Schema Registry subjects, versions and compatibility settings
+- Load reports and topic metadata
+- Cluster audit entries under `/cluster/audit/*`
+
+**Why it works this way**
+
+- **No external metadata store**: consensus is built in, which removes an operational dependency.
+- **Writes through Raft**: every mutation (topic creation, schema registration, broker registration) goes through the leader for strong consistency.
+- **Reads from local state**: each broker keeps the full state machine in memory, so topic lookups, schema fetches and broker lists cost zero network hops.
+
+<Aside type="tip">
+Cluster-wide settings live in Raft, not in startup flags. Change them live with `danube cluster ...` or declaratively with `danube apply -f desired_state.yaml`. See [Configuration workflow](/getting-started/configuration-workflow/).
+</Aside>
+
+## Storage layer
+
+Storage only matters for reliable topics; non-reliable topics never touch it.
+
+- **Write-ahead log (WAL)**: low-latency, append-only log on the owning broker. Messages land here before the producer gets an ack.
+- **Valkey write buffer (optional)**: messages are also written to Valkey Redis Streams, giving RPO=0 crash recovery without making brokers stateful.
+- **Durable segments**: immutable files created when WAL segments seal. Used for replay, broker recovery and topic moves.
+
+Pick a storage backend for the cluster with `danube cluster storage`:
+
+<CardGrid>
+  <Card title="local" icon="laptop">
+    WAL and durable segments on the local filesystem. For single nodes and development.
+  </Card>
+  <Card title="shared-fs" icon="open-book">
+    Local WAL staging, segments on a shared filesystem (NFS, EFS). For multi-node clusters with shared storage.
+  </Card>
+  <Card title="object-store" icon="star">
+    Local WAL staging, segments in S3, GCS or Azure Blob. For cloud-native deployments.
+  </Card>
+</CardGrid>
+
+The Valkey buffer is optional with every backend (`danube cluster write-buffer enable`).
+
+**Tiered reads**: consumers read recent data from the local WAL. For older data, the broker reads from Valkey (warm) and durable segments (cold), then chains them into the WAL tail.
+
+Read more in [Persistence & Storage](/concepts/persistence/) and [Durability & Storage](/durability/overview/).
+
+## Dispatch strategies
+
+Each topic picks a dispatch strategy at creation, usually through a [stream intent](/concepts/stream-intents/).
+
+<CardGrid>
+  <Card title="Non-reliable" icon="rocket">
+    Producers to consumers with no persistence. Zero storage overhead, lowest latency, at-most-once. For live metrics and telemetry (`--intent realtime`).
+  </Card>
+  <Card title="Reliable" icon="approve-check">
+    Persisted before ack, at-least-once with replay. For events, tasks and audit logs (`--intent event_stream`, `task_queue`, `audit_log`).
+  </Card>
+</CardGrid>
+
+The reliable pipeline:
+
+1. The producer sends to the owning broker.
+2. The broker appends to its local WAL.
+3. The broker acks the producer.
+4. Sealed WAL segments are flushed to durable storage.
+5. Consumers read from the WAL (recent) or durable segments (historical).
+
+Raft tracks segment descriptors, durable frontiers and sealed topic state, so a topic recovers correctly after a broker failure. See [Dispatch Strategies](/concepts/dispatch-strategies/).
+
+## Topic ownership and load balancing
+
+Each topic is owned by exactly one broker at a time, recorded in Raft. A client can connect to any broker: it serves the topic if it owns it, or redirects the client to the owner.
+
+The [Load Manager](/architecture/load-manager/) scores brokers, places new topics on the least-loaded one and can rebalance automatically when the coefficient of variation (CV) of broker load passes a threshold.
+
+Moving a reliable topic is coordinated: the source seals its WAL and flushes durable storage, then the target resumes from durable segments at the same offset. No messages are lost. See [Reliable Topic Move](/architecture/reliable-topic-move/) and [CLI: Cluster & Brokers](/admin/cli-cluster/).
+
+## Data layout on disk
+
+<FileTree>
+- danube-data/ (`--data-dir`, default `./danube-data` in standalone)
+  - danube-node.json (records the mode; reuse with another mode is refused)
+  - raft/
+    - raft-log.redb (Raft log and state, redb)
+    - node_id (stable node identity)
+  - wal/ (per-topic `wal.log` and rotated `wal.<seq>.log`; override with `--wal-dir`)
+</FileTree>
+
+With `shared-fs` or `object-store` storage, sealed durable segments are exported to `{root}/storage/topics/{namespace}/{topic}/segments/`.
+
+## Deep dives
+
+<CardGrid>
+  <LinkCard title="Durability & Tiered Storage" description="Hot, warm and cold tiers that keep brokers stateless." href="/durability/overview/" />
+  <LinkCard title="Schema Registry" description="Storage model, Raft replication, caching and validation." href="/architecture/schema-registry/" />
+  <LinkCard title="Load Manager" description="Topic placement, broker scores and automated rebalancing." href="/architecture/load-manager/" />
+  <LinkCard title="Key-Shared Dispatch" description="Consistent hashing, in-flight tracking and poison handling." href="/architecture/key-shared/" />
+  <LinkCard title="Reliable Topic Move" description="Offset continuity during broker-to-broker handoff." href="/architecture/reliable-topic-move/" />
+  <LinkCard title="Metadata Paths" description="Every key in the Raft state machine." href="/architecture/metadata-paths/" />
 </CardGrid>

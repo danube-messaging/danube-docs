@@ -1,30 +1,47 @@
 ---
 title: Key-Shared Subscriptions
-description: Route messages by key for per-key ordering with horizontal scaling — producers, consumers, and key filtering.
+description: Route messages by key for per-key ordering with many parallel consumers, plus glob key filters.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Key-Shared subscriptions route messages to consumers based on their **routing key**. All messages with the same key go to the same consumer, in order. This combines the parallelism of Shared subscriptions with per-key ordering guarantees.
+Key-Shared gives you the parallelism of a Shared subscription and the ordering of an Exclusive one, per key. Every message with the same routing key goes to the same consumer, in order, while different keys spread across all consumers.
 
-## When to Use Key-Shared
+Use it when events for one entity (an order, a user, a device) must be processed in sequence, but you still want many workers.
 
-| Requirement | Subscription Type |
-|-------------|------------------|
-| Total ordering, single consumer | **Exclusive** |
-| Maximum throughput, no ordering | **Shared** |
-| Ordering + high availability | **Failover** |
-| Per-key ordering + parallelism | **Key-Shared** ✓ |
+## Try it from the CLI
 
-Key-Shared is the right choice when you need per-key ordering with multi-consumer parallelism, key-affinity processing (all events for a given entity go to the same consumer), or selective routing via key filters.
+<Steps>
 
----
+1. Create a reliable topic:
 
-## Producer: Sending with Routing Keys
+   ```bash
+   danube topic create /default/orders --intent task_queue
+   ```
 
-Tag each message with a routing key using `send_with_key()`. Messages with the same key are always delivered to the same consumer.
+2. Start two consumers on the same subscription, in two terminals:
 
-<Tabs>
+   ```bash
+   danube consume /default/orders -s orders_sub -t key-shared
+   ```
+
+3. Publish a few keyed messages from a third terminal:
+
+   ```bash
+   danube produce /default/orders -m "Payment for #1001" -k payment -r
+   danube produce /default/orders -m "Order #1001 shipped" -k shipping -r
+   danube produce /default/orders -m "Payment for #1002" -k payment -r
+   ```
+
+   Both `payment` messages land on the same consumer, in order.
+
+</Steps>
+
+## Send with a routing key
+
+`send_with_key(payload, attributes, key)` tags each message with its key.
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Send with routing keys"
@@ -37,13 +54,8 @@ let mut producer = client
 
 producer.create().await?;
 
-// All "payment" messages go to the same consumer
 producer.send_with_key(b"Payment for #1001".to_vec(), None, "payment").await?;
-
-// "shipping" messages go to (potentially) a different consumer
 producer.send_with_key(b"Order #1001 shipped".to_vec(), None, "shipping").await?;
-
-// Same key = same consumer, guaranteed
 producer.send_with_key(b"Payment for #1002".to_vec(), None, "payment").await?;
 ```
 
@@ -58,13 +70,8 @@ producer, _ := client.NewProducer().
     Build()
 producer.Create(ctx)
 
-// All "payment" messages go to the same consumer
 producer.SendWithKey(ctx, []byte("Payment for #1001"), nil, "payment")
-
-// "shipping" messages go to (potentially) a different consumer
 producer.SendWithKey(ctx, []byte("Order #1001 shipped"), nil, "shipping")
-
-// Same key = same consumer, guaranteed
 producer.SendWithKey(ctx, []byte("Payment for #1002"), nil, "payment")
 ```
 
@@ -79,13 +86,8 @@ Producer producer = client.newProducer()
         .build();
 producer.create();
 
-// All "payment" messages go to the same consumer
 producer.sendWithKey("Payment for #1001".getBytes(), Map.of(), "payment");
-
-// "shipping" messages go to (potentially) a different consumer
 producer.sendWithKey("Order #1001 shipped".getBytes(), Map.of(), "shipping");
-
-// Same key = same consumer, guaranteed
 producer.sendWithKey("Payment for #1002".getBytes(), Map.of(), "payment");
 ```
 
@@ -104,31 +106,23 @@ producer = (
 )
 await producer.create()
 
-# All "payment" messages go to the same consumer
 await producer.send_with_key(b"Payment for #1001", None, "payment")
-
-# "shipping" messages go to (potentially) a different consumer
 await producer.send_with_key(b"Order #1001 shipped", None, "shipping")
-
-# Same key = same consumer, guaranteed
 await producer.send_with_key(b"Payment for #1002", None, "payment")
 ```
 
 </TabItem>
 </Tabs>
 
-- `send_with_key(payload, attributes, routing_key)` tags the message with a routing key
-- **Deterministic cross-partition routing**: on partitioned topics, `MessageRouter` computes a 64-bit FNV-1a hash of the routing key modulo partition count so identical keys always land on the same partition (where Key-Shared consistent hashing routes them to the same consumer)
-- If you use `send()` instead, messages are distributed round-robin across partitions and the producer name is used as the fallback routing key
-- Routing keys can be any string: order IDs, user IDs, device IDs, event types
+- **Any string works as a key**: order ids, user ids, device ids, event types.
+- **Partitioned topics**: the client hashes the key (FNV-1a) to pick the partition, so one key always lands on the same partition.
+- **Plain send()**: messages go round-robin across partitions, and the broker uses the producer name as the key.
 
----
+## Consume with automatic key assignment
 
-## Consumer: Automatic Key Distribution
+With no filters, the broker spreads keys over all consumers of the subscription using consistent hashing.
 
-The simplest Key-Shared consumer uses automatic key distribution via consistent hashing. The broker assigns keys to consumers automatically.
-
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Key-Shared consumer"
@@ -145,8 +139,7 @@ let mut stream = consumer.receive().await?;
 
 while let Some(message) = stream.recv().await {
     let key = message.routing_key.as_deref().unwrap_or("<none>");
-    let payload = String::from_utf8_lossy(&message.payload);
-    println!("key={:<10} | '{}'", key, payload);
+    println!("key={key:<10} | '{}'", String::from_utf8_lossy(&message.payload));
     consumer.ack(&message).await?;
 }
 ```
@@ -166,8 +159,7 @@ consumer.Subscribe(ctx)
 stream, _ := consumer.Receive(ctx)
 
 for msg := range stream {
-    fmt.Printf("key=%s payload=%s\n",
-        msg.GetRoutingKey(), string(msg.GetPayload()))
+    fmt.Printf("key=%s payload=%s\n", msg.GetRoutingKey(), string(msg.GetPayload()))
     consumer.Ack(ctx, msg)
 }
 ```
@@ -182,7 +174,6 @@ Consumer consumer = client.newConsumer()
         .withSubscription("orders_sub")
         .withSubscriptionType(SubType.KEY_SHARED)
         .build();
-
 consumer.subscribe();
 
 consumer.receive().subscribe(new Flow.Subscriber<>() {
@@ -212,7 +203,6 @@ consumer = (
     .with_subscription_type(SubType.KEY_SHARED)
     .build()
 )
-
 await consumer.subscribe()
 queue = await consumer.receive()
 
@@ -226,34 +216,28 @@ while True:
 </TabItem>
 </Tabs>
 
-### Running Multiple Consumers
+Run the same code as `worker_1` and `worker_2` and each one gets a distinct, stable set of keys:
 
-Start multiple consumers with the same subscription name. Each consumer receives a distinct subset of routing keys:
+```text title="Two consumers, same subscription"
+# worker_1
+key=shipping   | 'Order #1001 shipped'
+key=shipping   | 'Order #1002 shipped'
 
-```text title="Expected output"
-# consumer_1 output
-key=shipping   | 'Order #1001 shipped via express'
-key=shipping   | 'Order #1002 shipped via standard'
-
-# consumer_2 output
-key=payment    | 'Payment received for order #1001'
-key=payment    | 'Payment received for order #1002'
-key=invoice    | 'Invoice generated for order #1001'
+# worker_2
+key=payment    | 'Payment for #1001'
+key=payment    | 'Payment for #1002'
+key=invoice    | 'Invoice for #1001'
 ```
 
-The exact key-to-consumer assignment depends on consistent hashing but is deterministic.
+## Pick keys with filters
 
----
+Filters let a consumer declare exactly which keys it handles. It only receives messages whose key matches one of its glob patterns.
 
-## Key Filtering
-
-Key filtering gives consumers explicit control over which keys they handle. Each consumer declares glob patterns and only receives messages whose routing key matches.
-
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Filtered consumer"
-// Only receives "payment" and "invoice" messages
+// Only "payment" and "invoice" messages
 let mut consumer = client
     .new_consumer()
     .with_topic("/default/orders")
@@ -263,13 +247,16 @@ let mut consumer = client
     .with_key_filter("payment")
     .with_key_filter("invoice")
     .build()?;
+
+// Same thing in one call:
+// .with_key_filters(vec!["payment".into(), "invoice".into()])
 ```
 
 </TabItem>
 <TabItem label="Go">
 
 ```go title="Filtered consumer"
-// Only receives "payment" and "invoice" messages
+// Only "payment" and "invoice" messages
 consumer, _ := client.NewConsumer().
     WithConsumerName("payments_worker").
     WithTopic("/default/orders").
@@ -278,13 +265,16 @@ consumer, _ := client.NewConsumer().
     WithKeyFilter("payment").
     WithKeyFilter("invoice").
     Build()
+
+// Same thing in one call:
+// WithKeyFilters([]string{"payment", "invoice"})
 ```
 
 </TabItem>
 <TabItem label="Java">
 
 ```java title="Filtered consumer"
-// Only receives "payment" and "invoice" messages
+// Only "payment" and "invoice" messages
 Consumer consumer = client.newConsumer()
         .withTopic("/default/orders")
         .withConsumerName("payments_worker")
@@ -293,13 +283,16 @@ Consumer consumer = client.newConsumer()
         .withKeyFilter("payment")
         .withKeyFilter("invoice")
         .build();
+
+// Same thing in one call:
+// .withKeyFilters(List.of("payment", "invoice"))
 ```
 
 </TabItem>
 <TabItem label="Python">
 
 ```python title="Filtered consumer"
-# Only receives "payment" and "invoice" messages
+# Only "payment" and "invoice" messages
 consumer = (
     client.new_consumer()
     .with_topic("/default/orders")
@@ -310,214 +303,50 @@ consumer = (
     .with_key_filter("invoice")
     .build()
 )
+
+# Same thing in one call:
+# .with_key_filters(["payment", "invoice"])
 ```
 
 </TabItem>
 </Tabs>
 
-### Filter Patterns
+From the CLI, repeat `--key-filter`:
 
-Filters use glob syntax:
-
-| Pattern | Matches |
-|---------|---------|
-| `"payment"` | Exact match only |
-| `"ship*"` | `"shipping"`, `"shipment"`, etc. |
-| `"eu-west-?"` | `"eu-west-1"`, `"eu-west-2"`, etc. |
-| `"*"` | Everything (same as no filter) |
-
-You can also set multiple filters at once:
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust title="Multiple filters"
-// Chain individual filters
-.with_key_filter("payment")
-.with_key_filter("invoice")
-
-// Or set multiple at once
-.with_key_filters(vec!["payment".into(), "invoice".into()])
+```bash
+danube consume /default/orders -s orders_filtered -t key-shared --key-filter payment --key-filter invoice
 ```
 
-</TabItem>
-<TabItem label="Go">
+Pattern syntax:
 
-```go title="Multiple filters"
-// Chain individual filters
-.WithKeyFilter("payment").
-.WithKeyFilter("invoice")
+- `payment`: exact match only.
+- `ship*`: `*` matches any sequence, so `shipping`, `shipment`.
+- `eu-west-?`: `?` matches one character, so `eu-west-1`, `eu-west-2`.
+- `*`: everything, same as no filter.
 
-// Or set multiple at once
-.WithKeyFilters([]string{"payment", "invoice"})
-```
+When several consumers match the same key, consistent hashing picks one of them.
 
-</TabItem>
-<TabItem label="Java">
+## How it behaves
 
-```java title="Multiple filters"
-// Chain individual filters
-.withKeyFilter("payment")
-.withKeyFilter("invoice")
+- **One in-flight message per key** (reliable topics): the next message for a key waits until the previous one is acked. Other keys keep flowing.
+- **Smooth rebalancing**: when a consumer joins or leaves, only about 1/N of keys move. The rest stay where they are.
+- **Unmatched keys are skipped**: if no consumer's filters match a key, this subscription skips the message and moves on. Other subscriptions still see it.
+- **Same ack and nack rules** as any other subscription, see the [Consumer guide](/client-libraries/consumer/#reject-a-message-nack).
 
-// Or set multiple at once
-.withKeyFilters(List.of("payment", "invoice"))
-```
+## Typical keys
 
-</TabItem>
-<TabItem label="Python">
-
-```python title="Multiple filters"
-# Chain individual filters
-.with_key_filter("payment")
-.with_key_filter("invoice")
-
-# Or set multiple at once
-.with_key_filters(["payment", "invoice"])
-```
-
-</TabItem>
-</Tabs>
-
-### Filtered Output Example
-
-```text title="Two filtered consumers"
-# payments consumer (filters: "payment", "invoice")
-key=payment    | 'Payment received for order #1001'
-key=payment    | 'Payment received for order #1002'
-key=invoice    | 'Invoice generated for order #1001'
-
-# logistics consumer (filters: "ship*", "return")
-key=shipping   | 'Order #1001 shipped via express'
-key=return     | 'Return request for order #998'
-key=shipping   | 'Order #1002 shipped via standard'
-```
-
----
-
-## Behavior Details
-
-### Per-Key Ordering
-
-At most **one message per routing key** is in-flight at any time. If a second message arrives for a key that already has an unacknowledged message, it is queued until the first is acked.
-
-### Consumer Elasticity
-
-When consumers join or leave, key-to-consumer mappings are rebalanced using consistent hashing. Only approximately **1/N** of existing key assignments are remapped. The rest remain stable.
-
-### Unmatched Keys
-
-If a message's routing key matches no consumer's filters, the message is skipped by that subscription. The offset advances past it. The message still remains in the topic for other subscriptions.
-
-### Acknowledgment and Retry
-
-Key-Shared supports the same ack/nack semantics as other reliable subscription types. See the [Consumer Guide](/client-libraries/consumer/) for ack/nack details.
-
----
-
-## Use Cases
-
-### Order Processing
-
-Route all events for the same order to the same consumer:
-
-<Tabs>
-<TabItem label="Rust">
+- **Order processing**: `order-{id}` keeps every event of one order in sequence.
+- **Multi-tenant**: key `tenant-a-{id}` and give a dedicated consumer `with_key_filter("tenant-a-*")`.
+- **IoT**: `device-{id}` keeps per-device state on one worker.
 
 ```rust
-producer.send_with_key(data, None, &format!("order-{}", order_id)).await?;
+producer.send_with_key(data, None, &format!("order-{order_id}")).await?;
 ```
 
-</TabItem>
-<TabItem label="Go">
+## Next steps
 
-```go
-producer.SendWithKey(ctx, data, nil, fmt.Sprintf("order-%s", orderID))
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java
-producer.sendWithKey(data, Map.of(), "order-" + orderId);
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python
-await producer.send_with_key(data, None, f"order-{order_id}")
-```
-
-</TabItem>
-</Tabs>
-
-### Multi-Tenant Workloads
-
-Dedicate consumers to specific tenants using key filtering:
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust
-.with_key_filter("tenant-a-*")  // Tenant A consumer
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go
-.WithKeyFilter("tenant-a-*")  // Tenant A consumer
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java
-.withKeyFilter("tenant-a-*")  // Tenant A consumer
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python
-.with_key_filter("tenant-a-*")  # Tenant A consumer
-```
-
-</TabItem>
-</Tabs>
-
-### IoT Device Routing
-
-Route device telemetry by device ID for per-device state tracking:
-
-<Tabs>
-<TabItem label="Rust">
-
-```rust
-producer.send_with_key(data, None, &format!("device-{}", device_id)).await?;
-```
-
-</TabItem>
-<TabItem label="Go">
-
-```go
-producer.SendWithKey(ctx, data, nil, fmt.Sprintf("device-%s", deviceID))
-```
-
-</TabItem>
-<TabItem label="Java">
-
-```java
-producer.sendWithKey(data, Map.of(), "device-" + deviceId);
-```
-
-</TabItem>
-<TabItem label="Python">
-
-```python
-await producer.send_with_key(data, None, f"device-{device_id}")
-```
-
-</TabItem>
-</Tabs>
+<CardGrid>
+  <LinkCard title="Key-Shared internals" href="/architecture/key-shared/" description="Hash ring, in-flight window and filters in the broker." />
+  <LinkCard title="Subscriptions" href="/concepts/subscriptions/" description="Compare all four subscription types." />
+  <LinkCard title="Consumer guide" href="/client-libraries/consumer/" description="Ack, nack, leases and shutdown." />
+</CardGrid>

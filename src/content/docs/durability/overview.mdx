@@ -1,140 +1,102 @@
 ---
-title: Durability & Storage Overview
-description: How Danube achieves message durability through a tiered Hot/Warm/Cold storage architecture with the local WAL, Valkey, and Cloud Storage.
+title: Durability Overview
+description: How Danube keeps reliable messages safe with a local WAL, an optional Valkey write buffer and optional cloud object storage.
 ---
 
-import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
 
-Danube is designed to be a lightweight streaming platform with enterprise-grade durability. Brokers hold local state (the WAL) but do not replicate message data across nodes, durability beyond the local disk is delegated to purpose-built external systems. This section explains how Danube persists messages, the architectural decisions behind the design, and what it means for operators.
+Danube keeps brokers light: every reliable message lands in a fast local write-ahead log (WAL), and long-term safety is handed to systems built for it. You pick how much durability you need, from a single disk up to Valkey plus S3, and change it live without restarting brokers.
 
-Danube supports two dispatch strategies: **non-reliable** (pub/sub, fire-and-forget) and **reliable** (streaming with at-least-once delivery). The durability features described here apply only to reliable topics.
+## Make a topic durable
 
----
+Durability applies to **reliable** topics. Pick a [stream intent](/concepts/stream-intents/) and Danube sets the right WAL behaviour for you:
 
-## How Danube Approaches Persistence
+```bash
+# Reliable topic, fsync'd in batches, 10 retries, poison messages block
+danube topic create /default/orders --intent audit_log
 
-Reliable topics use a **Write-Ahead Log (WAL)** on the broker's local disk as the foundation of all message persistence. Every message is appended to the WAL and assigned a monotonic offset before it is dispatched to consumers. The WAL provides fast, sequential writes, durable storage that survives broker restarts, and the offset-based replay that powers subscription cursors.
+# Tier it to the cluster's durable store (needs shared_fs or object_store mode)
+danube topic storage-mode /default/orders --mode cloud_tiered
+```
 
-On top of the WAL, Danube offers two optional layers that extend durability beyond the local broker:
+<Aside type="note">
+Non-reliable topics (the `realtime` intent) skip the WAL entirely. Messages go straight from producers to consumers with zero disk I/O, so nothing on this page applies to them.
+</Aside>
 
-- **Valkey/Redis (Optional)**: transient write buffer for ephemeral compute. When running on disposable or spot nodes without persistent disks, messages can be double-written to Valkey Redis Streams. If an ephemeral node vanishes before S3 export, a replacement broker replays buffered messages from Valkey into a fresh WAL, achieving RPO ≈ 0. For deployments with persistent volumes (PVCs or local NVMe), the local WAL guarantees durability across restarts directly without needing Valkey.
+## The three storage tiers
 
-- **Cloud Object Storage (S3/GCS/Azure Blob)**: long-term archival. A background exporter uploads sealed WAL segments as immutable objects for indefinite retention and full historical replay.
-
-This layered approach keeps the broker lightweight, it does not need to replicate data via Raft or maintain expensive NVMe SSDs, while achieving enterprise-grade durability through purpose-built external systems. Scaling up and down becomes simpler because historical data lives in durable storage, not on the broker's local disk.
-
-:::note
-Non-reliable topics bypass the WAL and storage entirely. Messages flow directly from producers to consumers with no persistence. The durability features described on this page apply only to reliable topics.
-:::
-
----
-
-## Danube vs. Traditional Streaming Platforms
-
-Most streaming platforms achieve durability by making their brokers stateful. Each broker stores replicated message data on local disk, typically using an embedded consensus protocol like Raft. This works, but it has consequences:
-
-- Brokers need persistent storage (often fast NVMe SSDs) on every node
-- Scaling down requires waiting for data to migrate off the node
-- Scaling up requires waiting for data to rebalance onto the new node
-- Cluster operations become storage operations
-
-Danube takes a different approach. Brokers remain lightweight routers with a local WAL. The "hard problem" of cross-node durability is delegated to systems built specifically for it:
-
-| | Traditional Streaming Platforms | Danube |
-|---|---|---|
-| **Brokers** | Stateful, each broker stores replicated data via Raft | Lightweight, brokers write to a local WAL and delegate cross-node durability |
-| **Durability** | Embedded in every broker (local SSD + Raft consensus) | Local WAL + optional Valkey write buffer + optional Cloud Storage |
-| **Storage** | Persistent disks required on every node | Ephemeral disks sufficient; durable history lives in Cloud Storage |
-| **Scaling up** | Wait for data to rebalance onto new nodes | Start a new broker, it reads historical data from durable storage |
-| **Scaling down** | Wait for data to migrate off the node | Stop the broker; durable segments in Cloud Storage are already available to other brokers |
-
-This is architecturally closer to Apache Pulsar (stateless brokers + stateful BookKeeper), but dramatically simpler. Where Pulsar requires a ZooKeeper cluster + a BookKeeper cluster + Pulsar brokers (9+ processes minimum), Danube requires a Valkey instance + Danube brokers. And Valkey is something most teams already operate for caching.
-
----
-
-## The Three Storage Tiers
-
-Danube organizes message storage into three independent tiers, each with its own backing store, retention policy, and performance profile:
+Each tier has its own backing store and retention. They are independent: turn each one on or off as you need.
 
 <CardGrid>
-  <Card title="Hot: Local WAL" icon="rocket">
-    Fast, local disk write-ahead log. Every reliable message is written here first. The source of truth for all recent reads. Retained for hours to days based on time/size retention policies.
+  <Card title="Hot: local WAL" icon="rocket">
+    Always on for reliable topics. Every message is appended here first and gets a monotonic offset. Serves almost all reads. Kept for hours to days (default 48 hours or 20 GiB).
   </Card>
   <Card title="Warm: Valkey" icon="star">
-    Optional Redis Streams write buffer. Messages are double-written to Valkey for crash recovery. Provides fast reads of recent data when the local WAL is lost. Retained for the last N closed segments.
+    Optional write buffer on Redis Streams. Messages are double-written so a replacement broker can recover them if a node and its disk vanish. Keeps the last N closed segments.
   </Card>
-  <Card title="Cold: Cloud Storage" icon="open-book">
-    Optional S3/GCS/Azure Blob archival. Sealed WAL segments are exported as immutable objects. The authoritative source for historical reads and broker-to-broker topic moves. Retained indefinitely.
+  <Card title="Cold: object storage" icon="open-book">
+    Optional S3, GCS, Azure Blob or shared filesystem. A background exporter uploads sealed WAL segments as immutable objects. Kept indefinitely and readable by any broker.
   </Card>
 </CardGrid>
 
-Each tier is independent. You can run any combination:
+## Pick a combination
 
-| Configuration | Tiers | Use Case |
-|--------------|-------|----------|
-| WAL only | Hot | Development, testing, edge nodes with persistent disk |
-| WAL + Cloud Storage | Hot + Cold | Production on Persistent Volumes (PVCs / NVMe) + Cloud archival (zero external deps) |
-| WAL + Valkey | Hot + Warm | Crash recovery buffer on ephemeral nodes without cloud archival |
-| WAL + Valkey + Cloud Storage | Hot + Warm + Cold | Production on Ephemeral / Spot compute with Cloud archival |
+- **WAL only**: development, tests, edge nodes with a persistent disk.
+- **WAL + object storage**: production on persistent volumes (PVCs, local NVMe). No extra services, full history in the bucket.
+- **WAL + Valkey**: crash safety on ephemeral nodes when you do not need long-term history.
+- **WAL + Valkey + object storage**: production on spot or diskless compute with full history.
 
-:::tip[Do I need Valkey?]
-- **Using Persistent Volumes (PVCs or Local NVMe)?** No. The local WAL persists across process crashes and pod restarts on the same volume. You can run **WAL + Cloud Storage** directly with zero external dependencies.
-- **Using Ephemeral Compute (Spot VMs / emptyDir)?** Yes. Enabling the Valkey write buffer provides RPO ≈ 0 safety against total node loss before segments are exported to Cloud Storage.
-:::
+<Aside type="tip" title="Do I need Valkey?">
+On **persistent volumes**: no. The local WAL survives process crashes and pod restarts on the same volume, so WAL + object storage is enough.
 
----
+On **ephemeral compute** (spot VMs, `emptyDir`): yes. Valkey holds an off-node copy of messages that were not yet exported, so losing a node loses nothing.
+</Aside>
 
-## Storage Modes
+## Choose a cluster storage mode
 
-Cluster storage modes are managed live via `danube ctl cluster storage` (persisted in Raft under `/cluster/config/storage` and reconciled across all brokers) or declaratively via `danube ctl apply`. The configured backend controls where sealed WAL segments are exported for durable, cross-broker availability:
-
-| Mode | Durable Storage | Use Case |
-|------|----------------|----------|
-| `local` | Local filesystem only | Single-node, development, edge |
-| `shared_fs` | Shared filesystem (NFS, EFS) | On-prem multi-broker clusters |
-| `object_store` | Cloud object storage (S3, GCS, Azure Blob) | Cloud-native multi-broker deployments |
-
-In all modes, the local WAL handles recent writes and real-time reads. In `shared_fs` and `object_store` modes, a background exporter continuously publishes sealed segments to durable storage for historical replay and cross-broker availability. Individual topics can also be promoted to cloud tiering on the fly using `danube ctl topics storage-mode /ns/topic --mode cloud_tiered` (or declared via `danube ctl apply`).
-
-When a topic moves between brokers (e.g., during rebalancing), the new broker reads historical data from the durable storage backend. In `local` mode, only the offset sequence is preserved; there is no shared durable backend. For the full move protocol, see [Reliable Topic Move](/architecture/reliable-topic-move/).
-
-See [Configuration Workflow](/getting-started/configuration-workflow/) and [Configuration, CLI Flags & Manifest Reference](/reference/broker-configuration/) for live commands and declarative manifests.
-
----
-
-## What Users Get
-
-**Reliable topics without Valkey or Cloud Storage:** The local WAL provides durability across broker restarts. Messages survive as long as the local disk is intact. No crash recovery if the disk is lost.
-
-**Add Valkey:**
-- Zero-message-loss crash recovery (RPO ≈ 0, quorum-confirmed writes)
-- Fast failover, a replacement broker downloads buffered messages from Valkey and replays them into a fresh WAL
-- Warm cache for historical reads when local WAL files have been pruned by retention
-
-**Add Cloud Storage:**
-- Indefinite message retention
-- Full historical replay from any offset
-- Cross-broker data availability for topic moves and rebalancing
-- Complete data durability even if both the broker and Valkey lose data simultaneously
-
----
-
-## Next Steps
+The storage mode decides where sealed WAL segments go. It is a cluster-wide setting stored in Raft, so you change it once and every broker follows.
 
 <CardGrid>
-  <LinkCard
-    title="Tiered Storage"
-    description="How the read and write paths work across Hot, Warm, and Cold tiers with invariants and examples."
-    href="/durability/tiered-storage/"
-  />
-  <LinkCard
-    title="Configuration Guide"
-    description="Live CLI commands and declarative manifests for enabling each storage tier."
-    href="/durability/configuration/"
-  />
-  <LinkCard
-    title="Crash Recovery"
-    description="What happens when a broker crashes and how Valkey ensures zero message loss."
-    href="/durability/crash-recovery/"
-  />
+  <Card title="local" icon="laptop">
+    Segments stay on each broker's disk. Single node, development and edge. Default.
+  </Card>
+  <Card title="shared_fs" icon="document">
+    Segments are published to a POSIX mount every broker shares (NFS, EFS). On-prem clusters.
+  </Card>
+  <Card title="object_store" icon="star">
+    Segments are uploaded to S3, GCS or Azure Blob. Cloud-native clusters.
+  </Card>
+</CardGrid>
+
+```bash
+danube cluster storage local
+danube cluster storage shared-fs --root /mnt/shared-danube/storage
+danube cluster storage object-store --backend s3 --root my-bucket/danube --option region=us-east-1
+```
+
+In every mode the local WAL still handles new writes and live reads. In `shared_fs` and `object_store`, a background exporter publishes sealed segments so any broker can replay history. See the [configuration guide](/durability/configuration/) for every option.
+
+## Why Danube does it this way
+
+Many streaming systems replicate message data between brokers, so each broker needs fast persistent disks and every scale event moves data around. Danube keeps cross-node durability out of the broker:
+
+- **Brokers stay light**: they write a local WAL and hand history to object storage.
+- **Scaling up is quick**: a new broker reads history from the durable store instead of waiting for a rebalance.
+- **Scaling down is quick**: sealed segments are already in the durable store, so a broker can simply stop.
+- **Fewer moving parts**: an optional Valkey instance is the only extra service, and many teams already run one.
+
+When a topic moves between brokers, the new owner reads its history from the durable store. In `local` mode only the offset sequence carries over. The full protocol is in [Reliable Topic Move](/architecture/reliable-topic-move/).
+
+## What each layer adds
+
+- **WAL alone**: messages survive broker restarts as long as the disk survives.
+- **Add Valkey**: near-zero loss (RPO close to 0) when a node and its disk disappear, plus fast failover by replaying buffered messages into a fresh WAL.
+- **Add object storage**: unlimited retention, replay from any offset, and history that any broker can serve after a topic move.
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Tiered storage" href="/durability/tiered-storage/" description="How writes flow and how reads are stitched across WAL, Valkey and object storage." />
+  <LinkCard title="Configure durability" href="/durability/configuration/" description="Live commands and manifests for every storage tier." />
+  <LinkCard title="Crash recovery" href="/durability/crash-recovery/" description="What survives a crash and how to recover a broken cluster." />
 </CardGrid>

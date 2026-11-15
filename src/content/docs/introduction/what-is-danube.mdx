@@ -1,59 +1,59 @@
 ---
 title: What is Danube?
-description: An overview of Danube Messaging, its design principles, and what makes it different.
+description: Danube in two minutes. What it is, who it is for, and what makes it different.
 ---
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Danube is an open-source, AI-native messaging and streaming platform built in Rust for teams that need reliable pub/sub, task queuing, and event streaming without operational overhead. Built on [Tokio](https://tokio.rs/) and [openraft](https://github.com/databendlabs/openraft), cluster metadata and shared configuration replicate through embedded Raft consensus—so there are no external coordinators or static broker YAML files to deploy or manage.
+Danube is an open-source messaging platform written in Rust. It gives you pub/sub, durable task queues and event streams in a single `danube` binary, with no external coordinator to run.
 
-Producers publish to **topics**, and consumers receive messages via named **subscriptions**. Create topics with high-level **Stream Intents** (`realtime`, `event_stream`, `task_queue`, `audit_log`) or configure explicit `NonReliable` and `Reliable` dispatch per topic.
+It is built for two kinds of users: developers wiring services together, and teams building AI agents that need to hand work to each other safely.
 
-## Design Principles
+## See it work
+
+```bash
+danube up standalone                                    # one node, ready on :6650
+danube topic create /default/tasks --intent task_queue  # durable queue with retries and a DLQ
+danube consume /default/tasks -s workers                # start a worker
+danube produce /default/tasks -m 'resize image 42' -r   # hand it a job (second terminal)
+```
+
+Producers publish to **topics**. Consumers read through named **subscriptions**. The **intent** tells Danube how careful to be with each topic.
+
+## What makes it different
 
 <CardGrid>
-	<Card title="Zero Dependencies & Zero YAML" icon="puzzle">
-		Cluster metadata and `/cluster/config/*` policies live inside an embedded Raft engine (`openraft` + `redb`). Client gRPC, Schema Registry, and Admin gRPC multiplex onto a single port (`6650`), so one binary starts a cluster with CLI flags alone.
+	<Card title="One binary, every role" icon="setting">
+		`danube up standalone|cluster|edge` starts a node. The same binary is your CLI, MCP server and console backend.
 	</Card>
-	<Card title="One Binary, All Modes" icon="setting">
-		Run as **Standalone** for dev, **Cluster** for production (`--node-role broker|lakehouse|all`), **Edge** for MQTT ingestion, **CLI/UI** (`danube ctl`), or **MCP** (`danube mcp`), all from the single `danube` binary.
+	<Card title="No coordinator, no YAML" icon="puzzle">
+		Cluster metadata lives in embedded Raft. Cluster settings change live with `danube cluster ...` or `danube apply`, never in a config file.
 	</Card>
-	<Card title="Rust-Native" icon="rocket">
-		Built on Tokio for async I/O. No JVM, no GC pauses, no warm-up time. Predictable latency with a memory footprint measured in megabytes.
+	<Card title="Intents instead of knobs" icon="star">
+		Four intents cover most workloads, from in-memory token streams to fsync'd audit logs.
 	</Card>
-	<Card title="Built for AI Agents" icon="star">
-		First-class agentic primitives (`extend_lease`, `report_progress`, `cancel_task_tree`, `request_reply`), zero-copy topic branching, schema inference, and a 71-tool MCP server backed by built-in telemetry and log ring buffers.
+	<Card title="Rust all the way down" icon="rocket">
+		Built on Tokio. No JVM, no GC pauses, memory measured in megabytes.
 	</Card>
 </CardGrid>
 
-## Core Capabilities
+## What you get
 
-- **Workload Intents & Message Delivery**: Four canonical `--intent` profiles (`realtime`, `event_stream`, `task_queue`, `audit_log`), partitioned and non-partitioned topics, `NonReliable` / `Reliable` dispatch, NACKs, exponential retry backoff, and dead-letter queues.
-- **Agent Runtime Primitives**: Visibility lease extension (`extend_lease`), resumable progress checkpoints (`report_progress` / `x-danube-checkpoint-b64`), tree cancellation (`cancel_task_tree`), and correlated `request_reply` RPC.
-- **Time-Travel & Topic Branching**: Zero-copy `topics branch` at any offset or nanosecond timestamp, subscription `seek`, `peek`, `replay-dlq`, and live `infer-schema`.
-- **Subscriptions**: Exclusive, Shared, Failover, and Key-Shared with per-key ordering via consistent hashing and glob-pattern key filtering.
-- **Persistence & Lakehouse**: Local WAL for fast writes, durable segments on shared filesystems or object stores (S3, GCS, Azure), plus optional Apache Iceberg lakehouse export.
-- **Schema Registry**: Built-in schema management with JSON Schema, Avro, and Protobuf. Version control with backward, forward, and full compatibility enforcement.
-- **Security**: Zero-trust `--auth-mode auto-tls`, manual TLS/mTLS encryption, JWT and API-key authentication, and fine-grained RBAC with default-deny semantics.
-- **AI Control Plane (`danube mcp`)**: Native Model Context Protocol server with **71 tools**, **4 guided workflows** (including `explain_consumer_stall`), GitOps `apply_desired_state`, and built-in 1-hour gRPC telemetry/log ring buffers—no Prometheus required.
-- **Danube Connect**: Plug-and-play connector ecosystem with source connectors (MQTT, HTTP webhooks, databases) and sink connectors (Delta Lake, Qdrant, SurrealDB).
+- **Messaging**: partitioned topics, four subscription types (Exclusive, Shared, Failover, Key-Shared), acks, NACKs, retries and dead-letter queues.
+- **Agent building blocks**: lease extension, progress checkpoints, task-tree cancellation and request/reply in the Rust client.
+- **Replay and debugging**: zero-copy topic branching, subscription seek, non-destructive peek and DLQ replay.
+- **Storage**: local WAL plus tiered segments on S3, GCS, Azure Blob or a shared filesystem, with optional Iceberg export.
+- **Schema registry**: JSON Schema, Avro and Protobuf with compatibility checks, built into the broker.
+- **Security**: TLS, mTLS, auto-generated TLS, JWT and role-based access control.
+- **Operations for agents**: `danube mcp` exposes admin tools and guided prompts to any MCP client.
+- **Edge**: an MQTT gateway that buffers locally and replicates to your cluster.
 
-## Client Libraries
+Client libraries are available for Rust, Go, Java and Python. See [Client libraries](/client-libraries/overview/).
 
-Danube provides first-class client libraries for four languages:
-
-| Language | Package | Repository |
-|----------|---------|------------|
-| **Rust** | [danube-client](https://crates.io/crates/danube-client) | [GitHub](https://github.com/danube-messaging/danube/tree/main/danube-client) |
-| **Go** | [danube-go](https://pkg.go.dev/github.com/danube-messaging/danube-go) | [GitHub](https://github.com/danube-messaging/danube-go) |
-| **Java** | [danube-java](https://central.sonatype.com/namespace/com.danube-messaging) | [GitHub](https://github.com/danube-messaging/danube-java) |
-| **Python** | [danube-client](https://pypi.org/project/danube-client/) | [GitHub](https://github.com/danube-messaging/danube-py) |
-
-## Next Steps
+## Next steps
 
 <CardGrid>
-	<LinkCard title="Key Concepts" description="Topics, subscriptions, stream intents, dispatch strategies, and branching." href="/introduction/key-concepts/" />
-	<LinkCard title="Quickstart" description="Start a single `danube` broker and send your first message in under a minute." href="/getting-started/quickstart/" />
-	<LinkCard title="Configuration Workflow" description="How local node flags, Raft state, GitOps apply, and intents fit together." href="/getting-started/configuration-workflow/" />
-	<LinkCard title="Danube for AI Agents" description="Workload intents, agentic SDK primitives, time-travel branching, and 71-tool MCP operations." href="/ai-agents/overview/" />
+	<LinkCard title="Key concepts" description="The vocabulary you need, on one page." href="/introduction/key-concepts/" />
+	<LinkCard title="Quickstart" description="Run Danube and send your first message." href="/getting-started/quickstart/" />
+	<LinkCard title="Danube for AI agents" description="Why agents and Danube fit together." href="/ai-agents/overview/" />
 </CardGrid>

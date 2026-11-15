@@ -1,29 +1,30 @@
 ---
 title: Contributing
-description: How to set up a development environment, build the unified danube binary, run tests, and submit pull requests.
+description: Set up a dev environment, build the danube binary, run a local cluster and the test suites, and open a pull request.
 ---
 
-import { Steps } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside, FileTree } from '@astrojs/starlight/components';
 
-This page walks through the contribution workflow from fork to merged pull request. Danube is built in Rust with embedded Raft consensus, single-port multiplexing (`6650`), and zero-YAML defaults—no external dependencies like etcd or ZooKeeper are required.
+Want to fix a bug or add a feature? This page takes you from a fresh clone to a merged pull request. Danube is pure Rust with embedded Raft, so a full dev cluster runs on your laptop with no etcd, ZooKeeper or config files.
 
----
+```bash
+# Build, start a node, and poke it
+cargo build -p danube-broker
+target/debug/danube up standalone
+target/debug/danube topic list --namespace default   # in a second terminal
+```
 
-## Prerequisites
+## What you need
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| [Rust](https://www.rust-lang.org/tools/install) | Stable | Build the unified `danube` binary and workspace crates |
-| [protobuf-compiler](https://grpc.io/docs/protoc-installation/) | 3.x+ | Generate gRPC code from `.proto` files |
-| [Docker](https://docs.docker.com/get-docker/) | 20.10+ | Optional: containerized 3-broker cluster or Prometheus |
-| [Docker Compose](https://docs.docker.com/compose/install/) | 2.0+ | Optional: consolidated `docker/docker-compose.yml` cluster |
+- **[Rust](https://www.rust-lang.org/tools/install)** (stable): builds the `danube` binary and the workspace crates.
+- **[protobuf-compiler](https://grpc.io/docs/protoc-installation/)** (3.x+): generates gRPC code from `.proto` files.
+- **[Docker](https://docs.docker.com/get-docker/)** and **[Docker Compose](https://docs.docker.com/compose/install/)** (optional): containerized 3-broker cluster and Prometheus.
 
----
-
-## Fork and Clone
+## Fork and clone
 
 <Steps>
-1. **Fork** the repository at [github.com/danube-messaging/danube](https://github.com/danube-messaging/danube)
+
+1. **Fork** [github.com/danube-messaging/danube](https://github.com/danube-messaging/danube).
 
 2. **Clone** your fork:
 
@@ -32,205 +33,208 @@ This page walks through the contribution workflow from fork to merged pull reque
    cd danube
    ```
 
-3. **Add upstream** (recommended for staying up to date):
+3. **Add upstream** to stay in sync:
 
    ```bash
    git remote add upstream https://github.com/danube-messaging/danube.git
    ```
+
 </Steps>
 
----
+## Build the binary
 
-## Build
+Everything compiles into one binary, `danube`, from the `danube-broker` crate. It holds the server (`danube up`), the CLI (`danube topic`, `danube cluster`, ...), the web console backend (`danube console`) and the MCP server (`danube mcp`).
 
-Danube compiles into a **single unified binary** (`danube`) containing the broker (`danube up`), admin/messaging CLI & web UI (`danube ctl`), and MCP server (`danube mcp`):
-
-```bash
-# Release binary at ./target/release/danube
-cargo build --release -p danube-broker
-
-# Include Apache Iceberg lakehouse export support (add lakehouse-aws for S3)
-cargo build --release -p danube-broker --features lakehouse
-```
-
-For faster incremental iteration during development:
+<Tabs>
+  <TabItem label="Debug (daily work)">
 
 ```bash
 cargo build -p danube-broker
+# -> target/debug/danube
 ```
 
-Check the entire workspace (including optional lakehouse crates):
+  </TabItem>
+  <TabItem label="Release">
 
 ```bash
+cargo build --release -p danube-broker
+# -> target/release/danube
+```
+
+  </TabItem>
+  <TabItem label="With lakehouse">
+
+```bash
+# Apache Iceberg export; use lakehouse-aws for S3 support
+cargo build --release -p danube-broker --features lakehouse
+
+# Check the whole workspace including lakehouse crates
 cargo check --workspace --features danube-broker/lakehouse
 ```
 
----
+  </TabItem>
+</Tabs>
 
-## Running a Local Cluster
+## Run Danube locally
 
-You have two options for running a local 3-broker development cluster: **Makefile** (native, fastest for daily work) or **Docker Compose** (consolidated containerized setup in `docker/`).
+### One node, fastest loop
 
-### Option A: Makefile (Native)
+```bash
+target/debug/danube up standalone --data-dir /tmp/danube-dev
+```
 
-The `Makefile` builds `./target/release/danube` and launches a zero-YAML 3-broker Raft cluster on localhost with single-port multiplexing (Client gRPC, Schema Registry, and Admin gRPC all served on each broker's primary port):
+<Aside type="tip">
+Append `--dry-run` to any `danube up` command to print the resolved config and exit. Handy when you change flag handling.
+</Aside>
 
-**Start the cluster:**
+### A 3-broker cluster
+
+<Tabs>
+  <TabItem label="Makefile (native)">
 
 ```bash
 make brokers
 ```
 
-| Broker | Multiplexed gRPC Port (Client + Schema + Admin) | Raft Port | Prometheus |
-|--------|--------------------------------------------------|-----------|------------|
-| Broker 0 | `6650` | `7650` | `9040` |
-| Broker 1 | `6651` | `7651` | `9041` |
-| Broker 2 | `6652` | `7652` | `9042` |
+This builds `target/release/danube` and starts three `danube up cluster` processes that bootstrap through seed nodes:
 
-Logs are written to `temp/broker_<port>.log`.
+- **Broker 0**: client `6650`, admin `50051`, Raft `7650`, metrics `9040`
+- **Broker 1**: client `6651`, admin `50052`, Raft `7651`, metrics `9041`
+- **Broker 2**: client `6652`, admin `50053`, Raft `7652`, metrics `9042`
 
-**Useful targets:**
-
-| Command | Description |
-|---------|-------------|
-| `make brokers` | Build and start 3 `danube up` brokers |
-| `make brokers-stop` | Stop all brokers (keep Raft data for restart testing) |
-| `make brokers-clean` | Stop all brokers and delete Raft/WAL data |
-| `make broker-kill ID=0` | Kill a single broker by index (`0`, `1`, or `2`) |
-| `make broker-start ID=0` | Start a single broker by index |
-| `make cluster-status` | Show Raft cluster status via `danube ctl cluster status` |
-| `make data-clean` | Remove all local Raft/data directories |
-| `make admin` | Start the Admin UI (`danube ctl serve --mode ui`) on port `8080` |
-| `make admin-clean` | Stop the Admin UI server |
-| `make prom` | Start Prometheus on port `9090` (Docker) |
-| `make prom-clean` | Stop Prometheus |
-
-**Custom log levels:**
+Data goes to `./danube-data/broker-N`, logs to `temp/broker_<port>.log`. Admin runs on its own port here (`--admin-listen`), so point admin commands at it:
 
 ```bash
-RUST_LOG=danube_broker=debug make brokers
+target/release/danube cluster status --endpoint http://127.0.0.1:50051
 ```
 
-### Option B: Docker Compose (Containerized)
+**Useful targets**
 
-The consolidated `docker/docker-compose.yml` builds `/usr/local/bin/danube` from `Dockerfile` and runs a zero-YAML 3-broker Raft cluster (`broker1`, `broker2`, `broker3`):
+- **`make brokers`**: build and start 3 brokers
+- **`make brokers-stop`**: stop them, keep Raft data for restart testing
+- **`make brokers-clean`**: stop them and delete all data
+- **`make broker-kill ID=0`** / **`make broker-start ID=0`**: stop or start one broker
+- **`make cluster-status`**: `danube cluster status` against broker 0
+- **`make data-clean`**: remove `./danube-data/broker-*`
+- **`make admin`** / **`make admin-clean`**: start or stop `danube console` on port `8080`
+- **`make prom`** / **`make prom-clean`**: start or stop Prometheus on `9090` (Docker)
+
+Raise the log level with `RUST_LOG=danube_broker=debug make brokers`.
+
+  </TabItem>
+  <TabItem label="Docker Compose">
 
 ```bash
 cd docker
 docker compose up -d --build
 ```
 
-| Container | Ports | Description |
-|-----------|-------|-------------|
-| `danube-broker1` | `6650`, `9040` | gRPC + Admin + Schema (`6650`), Prometheus (`9040`) |
-| `danube-broker2` | `6651`, `9041` | gRPC + Admin + Schema (`6651`), Prometheus (`9041`) |
-| `danube-broker3` | `6652`, `9042` | gRPC + Admin + Schema (`6652`), Prometheus (`9042`) |
+`docker/docker-compose.yml` builds the image from the root `Dockerfile` and runs `broker1`, `broker2` and `broker3`. Client, schema and admin gRPC share one port per broker:
 
-Run CLI/admin commands directly via `docker exec`:
+- **`danube-broker1`**: `6650`, metrics `9040`
+- **`danube-broker2`**: `6651`, metrics `9041`
+- **`danube-broker3`**: `6652`, metrics `9042`
+
+Run CLI commands from the host or inside a container:
 
 ```bash
-docker exec danube-broker1 danube ctl cluster status
+target/release/danube cluster status
+docker exec danube-broker1 danube cluster status
 ```
 
-To run the Web UI & HTTP MCP endpoint (`http://127.0.0.1:8080/mcp`) against your Compose cluster from the host:
+Run the web console and HTTP MCP endpoint (`http://127.0.0.1:8080/mcp`) against it:
 
 ```bash
-./target/release/danube ctl serve --mode all --listen-addr 0.0.0.0:8080 --broker-endpoint http://127.0.0.1:6650
+target/release/danube console --listen 0.0.0.0:8080 --endpoint http://127.0.0.1:6650
 ```
 
-Stop and remove Compose containers/volumes when finished:
+Tear it down with `docker compose down -v`.
+
+  </TabItem>
+</Tabs>
+
+## Run the tests
+
+### Unit tests (no services needed)
 
 ```bash
-docker compose down -v
-```
-
----
-
-## Running Tests
-
-### Unit Tests
-
-Run all library and binary unit tests across the workspace without starting external services (matching `.github/workflows/unit-tests.yml` and `pull-request-tests.yml`):
-
-```bash
+# Everything CI runs as unit tests
 cargo test --workspace --lib --bins
+
+# Just the broker binary, or just the CLI parsing tests
+cargo test -p danube-broker --bin danube
+cargo test -p danube-broker --bin danube cli::
 ```
 
-### Integration Tests
+The `cli::` tests check the whole command tree: every command parses, `danube up` mode rules, the data-dir mode marker and plural aliases. Run them whenever you touch a flag.
 
-Integration tests require a running 3-broker cluster. Start one with `make brokers`, run the suites, then clean up:
+### Integration tests (need a cluster)
 
 <Steps>
-1. **Start the cluster:**
+
+1. **Start a cluster** and give Raft a few seconds to elect a leader:
 
    ```bash
    make brokers
    ```
 
-   Wait a few seconds for Raft leader election.
-
-2. **Run broker integration tests** (serial execution avoids port/timing contention):
+2. **Broker suites**, run serially to avoid timing contention. They connect to `http://127.0.0.1:6650` (override with `DANUBE_BROKER_ENDPOINT`):
 
    ```bash
    cargo test --release -p danube-broker --tests -- --test-threads=1 --nocapture
    ```
 
-3. **Run Raft integration tests:**
+3. **Raft and storage suites:**
 
    ```bash
    cargo test -p danube-raft --tests -- --nocapture
-   ```
-
-4. **Run storage integration tests:**
-
-   ```bash
    cargo test -p danube-persistent-storage --tests -- --nocapture
    ```
 
-5. **Stop the cluster and clean data when done:**
+4. **Admin CLI suites** (topic, namespace and schema lifecycles, MCP smoke test):
+
+   ```bash
+   cargo test -p danube-admin --tests -- --nocapture
+   ```
+
+5. **Clean up:**
 
    ```bash
    make brokers-clean
    ```
+
 </Steps>
 
-:::note
-The CI workflows (`.github/workflows/unit-tests.yml` and `.github/workflows/pull-request-tests.yml`) execute these same unit, lakehouse feature-check, and integration commands on every pull request.
-:::
+### What each crate tests
 
-### Workspace Test Coverage
+- **`danube-broker`**: pub/sub, intents, agentic primitives, schema validation, Key-Shared, partitioning, reliable dispatch, branching, security, failover, topic moves.
+- **`danube-admin`**: CLI commands, namespace/topic/schema/security lifecycles, `danube apply`, console HTTP API and MCP server.
+- **`danube-raft`**: metadata CRUD, watches and TTLs, `/cluster/config/*`, leadership.
+- **`danube-persistent-storage`**: WAL, retention, tiered storage (`local`, `shared_fs`, `object_store`), ownership transitions.
+- **`danube-edge`**: MQTT gateway and WAL-buffered replication.
+- **`danube-iceberg`**: Iceberg table export (with `--features lakehouse`).
+- **`danube-schema`**: JSON Schema, Avro and Protobuf parsing and compatibility.
+- **`danube-client`**: Rust client SDK and agent runtime primitives.
+- **`danube-core`**: protocol definitions, `StreamMessage` and attribute constants.
 
-| Crate | Scope |
-|-------|-------|
-| `danube-broker` | Pub/sub, intents, agentic runtime primitives, schema validation, key-shared, partitioning, reliable dispatch, zero-copy branching, security, failover, topic moves |
-| `danube-admin` | `danube ctl` CLI, namespace/topic/schema/security lifecycle, GitOps `apply`, HTTP UI, and 71-tool MCP server |
-| `danube-raft` | Embedded Raft metadata CRUD, watch/TTL, `/cluster/config/*`, cluster leadership |
-| `danube-persistent-storage` | WAL operations, retention, tiered storage (`local`, `shared_fs`, `object_store`), topic ownership transitions |
-| `danube-edge` | Zero-YAML MQTT gateway and WAL-buffered replication |
-| `danube-iceberg` | Apache Iceberg table exporter (enabled via `--features lakehouse`) |
-| `danube-schema` | JSON Schema, Avro, Protobuf parsing and compatibility validation |
-| `danube-client` | Rust client SDK and agent runtime primitives |
-| `danube-core` | Shared protocol definitions, `StreamMessage`, and attribute constants |
-
----
-
-## Submitting a Pull Request
+## Open a pull request
 
 <Steps>
-1. **Create a feature branch** from `main`:
+
+1. **Branch** from `main`:
 
    ```bash
    git checkout -b feature/my-change
    ```
 
-2. **Make your changes** and commit with clear messages:
+2. **Commit** with a clear message:
 
    ```bash
    git add .
    git commit -m "feat: add support for XYZ"
    ```
 
-3. **Run unit tests and workspace lakehouse check:**
+3. **Run unit tests and the lakehouse check:**
 
    ```bash
    cargo test --workspace --lib --bins
@@ -245,69 +249,67 @@ The CI workflows (`.github/workflows/unit-tests.yml` and `.github/workflows/pull
    make brokers-clean
    ```
 
-5. **Verify release build:**
-
-   ```bash
-   cargo build --release -p danube-broker
-   ```
-
-6. **Push and open a PR:**
+5. **Push** and open a PR at [github.com/danube-messaging/danube/pulls](https://github.com/danube-messaging/danube/pulls):
 
    ```bash
    git push origin feature/my-change
    ```
 
-   Open a pull request at [github.com/danube-messaging/danube/pulls](https://github.com/danube-messaging/danube/pulls).
 </Steps>
 
-### What Happens on PR
+### What CI runs
 
-On every pull request, CI runs:
+- **`unit-tests.yml`**: `cargo test --workspace --lib --bins` and the lakehouse feature check.
+- **`pull-request-tests.yml`**: builds the release binary, starts 3 brokers, runs the `danube-broker`, `danube-raft` and `danube-persistent-storage` integration suites, and prints all broker logs if anything fails.
+- **End-to-end workflows**: CLI, security, failover, restart, rebalancing, reliable move on shared FS, write buffer and edge replication each have their own `*-e2e.yml`.
 
-1. `cargo test --workspace --lib --bins` and `cargo check --workspace --features danube-broker/lakehouse`
-2. Builds `./target/release/danube` (`danube-broker`) and starts a 3-broker cluster
-3. Runs integration test suites (`danube-broker`, `danube-raft`, `danube-persistent-storage`)
+## Read the logs
 
-If any test fails, broker logs from all 3 nodes are printed for debugging.
-
----
-
-## Reading Logs
-
-**Native Makefile brokers:**
+<Tabs>
+  <TabItem label="Makefile brokers">
 
 ```bash
-cat temp/broker_6650.log
 tail -f temp/broker_6650.log
 ```
 
-**Docker Compose:**
+  </TabItem>
+  <TabItem label="Docker Compose">
 
 ```bash
 docker compose logs -f broker1
 ```
 
-**In-Memory Ring Buffer (via `danube mcp`):**
+  </TabItem>
+  <TabItem label="From the broker itself">
 
-Every broker also retains the last 5,000 structured log entries and 1 hour of telemetry samples in memory, accessible over gRPC via `GetBrokerLogs` / `GetMetricsSnapshot` through `danube mcp`.
+Every broker keeps its last 5,000 structured log entries and an hour of telemetry samples in memory. Read them over the admin API through `danube mcp` (`GetBrokerLogs`, `GetMetricsSnapshot`), or from the web console.
 
----
+  </TabItem>
+</Tabs>
 
-## Project Structure
+## Find your way around
 
-```text
-danube/
-├── danube-broker/              # Unified `danube` binary (`up`, `ctl`, `mcp`) & E2E tests
-├── danube-admin/               # CLI (`danube ctl`), HTTP UI/MCP server, 71-tool MCP backend
-├── danube-client/              # Rust client library & agent runtime primitives
-├── danube-core/                # Shared types, attribute keys, and protobuf definitions
-├── danube-edge/                # Zero-YAML Edge MQTT gateway library
-├── danube-iceberg/             # Apache Iceberg lakehouse converter (feature: lakehouse)
-├── danube-persistent-storage/  # WAL, durable segments, and cloud/shared storage backends
-├── danube-raft/                # Embedded Raft consensus and dynamic `/cluster/config/*` state
-├── danube-schema/              # Built-in Schema Registry logic
-├── docker/                     # Consolidated 3-broker `docker-compose.yml` & README
-├── Dockerfile                  # Unified `ghcr.io/danube-messaging/danube` image build
-├── Makefile                    # Local multi-broker development commands
-└── .github/workflows/          # Unit tests & PR integration test pipelines
-```
+<FileTree>
+- danube/
+  - danube-broker/ (the `danube` binary: server, `up` CLI, E2E tests)
+  - danube-admin/ (client CLI commands, console HTTP API, MCP server)
+  - danube-client/ (Rust client library and agent runtime primitives)
+  - danube-core/ (shared types, attribute keys, protobuf definitions)
+  - danube-edge/ (edge MQTT gateway library)
+  - danube-iceberg/ (Iceberg lakehouse export, feature `lakehouse`)
+  - danube-persistent-storage/ (WAL, durable segments, shared and cloud backends)
+  - danube-raft/ (embedded Raft and `/cluster/config/*` state)
+  - danube-schema/ (Schema Registry logic)
+  - docker/ (3-broker `docker-compose.yml`)
+  - Dockerfile (the `ghcr.io/danube-messaging/danube` image)
+  - Makefile (local multi-broker commands)
+  - .github/workflows/ (unit, PR and E2E pipelines)
+</FileTree>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Architecture overview" href="/architecture/overview/" description="How brokers, Raft and storage fit together." />
+  <LinkCard title="The danube CLI" href="/getting-started/the-danube-cli/" description="Tour of every command you will be testing." />
+  <LinkCard title="Metadata paths" href="/architecture/metadata-paths/" description="Every key in the Raft state machine." />
+</CardGrid>

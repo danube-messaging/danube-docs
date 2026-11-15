@@ -1,174 +1,158 @@
 ---
 title: Schema Registry Architecture
-description: Internal architecture of the Danube Schema Registry, covering storage model, Raft replication, caching, validation layers, and observability.
+description: How the Danube Schema Registry stores, replicates, caches and enforces schemas inside every broker.
 ---
 
-import { FileTree } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Aside, FileTree } from '@astrojs/starlight/components';
 
-The Schema Registry is a centralized service embedded in the Danube broker that manages message schemas with versioning, compatibility checking, and validation. This page describes the internal architecture and technical decisions. For usage, see the [Client Libraries: Schema Registry](/client-libraries/schema-registry/) and [Admin CLI: Resources](/admin/cli-resources/#schemas) pages.
+The Schema Registry is built into every broker: no extra service to run. Schemas live in Raft, so every broker answers schema lookups from memory and every write is consistent cluster-wide. This page explains how that works under the hood.
 
----
+```bash
+# Register a schema, bind it to a topic, and enforce it
+danube schema register orders --schema-type json_schema --file orders.json
+danube topic schema configure /default/orders --subject orders --validation-policy enforce
+```
 
-## Component Roles
+<Aside type="note">
+This page covers internals. For usage see [Client Libraries: Schema Registry](/client-libraries/schema-registry/) and [CLI: Resources](/admin/cli-resources/).
+</Aside>
 
-The schema subsystem spans three components, each with a distinct responsibility:
+## Three parts, three jobs
 
-**Schema Registry (embedded in broker):** handles all schema operations: registration, retrieval, versioning, and compatibility checking. It is exposed via the broker's gRPC interface, not as a separate process. Every broker can serve schema reads; writes are forwarded to the Raft leader.
+<CardGrid>
+  <Card title="Registry (in the broker)" icon="puzzle">
+    Registers, versions and compatibility-checks schemas over the broker's gRPC port. Any broker serves reads; writes go to the Raft leader.
+  </Card>
+  <Card title="Raft metadata store" icon="document">
+    Persistent, replicated home for subjects, versions, compatibility modes and the global schema ID counter. Every broker holds a full in-memory copy.
+  </Card>
+  <Card title="Enforcement layer" icon="approve-check">
+    Checks each incoming message against the topic's schema config before routing it. Separate from registration-time compatibility checks.
+  </Card>
+</CardGrid>
 
-**Raft Metadata Store:** the persistent, replicated storage for all schema data. Subjects, versions, compatibility settings, and the global schema ID counter live here. Every broker holds a full in-memory replica of this state.
+## Storage model
 
-**Broker enforcement layer:** validates incoming messages against topic-level schema configuration before routing. This is the runtime enforcement point, separate from the registry's registration-time compatibility checks.
-
----
-
-## Storage Model
-
-Schemas and topic-level schema configuration are stored hierarchically in the Raft-replicated metadata store.
+Schemas and topic bindings are stored as a tree in the Raft state machine.
 
 <FileTree>
 - /schemas/
-  - \<subject\>/
-    - metadata (compatibility_mode, created_at, created_by)
-    - compatibility (current mode: backward, forward, full, none)
+  - \{subject\}/
+    - metadata (compatibility mode, created_at, created_by)
+    - compatibility (backward, forward, full, none)
     - versions/
-      - 1 (schema definition, type, fingerprint, description, tags)
+      - 1 (definition, type, fingerprint, description, tags)
       - 2
-      - 3
   - \_global/
-    - next_schema_id (monotonic counter, cluster-wide)
+    - next_schema_id (monotonic, cluster-wide)
   - \_index/
     - by_id/
-      - \<schema_id\> → subject (reverse lookup)
+      - \{schema_id\} (reverse lookup to subject)
 - /topics/
-  - \<topic_name\>/
-    - schema_config
-      - subject (schema subject for this topic)
-      - validation_policy (none / warn / enforce)
-      - enable_payload_validation (true / false)
+  - \{namespace\}/\{topic\}/
+    - schema_config (subject, validation_policy, enable_payload_validation)
 </FileTree>
 
-### Design Decisions
+### Why it is shaped this way
 
-**Global schema IDs.** Each schema version receives a globally unique numeric ID from a monotonic counter in `_global/next_schema_id`. This allows consumers to resolve any schema from any subject with a single ID lookup, which is the common path when deserializing messages. The reverse index at `_index/by_id/` supports this.
+- **Global schema IDs**: every version gets a cluster-unique ID from `_global/next_schema_id`. A consumer resolves any schema with a single ID lookup through `_index/by_id/`.
+- **Fingerprint deduplication**: registering a schema whose SHA-256 fingerprint already exists in the subject returns the existing version instead of creating a new one.
+- **Compatibility on the subject, policy on the topic**: evolution rules are subject-wide, but dev, staging and production topics can enforce the same schema with different strictness. See [Subject vs. Topic Policies](/concepts/messages/#subject-vs-topic-policies).
 
-**Fingerprint-based deduplication.** When a schema is registered, its content is hashed to produce a fingerprint. If the fingerprint matches an existing version in the same subject, no new version is created and the existing ID is returned. This prevents accidental version proliferation from repeated registrations.
+## Raft replication
 
-**Subject-level compatibility, topic-level enforcement.** Compatibility mode is stored on the subject because it governs schema evolution (which is inherently a subject-wide concern). Validation policy is stored on the topic because different environments (dev, staging, production) may need different strictness against the same schema. See [Subject vs. Topic Policies](/concepts/messages/#subject-vs-topic-policies) for the user-facing explanation.
+<Steps>
 
----
+1. A client sends a registration or compatibility change to any broker.
+2. A non-leader forwards the request to the Raft leader.
+3. The leader proposes a log entry with the mutation.
+4. A majority of voters acknowledges and the entry commits.
+5. Every broker applies the entry to its local state machine.
 
-## Raft Replication
+</Steps>
 
-All writes to the schema store go through Raft consensus:
+Every broker sees the same schema state in the same order. Once a write is acknowledged it is visible everywhere, with no eventual-consistency window. Schema ID allocation happens inside the Raft proposal, so IDs are strictly monotonic and never reused.
 
-1. Client sends a registration or compatibility-change request to any broker
-2. If the broker is not the Raft leader, the request is forwarded
-3. The leader proposes a Raft log entry containing the mutation
-4. Once a majority of voters acknowledge, the entry is committed
-5. Every broker applies the entry to its local in-memory state machine
+## Read path: always local
 
-This guarantees that all brokers see the same schema state in the same order. There is no eventual consistency window for metadata: once a write is acknowledged, it is visible on all brokers.
+- **No network hops**: lookups by ID, subject or version are answered from the broker's in-memory replica.
+- **No invalidation protocol**: applying a Raft entry updates memory directly.
+- **Cached topic binding**: a topic stores its resolved schema ID, so per-message checks never query the registry.
 
-**Schema ID allocation** uses a compare-and-swap on the `next_schema_id` counter within the Raft proposal. This ensures IDs are strictly monotonic and never reused, even under concurrent registration from multiple clients.
+The result: the consistency of a central registry with the speed of a local cache.
 
----
+## What happens when you register a schema
 
-## Caching and Read Path
+<Steps>
 
-The read path is optimized for zero-network-hop latency:
+1. **Parse.** The definition is parsed for its type (JSON Schema Draft 7, Avro, Protobuf). Malformed schemas fail before touching Raft.
+2. **Fingerprint.** A SHA-256 hash of the normalized content is computed. A match in the subject returns the existing ID and version.
+3. **Compatibility check.** Unless the mode is `none`, the new schema is checked against the latest version: `backward` (new reads old data), `forward` (old reads new data) or `full` (both).
+4. **Raft proposal.** The new version, its allocated ID, metadata and the updated counter go into one log entry.
+5. **Commit and reply.** All brokers apply the entry and the leader returns the schema ID and version.
 
-- **All reads are local.** Every broker maintains a full replica of the schema metadata in memory. Schema lookups by ID, by subject, or by version never leave the broker process.
-- **Writes invalidate automatically.** When a Raft log entry is applied to the local state machine, the in-memory data is updated immediately. There is no explicit cache invalidation protocol.
-- **Topic-level schema IDs are cached.** When a topic is configured with a schema subject, the resolved schema ID is stored in the topic's metadata. The broker validates incoming messages against this cached ID without querying the registry per message.
+</Steps>
 
-This pattern gives Danube the consistency of a centralized registry with the read performance of a local cache.
+## Where messages get validated
 
----
+<CardGrid>
+  <Card title="Producer (client library)" icon="laptop">
+    A producer created with `with_schema_subject("orders")` resolves the latest (or pinned) version, caches it and serializes against it. Errors surface before the network.
+  </Card>
+  <Card title="Broker (topic policy)" icon="setting">
+    The enforcement layer applies the topic's `validation_policy` to every message.
+  </Card>
+  <Card title="Consumer (optional)" icon="magnifier">
+    Every message carries its `schema_id`, so consumers can fetch and verify it themselves.
+  </Card>
+</CardGrid>
 
-## Registration Pipeline
+### Broker validation policies
 
-When a schema is registered, the following steps execute inside the broker:
+- **`none`**: no checks.
+- **`warn`**: checks that a `schema_id` is present and matches the topic's subject. Mismatches are logged, the message is accepted.
+- **`enforce`**: rejects messages with a missing or mismatched `schema_id`.
 
-1. **Syntax validation.** The schema definition is parsed according to its declared type (JSON Schema Draft 7, Avro, Protobuf). Malformed schemas are rejected before any Raft interaction.
+The common check is an integer comparison against the cached ID, so it adds negligible latency. With `--enable-payload-validation` in `enforce` mode the broker also deserializes and validates the payload itself. That costs more CPU, so keep it for topics where data quality is critical.
 
-2. **Fingerprint computation.** A SHA-256 hash of the normalized schema content is computed. If a version with the same fingerprint already exists in the subject, the existing schema ID and version are returned (idempotent registration).
+```bash
+danube topic schema validation-policy /default/orders --policy enforce --enable-payload-validation
+```
 
-3. **Compatibility check.** If the subject's compatibility mode is not `none`, the new schema is validated against the latest existing version. For `backward` mode, the new schema must be able to read data written with the old schema. For `forward`, the old schema must be able to read data written with the new schema. For `full`, both directions must hold.
+### Consumer options
 
-4. **Raft proposal.** A log entry is created containing the new version data, the allocated schema ID (from `next_schema_id`), metadata (description, tags, creator, timestamp), and the updated counter.
+- **Trust the broker**: on `enforce` topics, deserialize directly.
+- **Fetch and validate**: look up the schema by ID (served locally by the connected broker) and validate before processing.
+- **Cache at startup**: fetch once, reuse for every message. Recommended when the topic uses `warn` or `none`.
 
-5. **Commit and response.** Once the Raft entry is committed, all brokers apply it. The leader returns the schema ID and version number to the client.
+## Topic-schema binding rules
 
----
+- **First producer wins**: the first producer that creates a topic with a schema subject sets the binding. Later producers must use the same subject or get an error.
+- **Admin override**: `danube topic schema configure` changes a topic's subject, intended for controlled migrations.
+- **One subject, many topics**: topics can share a subject, the usual way to give dev, staging and production one evolution path.
+- **Immutable versions**: a version never changes once created. Deletion is admin-only.
 
-## Validation Layers
+<Aside type="tip" title="Got JSON but no schema?">
+Sample recent messages and get a Draft-07 JSON Schema back. AI agents can do the same through [MCP](/ai-agents/overview/).
 
-Danube validates schemas at three points, each serving a different purpose:
+```bash
+danube topic schema infer /default/user-events --sample-size 100
+```
+</Aside>
 
-### Producer-Side (Client Library)
+## Observe validation
 
-The client library serializes the message payload according to the referenced schema before sending. This catches structural errors at the source, before the message reaches the network.
+Prometheus counters emitted by the enforcement layer:
 
-When a producer is created with `with_schema_subject("orders")`, the client resolves the latest (or pinned) schema version, caches the schema definition locally, and uses it for serialization and optional client-side validation.
+- **`danube_schema_validation_total`**: validation attempts, labeled `topic` and `policy` (`warn`, `enforce`).
+- **`danube_schema_validation_failures_total`**: failures, labeled `topic` and `reason` (`missing_schema_id`, `subject_mismatch`, `payload_invalid`).
 
-### Broker-Side (Topic Policy)
+Use them to track schema adoption, alert on failure spikes after a schema update, and find misconfigured `enforce` topics.
 
-When a message arrives at the broker, the enforcement layer checks it against the topic's `schema_config`:
+## Next steps
 
-- **`none`**: no checks. The message is accepted regardless of schema fields.
-- **`warn`**: the broker validates `schema_id` presence and match. Mismatches are logged as warnings, but the message is accepted.
-- **`enforce`**: the broker rejects the message if `schema_id` is missing, does not match the topic's configured subject, or (if `enable_payload_validation` is true) the payload fails schema validation.
-
-The broker stores the expected schema ID in the topic's metadata. Validation is a simple integer comparison (cached schema ID vs. message schema ID), adding negligible latency to the message pipeline.
-
-When `enable_payload_validation` is active in `enforce` mode, the broker additionally deserializes the payload and validates it against the full schema definition. This is more expensive and is typically reserved for production topics where data quality is critical.
-
-### Consumer-Side (Optional)
-
-Consumers receive the `schema_id` in the message metadata. They can:
-
-- **Trust the broker.** If the topic uses `enforce` mode, the consumer can deserialize directly without additional validation.
-- **Fetch and validate.** The consumer fetches the schema from the registry (by ID, served locally on the connected broker) and validates the payload before processing.
-- **Cache at startup.** Fetch the schema once at consumer creation, cache it, and reuse for all messages. This is the recommended pattern when broker validation is set to `warn` or `none`.
-
----
-
-## Topic-Schema Binding
-
-Each topic can be associated with exactly one schema subject. The binding follows these rules:
-
-**First-producer privilege.** The first producer to create a topic with a schema subject sets the binding. Subsequent producers must use the same subject or the broker returns an error.
-
-**Admin override.** Administrators can change a topic's schema subject using `danube ctl topics configure-schema`. This is a controlled operation intended for migrations.
-
-**Schema inference for existing topics.** For topics already carrying JSON payloads without a registered schema, administrators (or AI agents via MCP) can sample recent messages and synthesize a Draft-07 JSON Schema using `danube ctl topics infer-schema /default/user-events --sample-size 100`. See also [AI Agents & MCP](/ai-agents/overview/).
-
-**One subject, many topics.** Multiple topics can share the same schema subject. This is the primary mechanism for multi-environment setups (dev/staging/production topics sharing one schema evolution path).
-
-**Immutable versions.** Once a schema version is created in the registry, it is immutable. Deletion is admin-only and subject to the constraint that no active topic references the version.
-
----
-
-## Observability
-
-The Schema Registry exposes Prometheus metrics for monitoring validation behavior:
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `schema_validation_total` | Counter | Total validation attempts by topic and policy |
-| `schema_validation_failures_total` | Counter | Failed validations by topic, policy, and reason |
-
-**Labels:**
-
-| Label | Values |
-|-------|--------|
-| `topic` | Topic name (e.g., `/production/orders`) |
-| `policy` | `warn`, `enforce` |
-| `reason` | `missing_schema_id`, `schema_mismatch`, `payload_invalid` |
-
-These metrics enable:
-
-- Tracking schema adoption across topics (zero `schema_id` messages vs. validated messages)
-- Alerting on validation failure spikes after schema updates
-- Identifying misconfigured topics (high failure rate on `enforce` topics)
-- Measuring the impact of schema evolution on consumers
+<CardGrid>
+  <LinkCard title="Schema Registry for clients" href="/client-libraries/schema-registry/" description="Register schemas and produce typed messages from code." />
+  <LinkCard title="CLI: Resources" href="/admin/cli-resources/" description="All danube schema and danube topic schema commands." />
+  <LinkCard title="Metadata paths" href="/architecture/metadata-paths/" description="Every key the Raft state machine stores." />
+</CardGrid>

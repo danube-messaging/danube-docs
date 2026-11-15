@@ -1,109 +1,86 @@
 ---
 title: Key Concepts
-description: Core terminology and mental model for understanding Danube Messaging.
+description: The Danube vocabulary on one page. Topics, subscriptions, intents, delivery, storage and modes.
 ---
 
-This page introduces the key concepts you need to understand Danube. Each term links to a detailed documentation page where available.
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-## Topics
+A handful of terms is all you need to read the rest of these docs. Each one links to a deeper page when you want details.
 
-A **topic** is a named channel for publishing and consuming messages. Producers write to topics, consumers read from them. Topics can be:
+## Topics and namespaces
 
-- **Non-partitioned**: a single logical stream managed by one broker.
-- **Partitioned**: split into multiple partitions distributed across brokers for parallel throughput.
+A **topic** is a named stream of messages, written as `/{namespace}/{topic}`, for example `/default/orders`. A **namespace** groups topics and carries shared policies such as limits. The `default` namespace exists out of the box.
 
-Topic names follow a hierarchical format: `/{namespace}/{topic-name}` (e.g., `/default/user-events`).
+Topics can be **partitioned** (`--partitions N`) to spread load across brokers. See [Topics](/concepts/topics/).
 
-## Namespaces
+## Producers, consumers and messages
 
-A **namespace** is a logical grouping of topics. Every topic belongs to a namespace. Namespaces provide isolation for policies like rate limiting, max producers/consumers, and message size limits. The `default` namespace is created automatically.
-
-## Producers
-
-A **producer** is a client that publishes messages to a topic. Producers connect to the broker, specify a topic, and send messages. Each producer can optionally attach a schema for payload validation.
-
-## Consumers
-
-A **consumer** is a client that receives messages from a topic through a subscription. Consumers acknowledge processed messages (in persistent dispatch mode) and can NACK messages to trigger redelivery.
+A **producer** publishes messages to a topic. A **consumer** reads them and, on durable topics, acks each one (or NACKs it to get it redelivered). Messages carry a payload, optional attributes and an optional routing key. See [Messages](/concepts/messages/).
 
 ## Subscriptions
 
-A **subscription** is a named configuration rule that determines how messages are delivered to consumers. Danube supports four types:
+A **subscription** is a named cursor on a topic. Every subscription gets its own copy of every message (fan-out). Consumers inside one subscription share the work according to its type:
 
-| Type | Behavior |
-|------|----------|
-| **Exclusive** | Single consumer, guaranteed ordering. |
-| **Shared** | Round-robin load balancing across multiple consumers. |
-| **Failover** | Active/standby with automatic failover on disconnect. |
-| **Key-Shared** | Per-key ordering via consistent hashing with optional glob filters. |
+- **Exclusive**: one consumer, strict order.
+- **Shared**: round-robin across consumers. The default in `danube consume`.
+- **Failover**: one active consumer, others on standby.
+- **Key-Shared**: per-key order across many consumers, with optional key filters.
 
-Multiple subscriptions on the same topic receive independent copies of every message (fan-out). Consumers within the same subscription share the message stream according to the subscription type.
+See [Subscriptions](/concepts/subscriptions/).
 
-## Dispatch Strategies
+## Stream intents
 
-The **dispatch strategy** controls how messages flow from producers to consumers. It is configured per topic:
+An **intent** says what a topic is for, and Danube picks delivery, durability, retries and dead-letter handling to match:
 
-| Strategy | Description |
-|----------|-------------|
-| **Best-effort** | Direct producer-to-consumer delivery with zero storage overhead. Messages in flight may be lost if a consumer disconnects. Ideal for real-time metrics and telemetry. |
-| **Persistent** | WAL-backed at-least-once delivery. Messages are durably stored, acknowledged by consumers, and retried on failure. Supports NACK, backoff policies, and dead-letter queues. |
+- **`realtime`**: in memory, zero disk I/O, may drop on disconnect. Token streams, metrics, heartbeats.
+- **`event_stream`**: durable, 3 retries, DLQ `<topic>-dlq`. Event meshes, CDC, lakehouse feeds.
+- **`task_queue`**: durable with batched fsync, 5 retries, DLQ `<topic>-dlq`. Work queues, agent tool tasks.
+- **`audit_log`**: durable with batched fsync, 10 retries, blocks on a poison message instead of skipping. Ledgers, tool-call logs.
 
-Both strategies can run side by side in the same cluster on different topics.
+```bash
+danube topic create /default/jobs --intent task_queue
+```
 
-## Stream Intents
+See [Stream intents](/concepts/stream-intents/) for aliases and exact settings.
 
-Rather than configuring dispatch strategy, WAL sync mode, retry limits, backoff intervals, and dead-letter queues manually for every topic, Danube offers **four canonical Stream Intents** (`--intent`):
+## Delivery: reliable or not
 
-| Intent | Dispatch & WAL Sync | Retries & Poison Policy | Typical Use Case |
-|--------|---------------------|-------------------------|------------------|
-| `realtime` | `NonReliable` (zero disk I/O) | `0` retries; drop on disconnect | Token streaming, metrics, heartbeats |
-| `event_stream` | `Reliable`, `os_cache_flush` | `3` retries (`500ms` exp.), DLQ (`<topic>-dlq`) | Event meshes, CDC, lakehouse feeds |
-| `task_queue` | `Reliable`, `fsync_batch` | `5` retries (`1000ms` exp.), DLQ (`<topic>-dlq`) | Durable work queues, agent tool tasks |
-| `audit_log` | `Reliable`, `fsync_batch` | `10` retries (`500ms` exp.), `block` (no DLQ) | Compliance ledgers, state journals |
+Under the hood every topic uses one of two **dispatch strategies**. **Non-reliable** pushes messages straight from producer to consumer with no storage. **Reliable** writes to the WAL first and delivers at least once, with acks, retries and DLQs. Intents choose for you. See [Dispatch strategies](/concepts/dispatch-strategies/).
 
-See [Stream Intents](/concepts/stream-intents/) for aliases and full expansion details.
+## Storage: WAL and tiers
 
-## Agent Runtime Primitives & Topic Branching
+Reliable topics are written to a local **write-ahead log (WAL)** for fast sequential writes. Older segments can move to S3, GCS, Azure Blob or a shared filesystem. See [Durability](/durability/overview/).
 
-For autonomous workflows and debugging, Danube supports first-class runtime and time-travel capabilities:
+## Schema registry
 
-- **Agent Runtime Primitives**: Extend long-running task visibility (`extend_lease`), report resumable checkpoints (`report_progress` / `x-danube-checkpoint-b64`), cancel descendant subtasks (`cancel_task_tree`), and execute correlated RPC (`request_reply`). See [Danube for AI Agents](/ai-agents/overview/).
-- **Zero-Copy Topic Branching & Time-Travel**: Fork counterfactual branches at an offset or nanosecond timestamp (`danube ctl topics branch`), rewind subscriptions (`topics seek`), inspect messages non-destructively (`topics peek`), or replay DLQs (`topics replay-dlq`).
+The **schema registry** is part of the broker and shares port 6650. It stores JSON Schema, Avro and Protobuf schemas with versioning and compatibility checks. See [Schema registry](/client-libraries/schema-registry/).
 
-## Broker Modes
+## Node modes
 
-Danube runs from a single binary (`danube`) using `danube up --mode`:
+One binary, three ways to run it:
 
-| Mode | Description |
-|------|-------------|
-| **Standalone** | Zero-YAML single broker on `127.0.0.1:6650` (single-port multiplexing) for development and CI. |
-| **Cluster** | Multi-broker with embedded Raft consensus, dynamic `/cluster/config/*` replication, automated load balancing, and horizontal scaling. Recommended for production. |
-| **Edge** | Zero-YAML MQTT gateway for IoT devices (`# -> /{edge_name}/ingest`) with local WAL buffering and cluster replication. |
+<CardGrid>
+	<Card title="standalone" icon="laptop">
+		One node, no consensus. Laptops, CI and single-box deployments.
+	</Card>
+	<Card title="cluster" icon="random">
+		Raft-replicated brokers for production and high availability.
+	</Card>
+	<Card title="edge" icon="seti:shell">
+		MQTT ingest at the edge, buffered locally and replicated to a cluster.
+	</Card>
+</CardGrid>
 
-For how node flags, Raft state, GitOps manifests, and topic creation fit together, see [Configuration Workflow](/getting-started/configuration-workflow/).
+See [Broker modes](/getting-started/broker-modes/).
 
-## Schema Registry
+## Cluster settings live in Raft
 
-The **schema registry** is built into the broker (multiplexed on port `6650`, no separate service). It manages schemas for message validation and supports:
+Cluster-wide settings (storage, WAL retention, load manager) are not startup flags. They are stored in Raft and changed live with `danube cluster ...` or declaratively with `danube apply -f`. See [Configuration workflow](/getting-started/configuration-workflow/).
 
-- **Types**: JSON Schema, Avro, Protobuf, plus simple String/Number/Bytes
-- **Versioning & Inference**: each schema subject tracks versions with timestamps, and `danube ctl topics infer-schema` can derive a JSON Schema from live topic samples
-- **Compatibility**: enforce backward, forward, or full compatibility between versions
+## Next steps
 
-## WAL (Write-Ahead Log)
-
-The **WAL** is the local on-disk log where persistent topic messages are written before being dispatched to consumers. It provides:
-
-- Durable writes that survive broker restarts
-- Fast sequential I/O for high throughput
-- A replication source for edge-to-cluster data flow
-- Background export to cloud object storage (S3, GCS, Azure Blob)
-
-## Next Steps
-
-Now that you understand the terminology:
-
-- **[Quickstart](/getting-started/quickstart/)**: Start a `danube` broker and send your first message.
-- **[Broker Modes](/getting-started/broker-modes/)**: Detailed guide for `standalone`, `cluster`, and `edge` deployments.
-- **[Configuration Workflow](/getting-started/configuration-workflow/)**: Understand the 4-layer model from `danube up` flags to Raft policies and `--intent` topics.
-- **[Danube for AI Agents](/ai-agents/overview/)**: Explore agentic SDK primitives, topic branching, and the 71-tool MCP control plane.
+<CardGrid>
+	<LinkCard title="Quickstart" description="Try these concepts hands-on in five minutes." href="/getting-started/quickstart/" />
+	<LinkCard title="The danube CLI" description="Every command, grouped and explained." href="/getting-started/the-danube-cli/" />
+	<LinkCard title="Danube for AI agents" description="How intents and replay help agent systems." href="/ai-agents/overview/" />
+</CardGrid>

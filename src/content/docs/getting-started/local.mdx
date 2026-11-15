@@ -1,95 +1,115 @@
 ---
 title: Run Locally
-description: Download and run the single danube binary on your local machine.
+description: Download the danube binary, start a node on your machine and send your first messages in under a minute.
 ---
 
-import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard, Steps, Aside } from '@astrojs/starlight/components';
 
-Run a Danube broker directly on your machine. No Docker, no Kubernetes, no YAML configuration files—just the single `danube` binary.
-
-## Download
-
-Download the latest `danube` binary from the [releases page](https://github.com/danube-messaging/danube/releases) (it bundles the broker, CLI, admin, and MCP server into one executable).
-
-## Single-Node Quick Start
-
-Start a broker locally with zero config files:
-
-<Steps>
-1. **Start the broker**
-
-   ```bash title="Terminal 1"
-   danube up --mode standalone --data-dir ./danube-data
-   ```
-
-   Defaults configured automatically:
-
-   | Setting | Value |
-   |---------|-------|
-   | Broker / Admin / Schema address | `127.0.0.1:6650` (single-port multiplexed) |
-   | Raft address | `127.0.0.1:7650` |
-   | Raft & segment data | `./danube-data` |
-   | WAL directory | Inside `--data-dir` (or custom `--wal-dir`) |
-   | Authentication | `none` |
-   | Storage mode | Local |
-
-2. **Produce messages**
-
-   ```bash title="Terminal 2"
-   danube ctl produce \
-     -s http://127.0.0.1:6650 \
-     -t /default/demo_topic \
-     -c 10 \
-     -m "Hello, Danube!"
-   ```
-
-3. **Consume messages**
-
-   ```bash title="Terminal 3"
-   danube ctl consume \
-     -s http://127.0.0.1:6650 \
-     -t /default/demo_topic \
-     --subscription my_subscription
-   ```
-</Steps>
-
-Data persists across restarts in `./danube-data`. To start fresh, remove the data directory and re-run.
-
-## Multi-Broker Cluster (Local)
-
-You can run a multi-broker Raft cluster directly on localhost with zero YAML files—just give each broker unique ports and `--data-dir`, and list `--seed-nodes`:
-
-```bash title="Broker 1"
-danube up --mode cluster \
-  --broker-addr 127.0.0.1:6650 \
-  --raft-addr 127.0.0.1:7650 \
-  --data-dir ./data1 \
-  --seed-nodes "127.0.0.1:7650,127.0.0.1:7651" &
-```
-
-```bash title="Broker 2"
-danube up --mode cluster \
-  --broker-addr 127.0.0.1:6651 \
-  --raft-addr 127.0.0.1:7651 \
-  --data-dir ./data2 \
-  --seed-nodes "127.0.0.1:7650,127.0.0.1:7651" &
-```
-
-:::note[Optional Separate Admin Port]
-Admin gRPC multiplexes onto `--broker-addr` (`6650` / `6651`) by default. Pass `--admin-addr 0.0.0.0:50051` (with `--endpoint http://127.0.0.1:50051` on `danube ctl`) whenever you want Admin gRPC isolated on a separate port.
-:::
-
-Once running, manage storage, WAL retention, load balancing, and topics dynamically via `danube ctl`—see [Configuration Workflow](/getting-started/configuration-workflow/).
-
-## Cleanup
+Run Danube on your own machine with a single binary. No Docker, no config files, no external services.
 
 ```bash
-# Stop the broker(s)
-pkill -x danube
-
-# Remove data (for a fresh start)
-rm -rf ./danube-data ./data1 ./data2
-
-# Verify
-ps aux | grep danube
+danube up standalone
 ```
+
+## Install the binary
+
+Download `danube` for your platform from the [releases page](https://github.com/danube-messaging/danube/releases) and put it on your `PATH`. The same binary is the server, the CLI and the MCP server.
+
+```bash
+danube version
+```
+
+Run `danube` on its own at any time for an overview of every command. It never starts a server.
+
+## Send your first messages
+
+<Steps>
+1. **Start a standalone node.**
+
+   ```bash title="Terminal 1"
+   danube up standalone
+   ```
+
+   The node listens on `127.0.0.1:6650` and stores its data in `./danube-data`, next to where you ran the command. The first start prints a warning about that default directory, which is expected.
+
+2. **Create a topic by describing what it is for.**
+
+   ```bash title="Terminal 2"
+   danube topic create /default/orders --intent event_stream
+   ```
+
+3. **Start a consumer.**
+
+   ```bash title="Terminal 2"
+   danube consume /default/orders -s my-sub
+   ```
+
+4. **Produce a few messages.** `event_stream` topics are reliable, so pass `-r`.
+
+   ```bash title="Terminal 3"
+   danube produce /default/orders -m "hello danube" -r --count 5
+   ```
+
+   The consumer prints each message as it arrives.
+</Steps>
+
+Every CLI command talks to `http://127.0.0.1:6650` by default. Pass `--endpoint` to reach another node.
+
+## Keep data in a fixed place
+
+Stop the node with Ctrl-C. Starting it again from the same directory resumes the same node with all its topics and messages.
+
+To avoid surprises when you change directories, give the node an explicit path:
+
+```bash
+danube up standalone --data-dir ~/danube-data
+```
+
+## Run a three-node cluster on one machine
+
+Every node needs its own data directory, client port and Raft port. All three list the same seed nodes.
+
+```bash title="Terminal 1"
+danube up cluster --data-dir ./data/node1 \
+  --listen 127.0.0.1:6650 --raft-port 7650 \
+  --seed-nodes 127.0.0.1:7650,127.0.0.1:7651,127.0.0.1:7652
+```
+
+```bash title="Terminal 2"
+danube up cluster --data-dir ./data/node2 \
+  --listen 127.0.0.1:6651 --raft-port 7651 \
+  --seed-nodes 127.0.0.1:7650,127.0.0.1:7651,127.0.0.1:7652
+```
+
+```bash title="Terminal 3"
+danube up cluster --data-dir ./data/node3 \
+  --listen 127.0.0.1:6652 --raft-port 7652 \
+  --seed-nodes 127.0.0.1:7650,127.0.0.1:7651,127.0.0.1:7652
+```
+
+Check that the nodes found each other:
+
+```bash
+danube cluster status
+danube broker list
+```
+
+<Aside type="tip">
+  Prefer to start with one node and add the others later? Follow [Grow from one to three nodes](/getting-started/broker-modes/#grow-from-one-to-three-nodes).
+</Aside>
+
+## Clean up
+
+Stop each node with Ctrl-C, then remove the data for a fresh start:
+
+```bash
+rm -rf ./danube-data ./data
+```
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="The danube CLI" href="/getting-started/the-danube-cli/" description="Contexts, connection flags and the full command tree." />
+  <LinkCard title="Configure Cluster & Topics" href="/getting-started/configuration-workflow/" description="Change storage and WAL settings live or apply a manifest." />
+  <LinkCard title="Stream Intents" href="/concepts/stream-intents/" description="Pick the right intent for each topic." />
+</CardGrid>

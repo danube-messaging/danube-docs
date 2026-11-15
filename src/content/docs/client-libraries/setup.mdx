@@ -1,15 +1,15 @@
 ---
 title: Setup & Connection
-description: Connect, configure TLS, JWT authentication, and token rotation for Danube clients.
+description: Connect a Danube client over plain gRPC, TLS or mTLS, authenticate with JWT tokens and rotate them at runtime.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-## Basic Connection
+Every Danube client starts with one builder call that points at a broker. This page shows how to connect locally, then how to add TLS, mTLS and JWT tokens for production.
 
-Connect to a Danube broker with a gRPC endpoint:
+## Connect to a local broker
 
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Basic connection"
@@ -80,47 +80,87 @@ asyncio.run(main())
 </TabItem>
 </Tabs>
 
-Endpoint format: `http://host:port` or `https://host:port` for TLS.
+Port `6650` serves messaging, the Schema Registry and admin calls on the same endpoint, so one client connection covers everything on this section's pages. Use `http://host:port` for plain gRPC and `https://host:port` for TLS.
 
----
+## Rust builder methods
 
-## TLS Configuration
+- **service_url(url)**: broker endpoint. Required.
+- **with_tls(ca_cert)**: verify the broker with a PEM CA file. Returns `Result`, so add `?`.
+- **with_mtls(ca_cert, client_cert, client_key)**: TLS plus a client certificate. Returns `Result`.
+- **with_token(token)**: send a static JWT on every request. Turns on TLS (system roots if you did not call `with_tls`).
+- **with_token_supplier(fn)**: call a closure on every request to get the current JWT. Turns on TLS the same way.
+- **build()**: async, returns the `DanubeClient`.
 
-For secure production environments, enable TLS encryption:
+`with_api_key()` still compiles but is deprecated: use `with_token()`.
 
-<Tabs>
+## Enable TLS
+
+Point the client at the CA that signed the broker certificate and switch the URL to `https://`.
+
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
-```rust title="TLS with custom CA"
-use danube_client::DanubeClient;
-use rustls::crypto;
-use tokio::sync::OnceCell;
-
-static CRYPTO_PROVIDER: OnceCell<()> = OnceCell::const_new();
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    CRYPTO_PROVIDER.get_or_init(|| async {
-        let crypto_provider = crypto::ring::default_provider();
-        crypto_provider
-            .install_default()
-            .expect("Failed to install default CryptoProvider");
-    })
-    .await;
-
-    let client = DanubeClient::builder()
-        .service_url("https://127.0.0.1:6650")
-        .with_tls("./certs/ca-cert.pem")?
-        .build()
-        .await?;
-
-    Ok(())
-}
+```rust title="TLS with a custom CA"
+let client = DanubeClient::builder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./certs/ca-cert.pem")?
+    .build()
+    .await?;
 ```
 
-For mutual TLS (mTLS), supply the client certificate chain and private key alongside the CA certificate:
+</TabItem>
+<TabItem label="Go">
 
-```rust title="Mutual TLS (mTLS)"
+```go title="TLS with a custom CA"
+builder, err := danube.NewClient().
+    ServiceURL("127.0.0.1:6650").
+    WithTLS("./certs/ca-cert.pem")
+if err != nil {
+    log.Fatalf("failed to configure TLS: %v", err)
+}
+
+client, err := builder.Build()
+```
+
+</TabItem>
+<TabItem label="Java">
+
+```java title="TLS with a custom CA"
+import java.nio.file.Path;
+
+DanubeClient client = DanubeClient.builder()
+        .serviceUrl("https://127.0.0.1:6650")
+        .withTls(Path.of("./certs/ca-cert.pem"))
+        .build();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python title="TLS with a custom CA"
+client = await (
+    DanubeClientBuilder()
+    .service_url("https://127.0.0.1:6650")
+    .with_tls("./certs/ca-cert.pem")
+    .build()
+)
+```
+
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Rust: rustls crypto provider">
+If your binary links more than one rustls crypto backend (for example through other dependencies), rustls cannot pick one and panics at the first TLS handshake. Install one explicitly at startup: `rustls::crypto::ring::default_provider().install_default().ok();`
+</Aside>
+
+## Add a client certificate (mTLS)
+
+Use mTLS when the broker should also verify who the client is.
+
+<Tabs syncKey="client-lang">
+<TabItem label="Rust">
+
+```rust title="Mutual TLS"
 let client = DanubeClient::builder()
     .service_url("https://127.0.0.1:6650")
     .with_mtls(
@@ -135,23 +175,7 @@ let client = DanubeClient::builder()
 </TabItem>
 <TabItem label="Go">
 
-```go title="TLS with custom CA"
-builder, err := danube.NewClient().
-    ServiceURL("127.0.0.1:6650").
-    WithTLS("./certs/ca-cert.pem")
-if err != nil {
-    log.Fatalf("failed to configure TLS: %v", err)
-}
-
-client, err := builder.Build()
-if err != nil {
-    log.Fatalf("failed to create client: %v", err)
-}
-```
-
-For mutual TLS (mTLS) with client certificates:
-
-```go title="mTLS"
+```go title="Mutual TLS"
 builder, err := danube.NewClient().
     ServiceURL("127.0.0.1:6650").
     WithMTLS("./certs/ca-cert.pem", "./certs/client-cert.pem", "./certs/client-key.pem")
@@ -160,18 +184,7 @@ builder, err := danube.NewClient().
 </TabItem>
 <TabItem label="Java">
 
-```java title="TLS with custom CA"
-import java.nio.file.Path;
-
-DanubeClient client = DanubeClient.builder()
-        .serviceUrl("https://127.0.0.1:6650")
-        .withTls(Path.of("./certs/ca-cert.pem"))
-        .build();
-```
-
-For mutual TLS (mTLS):
-
-```java title="mTLS"
+```java title="Mutual TLS"
 DanubeClient client = DanubeClient.builder()
         .serviceUrl("https://127.0.0.1:6650")
         .withMutualTls(
@@ -184,18 +197,7 @@ DanubeClient client = DanubeClient.builder()
 </TabItem>
 <TabItem label="Python">
 
-```python title="TLS with custom CA"
-client = await (
-    DanubeClientBuilder()
-    .service_url("https://127.0.0.1:6650")
-    .with_tls("./certs/ca-cert.pem")
-    .build()
-)
-```
-
-For mutual TLS (mTLS):
-
-```python title="mTLS"
+```python title="Mutual TLS"
 client = await (
     DanubeClientBuilder()
     .service_url("https://127.0.0.1:6650")
@@ -211,88 +213,74 @@ client = await (
 </TabItem>
 </Tabs>
 
-**Requirements:**
+## Connect to an auto-TLS broker
 
-- CA certificate file (PEM format)
-- HTTPS URL (`https://` instead of `http://`)
-- Broker must be configured with TLS enabled
+`--auth auto-tls` is the fastest way to a secure broker: Danube generates its own CA, node certificate and an admin token on first boot.
 
----
+<Steps>
 
-## Auto-TLS Mode (`--auth-mode auto-tls`)
+1. Start the broker:
 
-For quick secure setups without managing your own PKI, start brokers with `--auth-mode auto-tls`:
+   ```bash
+   danube up cluster --data-dir ./danube-data --single-node --auth auto-tls
+   ```
 
-```bash title="Start broker with zero-config TLS and bootstrap admin token"
-danube up --mode cluster --data-dir ./danube-data --auth-mode auto-tls
+2. Find the generated files in the data directory:
+
+   - **./danube-data/tls/ca.pem**: the cluster CA, shared by all nodes through Raft.
+   - **./danube-data/bootstrap_admin.token**: a super-admin JWT, file mode `0600`.
+
+3. Point the client at them. The node certificate covers `localhost` and `127.0.0.1` plus the advertised address.
+
+   ```rust title="Connect to an auto-TLS broker"
+   let token = std::fs::read_to_string("./danube-data/bootstrap_admin.token")?
+       .trim()
+       .to_string();
+
+   let client = DanubeClient::builder()
+       .service_url("https://127.0.0.1:6650")
+       .with_tls("./danube-data/tls/ca.pem")?
+       .with_token(token)
+       .build()
+       .await?;
+   ```
+
+</Steps>
+
+<Aside type="caution">
+The bootstrap token is a super-admin credential. Use it to create roles and scoped tokens, then give applications those instead. See [Authorization](/security/authorization/).
+</Aside>
+
+## Authenticate with a JWT
+
+When the broker runs with `--auth tls` or `--auth auto-tls`, every request needs a valid token. Get one with the `danube` CLI:
+
+```bash
+# Offline: sign a token yourself (secret must match the broker's --jwt-secret)
+danube auth token create --subject my-app --jwt-secret your-secret-key
+
+# Offline, with a shorter lifetime (default is 8760h)
+danube auth token create --subject my-app --ttl 24h --jwt-secret your-secret-key
+
+# Online: ask the cluster to issue one (needs ManageCluster)
+danube auth token issue --subject agent-worker --ttl 24h
+
+# Revoke every token for a subject, cluster-wide
+danube auth token revoke --subject agent-worker
 ```
 
-On first boot, Danube automatically provisions:
+Then pass it to the client. Read it from the environment or a secret store, never from source code.
 
-- **`{data_dir}/tls/ca.pem`**, **`cert.pem`**, and **`key.pem`** (syncing a shared Cluster CA across Raft under `/cluster/security/ca`).
-- **`{data_dir}/bootstrap_admin.token`** (mode `0600`), a signed super-admin JWT ready for `danube ctl` or application clients.
-
-Point clients directly at the generated CA and token:
-
-```rust title="Connect to an auto-tls broker"
-let token = std::fs::read_to_string("./danube-data/bootstrap_admin.token")?
-    .trim()
-    .to_string();
-
-let client = DanubeClient::builder()
-    .service_url("https://127.0.0.1:6650")
-    .with_tls("./danube-data/tls/ca.pem")?
-    .with_token(&token)
-    .build()
-    .await?;
-```
-
----
-
-## JWT Authentication
-
-When the broker runs with authentication enabled (`--auth-mode tls` or `--auth-mode auto-tls`), all client requests must carry a valid JWT token. Tokens can be generated offline or issued/revoked via `danube ctl`.
-
-### Creating, Issuing, and Revoking Tokens
-
-```bash title="Manage JWT tokens with danube ctl"
-# Create a service account token offline (default: 8760h / 1-year TTL)
-danube ctl security tokens create \
-  --subject my-app \
-  --secret-key your-secret-key
-
-# Create an offline token with custom TTL and issuer
-danube ctl security tokens create \
-  --subject my-app \
-  --ttl 24h \
-  --issuer danube-auth \
-  --secret-key your-secret-key
-
-# Issue a token directly from a running cluster (requires ManageCluster)
-danube ctl security tokens issue \
-  --subject agent-worker \
-  --type service_account \
-  --ttl 24h
-
-# Revoke all tokens for a subject cluster-wide
-danube ctl security tokens revoke --subject agent-worker
-```
-
-For offline tokens (`create`), `--secret-key` must match the broker's `--jwt-secret` value (or the generated secret in `--auth-mode auto-tls`).
-
-### Connecting with a Token
-
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="JWT authentication"
-let token = std::env::var("DANUBE_TOKEN")
-    .expect("DANUBE_TOKEN environment variable not set");
+let token = std::env::var("DANUBE_TOKEN")?;
 
 let client = DanubeClient::builder()
     .service_url("https://127.0.0.1:6650")
     .with_tls("./certs/ca-cert.pem")?
-    .with_token(&token)
+    .with_token(token)
     .build()
     .await?;
 ```
@@ -303,21 +291,17 @@ let client = DanubeClient::builder()
 ```go title="JWT authentication"
 token := os.Getenv("DANUBE_TOKEN")
 
-// WithToken automatically enables TLS with system CA roots
+// WithToken enables TLS with system CA roots
 client, err := danube.NewClient().
     ServiceURL("127.0.0.1:6650").
     WithToken(token).
     Build()
-```
 
-To combine with a custom CA certificate:
-
-```go title="JWT + custom CA"
+// Or combine with a custom CA
 builder, _ := danube.NewClient().
     ServiceURL("127.0.0.1:6650").
     WithTLS("./certs/ca-cert.pem")
-
-client, _ := builder.WithToken(token).Build()
+client, _ = builder.WithToken(token).Build()
 ```
 
 </TabItem>
@@ -326,19 +310,9 @@ client, _ := builder.WithToken(token).Build()
 ```java title="JWT authentication"
 String token = System.getenv("DANUBE_TOKEN");
 
-// withToken automatically enables TLS
 DanubeClient client = DanubeClient.builder()
         .serviceUrl("https://127.0.0.1:6650")
-        .withToken(token)
-        .build();
-```
-
-To combine with a custom CA certificate:
-
-```java title="JWT + custom CA"
-DanubeClient client = DanubeClient.builder()
-        .serviceUrl("https://127.0.0.1:6650")
-        .withTls(Path.of("./certs/ca-cert.pem"))
+        .withTls(Path.of("./certs/ca-cert.pem")) // optional: omit to use system roots
         .withToken(token)
         .build();
 ```
@@ -351,22 +325,10 @@ import os
 
 token = os.environ["DANUBE_TOKEN"]
 
-# with_token automatically enables TLS with system CA roots
 client = await (
     DanubeClientBuilder()
     .service_url("https://127.0.0.1:6650")
-    .with_token(token)
-    .build()
-)
-```
-
-To combine with a custom CA certificate:
-
-```python title="JWT + custom CA"
-client = await (
-    DanubeClientBuilder()
-    .service_url("https://127.0.0.1:6650")
-    .with_tls("./certs/ca-cert.pem")
+    .with_tls("./certs/ca-cert.pem")  # optional: omit to use system roots
     .with_token(token)
     .build()
 )
@@ -375,23 +337,13 @@ client = await (
 </TabItem>
 </Tabs>
 
-**How it works:**
+The client sends `Authorization: Bearer <token>` on every gRPC call. The broker checks the signature and expiry, then applies RBAC bindings.
 
-1. Token is created offline with `danube ctl security tokens create` or issued online via `danube ctl security tokens issue`
-2. Client sends the token as `Authorization: Bearer <token>` on every gRPC request
-3. Broker validates the token signature and expiration, then checks RBAC policies
+## Rotate tokens without restarting
 
-:::tip
-Store tokens in environment variables or secret managers. Never hardcode tokens in source code.
-:::
+When tokens are refreshed underneath you (Kubernetes projected volumes, Vault agents), pass a supplier instead of a fixed token. It runs on every request, so the client always uses the newest value.
 
----
-
-## Token Rotation
-
-For environments where tokens refresh at runtime (Kubernetes projected volumes, vault-injected secrets), use `with_token_supplier`. The supplier function is called on every gRPC request:
-
-<Tabs>
+<Tabs syncKey="client-lang">
 <TabItem label="Rust">
 
 ```rust title="Token rotation"
@@ -401,6 +353,8 @@ let client = DanubeClient::builder()
     .with_token_supplier(|| {
         std::fs::read_to_string("/var/run/secrets/danube/token")
             .unwrap_or_default()
+            .trim()
+            .to_string()
     })
     .build()
     .await?;
@@ -452,3 +406,11 @@ client = await (
 
 </TabItem>
 </Tabs>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Producer guide" href="/client-libraries/producer/" description="Send your first messages." />
+  <LinkCard title="Securing a cluster" href="/security/securing-a-cluster/" description="End-to-end TLS, tokens and RBAC setup." />
+  <LinkCard title="Authentication" href="/security/authentication/" description="How the broker validates tokens and certificates." />
+</CardGrid>

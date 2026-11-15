@@ -1,218 +1,229 @@
 ---
-title: Broker Modes
-description: How to run Danube as Standalone, Cluster, or Edge from the single danube binary without YAML files.
+title: Node Modes
+description: Run Danube as a standalone node, a Raft cluster, or an MQTT edge gateway with one command, danube up.
 ---
 
-import { Tabs, TabItem, Steps, Card, CardGrid } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-Danube runs as a single binary (`danube`) using `danube up --mode <mode>` in one of three modes. All modes start **zero-YAML**—no `danube_broker.yml` or `edge.yaml` file is required—and multiplex Client gRPC, Schema Registry, and Admin gRPC onto port `6650` by default.
+Every Danube node starts with one command: `danube up <mode>`. Pick the mode that matches where the node runs, and Danube picks safe defaults for everything else.
 
-## At a Glance
+```bash
+danube up standalone                                   # laptop, CI, one server
+danube up cluster --data-dir /var/lib/danube --single-node   # production, start small
+danube up edge --data-dir /var/lib/edge --name plant-7 \
+  --cloud-endpoint https://danube.example.com:6650     # factory or IoT gateway
+```
+
+There are no config files to write. Clients, the schema registry and admin commands all share port `6650`.
+
+## Choose a mode
 
 <CardGrid>
-	<Card title="Standalone" icon="laptop">
-		Single broker, zero configuration. Ideal for development, CI, and single-server deployments.
-
-		- **Brokers**: 1
-		- **Config**: CLI flags only (zero YAML)
-		- **Raft**: single-node, auto-init
-		- **Port**: `127.0.0.1:6650` (Client + Schema + Admin multiplexed)
-	</Card>
-	<Card title="Cluster" icon="setting">
-		Multi-broker with Raft consensus, dynamic `/cluster/config/*` replication, and load-based rebalancing. Recommended for production.
-
-		- **Brokers**: 3+ (recommended)
-		- **Config**: Zero-YAML node flags + dynamic Raft state (`danube ctl cluster` / `danube ctl apply`)
-		- **Node Roles**: `broker`, `lakehouse`, or `all` (`--node-role`)
-		- **Clients**: Danube gRPC (`6650`)
-	</Card>
-	<Card title="Edge" icon="open-book">
-		Lightweight zero-YAML MQTT gateway for IoT ingestion with local WAL buffering and cluster replication.
-
-		- **Brokers**: 1 per site
-		- **Config**: Zero-YAML (`--edge-name`, `--cloud-endpoint`)
-		- **Default Route**: `# -> /{edge_name}/ingest`
-		- **Clients**: MQTT v3.1.1 / v5.0 (`1883`) + Danube gRPC
-	</Card>
+  <Card title="Standalone" icon="laptop">
+    One node, no consensus traffic. Best for development, CI and single-box deployments. Starts with zero flags.
+  </Card>
+  <Card title="Cluster" icon="setting">
+    Raft-replicated metadata across nodes. Best for production and high availability. Start with one node and grow later.
+  </Card>
+  <Card title="Edge" icon="random">
+    Accepts MQTT from devices, stores messages locally and replicates them to a cloud cluster. Best for factories, gateways and IoT.
+  </Card>
 </CardGrid>
 
----
+<Aside type="tip">
+  Not sure? Use `standalone` to learn Danube and `cluster` for anything you plan to grow. A standalone node cannot be converted into a cluster node later, so pick `cluster` if you expect to add nodes.
+</Aside>
 
-## Standalone Mode
+## Start a standalone node
 
-The fastest way to get started: a single broker with zero config files and zero external dependencies.
-
-```bash title="Start standalone broker"
-danube up --mode standalone --data-dir ./danube-data
+```bash
+danube up standalone
 ```
 
-Default bind configuration:
+That's it. The node listens on `127.0.0.1:6650` and keeps its data in `./danube-data`, relative to the directory you start it from.
 
-| Setting | Default |
-|---------|---------|
-| Broker / Admin / Schema address | `127.0.0.1:6650` (multiplexed) |
-| Raft address | `127.0.0.1:7650` |
-| Data directory | `./danube-data` |
-| Storage mode | Local WAL |
-| Authentication | `none` |
+Pass `--data-dir` to keep the data in a fixed place, and `--listen` to accept remote connections:
 
-Override any default with CLI flags (for example, adding a dedicated `--admin-addr` if you want firewall separation, or isolating the WAL on NVMe via `--wal-dir`):
-
-```bash title="Override defaults"
-danube up --mode standalone \
-  --data-dir ./danube-data \
-  --wal-dir ./danube-wal \
-  --broker-addr 0.0.0.0:6650 \
-  --admin-addr 0.0.0.0:50051
+```bash
+danube up standalone --data-dir ~/danube --listen 0.0.0.0:6650
 ```
 
-:::note
-Standalone mode supports the exact same client SDK APIs, `--intent` profiles, schema registry, and MCP tools as cluster mode, without multi-broker orchestration.
-:::
+## Start a cluster node
 
-Data persists across restarts in `--data-dir` (and `--wal-dir` if specified). To start fresh, remove those directories and restart the broker.
+Cluster mode needs one thing standalone does not: an explicit `--data-dir`. Then tell the node how it joins, with at most one membership flag.
 
----
+<Tabs>
+  <TabItem label="One node (--single-node)">
+    Bootstrap a brand-new cluster with a single member. You can [grow it later](#grow-from-one-to-three-nodes).
 
-## Cluster Mode
+    ```bash
+    danube up cluster --data-dir /var/lib/danube --single-node
+    ```
+  </TabItem>
+  <TabItem label="Several nodes (--seed-nodes)">
+    Start every node with the same list of Raft addresses (port `7650` by default). The peers find each other and the node with the lowest id bootstraps the cluster.
 
-The recommended mode for production. Multiple brokers form a Raft consensus group, replicate cluster configuration under `/cluster/config/*`, and distribute topics across nodes.
+    ```bash
+    danube up cluster --data-dir /var/lib/danube \
+      --listen 0.0.0.0:6650 \
+      --advertised-addr broker1:6650 \
+      --seed-nodes broker1:7650,broker2:7650,broker3:7650
+    ```
 
-### Requirements
+    Run the same command on `broker2` and `broker3`, changing only `--advertised-addr`.
+  </TabItem>
+  <TabItem label="Join a running cluster (--join)">
+    Start the node and wait until an operator adds it with `danube cluster node add`.
 
-- Zero YAML files required (`danube_broker.yml` is gone)
-- At least 3 brokers for Raft quorum (recommended)
-- Network connectivity between broker gRPC (`6650`) and Raft (`7650`) ports
+    ```bash
+    danube up cluster --data-dir /var/lib/danube --join \
+      --admin-listen 0.0.0.0:50051
+    ```
 
-### Starting a Zero-YAML Cluster
+    A joining node only opens its client port after it becomes a member, so give it a separate `--admin-listen` that the add command can reach.
+  </TabItem>
+</Tabs>
 
-Start each node with its local addresses, `--data-dir`, and `--seed-nodes`:
+If you pass no membership flag, a fresh data directory bootstraps a single-node cluster and prints a warning. Add `--single-node` to confirm that choice and silence the warning.
 
-```bash title="Broker 1"
-danube up --mode cluster \
-  --broker-addr 0.0.0.0:6650 \
-  --raft-addr 0.0.0.0:7650 \
-  --data-dir ./data1 \
-  --seed-nodes "127.0.0.1:7650,127.0.0.1:7651,127.0.0.1:7652"
+<Aside type="note">
+  Raft uses port `7650` on the same IP as `--listen`. When you run several nodes on one machine, give each node its own `--listen` port and `--raft-port`.
+</Aside>
+
+## Start an edge node
+
+An edge node needs a data directory, a unique name and the address of the cloud cluster it replicates to:
+
+```bash
+danube up edge --data-dir /var/lib/danube-edge --name plant-7 \
+  --cloud-endpoint https://danube.example.com:6650 \
+  --cloud-token "$DANUBE_CLOUD_TOKEN"
 ```
 
-```bash title="Broker 2"
-danube up --mode cluster \
-  --broker-addr 0.0.0.0:6651 \
-  --raft-addr 0.0.0.0:7651 \
-  --data-dir ./data2 \
-  --seed-nodes "127.0.0.1:7650,127.0.0.1:7651,127.0.0.1:7652"
+Devices publish over MQTT on `0.0.0.0:1883` (change it with `--mqtt-listen`). Every message lands on `/plant-7/ingest` in the cloud cluster. See [Danube Edge](/edge/overview/) for topic mappings and offline buffering.
+
+## Required flags per mode
+
+<CardGrid>
+  <Card title="standalone" icon="laptop">
+    Nothing. `--data-dir` is optional and defaults to `./danube-data`.
+  </Card>
+  <Card title="cluster" icon="setting">
+    `--data-dir`, plus at most one of `--single-node`, `--seed-nodes` or `--join`.
+  </Card>
+  <Card title="edge" icon="random">
+    `--data-dir`, `--name` and `--cloud-endpoint`. `--cloud-token` and `--mqtt-listen` are optional.
+  </Card>
+</CardGrid>
+
+All modes share the same node flags:
+
+- **`--listen`**: client and admin gRPC address (default `127.0.0.1:6650`).
+- **`--admin-listen`**: serve admin gRPC on its own address instead of sharing `--listen`.
+- **`--metrics-listen`**: Prometheus exporter address (off by default).
+- **`--advertised-addr`**: host and port that clients and peers use to reach this node.
+- **`--connect-url`**: external proxy or ingress URL handed to clients.
+- **`--raft-port`**: Raft transport port (default `7650`).
+- **`--wal-dir`**: put the write-ahead log on a different disk than `--data-dir`.
+- **`--role`**: `broker`, `lakehouse` or `all` (default `all`). See [Danube Iceberg](/lakehouse/overview/).
+- **`--auth`**: `none` (default), `tls` or `auto-tls`, with `--tls-cert`, `--tls-key`, `--ca-cert`, `--jwt-secret` and `--super-admin`. See [Security](/security/overview/).
+- **`--recovery-config`**: break-glass override file, used only when Raft quorum is lost.
+- **`--dry-run`**: print the resolved configuration and exit.
+
+The most common flags also read environment variables: `DANUBE_DATA_DIR`, `DANUBE_LISTEN`, `DANUBE_ADVERTISED_ADDR`, `DANUBE_SEED_NODES`, `DANUBE_AUTH`, `DANUBE_JWT_SECRET`, `DANUBE_EDGE_NAME`, `DANUBE_CLOUD_ENDPOINT` and `DANUBE_CLOUD_TOKEN`.
+
+## Keep your data safe
+
+Danube refuses to do surprising things with a data directory.
+
+- **Each directory remembers its mode.** The first start writes `danube-node.json` into the data directory. Starting the same directory with another mode is refused, so a standalone directory is never silently reused by a cluster node.
+- **Reusing a directory resumes the node.** A directory that already holds Raft state always resumes its node identity and membership. `--seed-nodes` is only used on first boot; on later starts Danube prints a warning and ignores it.
+- **The default directory is announced.** When standalone creates a new node in the default `./danube-data`, it warns you, because starting from another directory would create a different, empty node.
+
+If you start a directory with the wrong mode, Danube stops with a message like this:
+
+```text
+Error: data directory /var/lib/danube was initialised by a `danube up standalone` node; refusing to start it as `cluster`.
+Reusing it would mix incompatible metadata. Either run `danube up standalone --data-dir /var/lib/danube` or choose a different --data-dir.
 ```
 
-```bash title="Broker 3"
-danube up --mode cluster \
-  --broker-addr 0.0.0.0:6652 \
-  --raft-addr 0.0.0.0:7652 \
-  --data-dir ./data3 \
-  --seed-nodes "127.0.0.1:7650,127.0.0.1:7651,127.0.0.1:7652"
+## Preview a node with --dry-run
+
+Every start prints a short summary of what the node will do. Add `--dry-run` to see it without starting anything:
+
+```bash
+danube up cluster --data-dir /var/lib/danube --dry-run
 ```
 
-Once the cluster boots, configure shared storage, write buffers, WAL retention, load management, and topics dynamically via `danube ctl cluster ...` or declaratively via `danube ctl apply -f desired_state.yaml`. See [Configuration Workflow](/getting-started/configuration-workflow/).
+```text
+Danube 0.16.0 | cluster node (dry run)
+  data dir      /var/lib/danube  [new node]
+  wal dir       /var/lib/danube/wal
+  role          all
+  listen        127.0.0.1:6650
+  admin         127.0.0.1:6650 (shared with listen)
+  advertised    http://127.0.0.1:6650
+  raft port     7650
+  auth          none
+  membership    single-node (implicit)
 
-### Cluster Features
+  warning: no membership flag given; bootstrapping a NEW single-node cluster.
+           Pass --seed-nodes to form a multi-node cluster, --join to join a running one,
+           or --single-node to confirm and silence this warning.
+```
 
-- **Leader election & dynamic config**: Embedded Raft (`openraft` + `redb`) manages cluster state and `/cluster/config/*` policies across all brokers.
-- **Node roles (`--node-role`)**: Run general-purpose `all` nodes or dedicate specialized `broker` and `lakehouse` nodes.
-- **Security (`--auth-mode`)**: Enable zero-trust cluster certificates with `--auth-mode auto-tls`, bring custom certs with `--auth-mode tls`, or run unencrypted with `--auth-mode none`.
-- **Load manager**: Assigns and rebalances topics using `fair`, `balanced`, or `weighted_load` strategies.
-- **Broker scaling**: Add nodes dynamically with `--join` or `danube ctl cluster add-node --node-addr <addr>`.
+The `[new node]` tag tells you whether the node is fresh or resuming. Use the dry run to check addresses before you open a firewall or write a container spec.
 
-:::tip
-For containerized or orchestrator deployments, see [Docker Compose](/getting-started/docker-compose/) or [Kubernetes](/getting-started/kubernetes/).
-:::
+## Grow from one to three nodes
 
----
-
-## Edge Mode
-
-Edge mode turns `danube` into a lightweight zero-YAML MQTT gateway that ingests IoT device messages locally, buffers them safely to a WAL during WAN outages, and replicates them over gRPC to your central Danube cluster.
-
-### How It Works
+Start small with `--single-node` and add voters when you need high availability. This example runs all three nodes on one machine, so each one gets its own ports.
 
 <Steps>
-1. Devices publish via standard MQTT (v3.1.1 / v5.0) on `--mqtt-addr` (default `0.0.0.0:1883`)
+1. **Start the first node.**
 
-2. The zero-YAML edge broker routes all MQTT topics (`#`) to `/{edge_name}/ingest` (for example, `/edge1/ingest`)
+   ```bash
+   danube up cluster --data-dir ./data/node1 --single-node
+   ```
 
-3. Messages are batched and written to a durable local WAL in `--data-dir`
+2. **Start two more nodes in join mode.** Each one gets its own client port, Raft port and admin port.
 
-4. A background replicator tails the WAL and streams batches to `--cloud-endpoint` over gRPC
+   ```bash
+   danube up cluster --data-dir ./data/node2 --join \
+     --listen 127.0.0.1:6651 --raft-port 7651 --admin-listen 127.0.0.1:50052
 
-5. If the central cluster is unreachable, messages accumulate locally and resume from the last checkpoint when connectivity returns
+   danube up cluster --data-dir ./data/node3 --join \
+     --listen 127.0.0.1:6652 --raft-port 7652 --admin-listen 127.0.0.1:50053
+   ```
+
+3. **Add them to the cluster as learners.** The command asks the new node for its id and Raft address, then tells the leader to add it.
+
+   ```bash
+   danube cluster node add --node-addr http://127.0.0.1:50052
+   danube cluster node add --node-addr http://127.0.0.1:50053
+   ```
+
+4. **Find each node id and promote the learners to voters.**
+
+   ```bash
+   danube cluster status --endpoint http://127.0.0.1:50052   # shows "Self Node ID"
+   danube cluster node promote --node-id <NODE2_ID>
+   danube cluster node promote --node-id <NODE3_ID>
+   ```
+
+5. **Check the result.** You should see three voters and one leader.
+
+   ```bash
+   danube cluster status
+   danube broker list
+   ```
 </Steps>
 
-### Starting a Zero-YAML Edge Broker
+To take a node out later, run `danube cluster node remove --node-id <ID>`.
 
-No `edge.yaml` file is needed—specify `--mode edge`, `--edge-name`, and `--cloud-endpoint`:
+## Next steps
 
-```bash title="Start edge broker"
-danube up --mode edge \
-  --edge-name edge1 \
-  --cloud-endpoint http://cluster:6650 \
-  --mqtt-addr 0.0.0.0:1883 \
-  --data-dir ./edge-data
-```
-
-Default edge settings (`EdgeConfig`):
-
-| Setting | Default |
-|---------|---------|
-| MQTT listener (`--mqtt-addr`) | `0.0.0.0:1883` |
-| Catch-all topic route | `# -> /{edge_name}/ingest` |
-| Heartbeat interval | `30000 ms` |
-| Max payload size | `256 KiB` (`262144` bytes) |
-| Max concurrent MQTT connections | `10000` |
-
-### Testing with an MQTT Client
-
-```bash title="Publish via MQTT"
-mosquitto_pub -h 127.0.0.1 -p 1883 \
-  -t "device/sensor-1/telemetry" \
-  -m '{"temperature": 25.5, "device_id": "sensor-1"}'
-```
-
-Messages flow through the edge WAL to `/edge1/ingest` on your central cluster, where standard consumers or `danube ctl consume -t /edge1/ingest --subscription edge-reader` can read them. For custom edge overrides or advanced topologies, pass `--recovery-config <path>` and see the [Edge & IoT Overview](/edge/overview/).
-
----
-
-## CLI Reference (`danube up`)
-
-```text title="danube up options"
-danube up [OPTIONS]
-
-Common options:
-  --mode <mode>              cluster (default), standalone, or edge
-  --broker-addr <addr>       Client, Schema & default Admin gRPC address (default: 127.0.0.1:6650)
-  --admin-addr <addr>        Optional separate Admin gRPC listen address
-  --advertised-addr <addr>   Advertised gRPC address for cluster discovery
-  --connect-url <addr>       Proxy or external connect URL advertised to clients
-  --raft-addr <addr>         Raft transport address (default port: 7650)
-  --data-dir <path>          Base data directory (default: ./danube-data)
-  --wal-dir <path>           Optional separate directory for WAL storage
-  --prom-exporter <addr>     Prometheus metrics exporter endpoint
-  --recovery-config <path>   Break-glass recovery / override YAML file
-
-Cluster & security options:
-  --seed-nodes <addrs>       Comma-separated Raft peer addresses
-  --join                     Join an existing Raft cluster
-  --node-role <role>         all (default), broker, or lakehouse
-  --auth-mode <mode>         none, tls, or auto-tls
-  --tls-cert <path>          TLS certificate path
-  --tls-key <path>           TLS private key path
-  --ca-cert <path>           CA certificate path
-  --jwt-secret <secret>      JWT signing secret
-  --super-admins <principals> Comma-separated RBAC super-admin principals
-
-Edge options (--mode edge):
-  --edge-name <name>         Edge node name & target namespace (default: $HOSTNAME / edge-node)
-  --cloud-endpoint <url>     Upstream Danube cluster gRPC URL (required unless --recovery-config)
-  --mqtt-addr <addr>         MQTT listen address (default: 0.0.0.0:1883)
-  --edge-token <token>       Auth token override
-```
-
-For full details on every flag and Raft setting, see [Broker Configuration & CLI Flags](/reference/broker-configuration/).
+<CardGrid>
+  <LinkCard title="Configure Cluster & Topics" href="/getting-started/configuration-workflow/" description="Change storage, WAL and placement live, or apply a manifest." />
+  <LinkCard title="Run Locally" href="/getting-started/local/" description="A hands-on walk through standalone and a three-node cluster." />
+  <LinkCard title="Kubernetes" href="/getting-started/kubernetes/" description="Run a three-node cluster as a StatefulSet." />
+</CardGrid>
