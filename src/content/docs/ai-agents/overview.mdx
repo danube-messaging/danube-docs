@@ -30,32 +30,43 @@ Four topics, four very different guarantees, zero tuning. See [Stream intents](/
 		`audit_log` topics fsync in batches and block on a bad message instead of dropping it. Good for tool-call ledgers and compliance.
 	</Card>
 	<Card title="Branch and replay" icon="random">
-		Fork a topic at an offset or timestamp without copying data. Test a new prompt against yesterday's real inputs.
+		Fork a durable topic at an offset or timestamp (zero-copy for sealed segments; only unsealed WAL tail messages copy). Test a new prompt against real inputs.
 	</Card>
 	<Card title="Agents run the cluster" icon="star">
-		`danube mcp` exposes admin tools, guided prompts and a metrics catalog to Claude Code, Cursor, Antigravity or any MCP client.
+		`danube mcp` exposes 71 admin, schema, RBAC and diagnostic tools, 4 guided prompts and `danube://metrics` to Claude Code, Cursor, VS Code or Antigravity.
 	</Card>
 </CardGrid>
 
 ## Long tasks, leases and request/reply
 
-The Rust client (`danube-client`) has primitives for agent workloads:
+The Rust client (`danube-client`) ships primitives for agent coordination:
 
-- **`extend_lease`**: keep a long tool call from being redelivered while it is still running.
-- **`report_progress`**: save a checkpoint (up to 64 KiB) so the next worker resumes after a crash.
-- **`cancel_task_tree`**: cancel every queued subtask under one root message.
-- **`request_reply`**: send a request and wait for the correlated reply on a reply topic.
+- **`extend_lease`**: keep a long tool call from timing out while it is still running.
+- **`report_progress`**: save a checkpoint (up to 64 KiB in broker dispatcher memory) and extend the lease; if the worker crashes, redelivery attaches `x-danube-checkpoint-b64`.
+- **`cancel_task_tree`**: cancel queued and in-flight subtasks sharing `x-danube-root-msg-id` on a target topic.
+- **`request_reply`**: publish with `x-danube-correlation-id` and `x-danube-reply-to`, then wait on a `Non-Reliable` reply topic for the correlated response.
 
 ```rust
 // Keep a long-running tool call alive and checkpoint it
 consumer.extend_lease(&msg, 30_000).await?;
 consumer.report_progress(&msg, br#"{"step":3}"#.to_vec(), 30_000).await?;
 
-// Agent-to-tool RPC with a 10s timeout
+// Cancel delegated subtasks sharing this message's root task id
+if let Some(root_id) = msg.root_msg_id() {
+    consumer.cancel_task_tree("/agents/subtasks", root_id, Some("parent cancelled".into())).await?;
+}
+
+// Agent-to-tool RPC with a 10s timeout (reply topic should be Non-Reliable)
 let reply = client
     .request_reply("/agents/rpc", "/agents/rpc-replies", payload, None, Duration::from_secs(10))
     .await?;
 ```
+
+Standard agent headers on `StreamMessage` (`danube-core`) are also available today:
+
+- **`x-danube-parent-msg-id`** and **`x-danube-root-msg-id`**: link delegated subtasks back to their parent and root task.
+- **`x-danube-deadline-ms`**: task deadline timestamp in milliseconds.
+- **`x-danube-compute-cost-units`**: attach compute or token cost metadata to messages (typed metadata today; the broker does not schedule or optimize on it yet).
 
 More in [Consumer](/client-libraries/consumer/).
 
@@ -104,6 +115,11 @@ Add it to your IDE or agent config:
 <Aside type="tip">
   Secured cluster? Add `--token`, `--tls-ca` and friends to `args`, or reuse a saved profile with `--context prod`. Destructive MCP tools require explicit confirmation and rebalancing tools support dry runs.
 </Aside>
+
+Pair `danube mcp` with two companion pieces:
+
+- **[`danube-agent-skills`](https://github.com/danube-messaging/danube-agent-skills):** two lightweight skills (`danube-bootstrap` and `danube-messaging`) covering node startup and CLI/SDK produce and consume (`npx skills add danube-messaging/danube-agent-skills`).
+- **[`agent_bench`](https://github.com/danube-messaging/danube/tree/main/agent_bench):** six reproducible end-to-end tasks with verification scripts and release reports proving agents can bootstrap, operate via MCP, message reliably, replay, troubleshoot stalls, and respect RBAC guardrails.
 
 ## Next steps
 
